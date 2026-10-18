@@ -1,4 +1,4 @@
-package main
+package host
 
 import (
 	"encoding/json"
@@ -100,25 +100,8 @@ func share(args []string) error {
 
 func hotplug(cfg *Config, path string, ro bool) error {
 	tag := shareTag(path)
-	sock := filepath.Join(runDir(), tag+".sock")
-	os.Remove(sock)
-
-	bind := "BindPaths=" + path
-	if ro {
-		bind = "BindReadOnlyPaths=" + path
-	}
-	vargs := append([]string{"--user", "--quiet", "--collect",
-		"--unit=" + shareUnit(tag), "--description=hanare share " + path,
-		"-p", "BindsTo=" + unit, "-p", "After=" + unit,
-		"-p", "ProtectHome=tmpfs", "-p", "ProtectSystem=strict",
-		"-p", "PrivateTmp=yes", "-p", "NoNewPrivileges=yes",
-		"-p", bind, "-p", "BindPaths=" + runDir(),
-		"--", virtiofsd}, virtiofsdArgs(sock, path, ro)...)
-	if out, err := exec.Command("systemd-run", vargs...).CombinedOutput(); err != nil {
-		return fmt.Errorf("start virtiofsd: %v: %s", err, out)
-	}
-	if err := waitSocket(sock); err != nil {
-		stopUnit(shareUnit(tag))
+	sock, err := startShare(path, ro, true)
+	if err != nil {
 		return err
 	}
 

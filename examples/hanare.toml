@@ -27,3 +27,5 @@ path = "~/Work"
 [commands]
 # ~/.local/bin links that run these commands in the guest ("hanare link" syncs them).
 expose = []
+# Commands that always run without network (like "hanare run --offline").
+offline = []

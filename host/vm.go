@@ -1,4 +1,4 @@
-package main
+package host
 
 import (
 	"encoding/base64"
@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -25,7 +24,6 @@ const (
 	qemu      = "/usr/bin/qemu-system-x86_64"
 	ovmfCode  = "/usr/share/edk2/x64/OVMF_CODE.4m.fd"
 	ovmfVars  = "/usr/share/edk2/x64/OVMF_VARS.4m.fd"
-	netUnit   = "hanare-net.service"
 	// Guest-visible DNS address; passt forwards queries sent to it. Taken from
 	// TEST-NET-1 so it never clashes with a real host.
 	guestDNS = "192.0.2.53"
@@ -51,14 +49,53 @@ func unitActive() bool {
 	return exec.Command("systemctl", "--user", "is-active", "--quiet", unit).Run() == nil
 }
 
-// startUnit starts the network unit and then "hanare _vm" as a transient
-// user service, so the VM and its helpers live in one cgroup that systemd
-// cleans up as a whole.
-func startUnit() error {
-	exe, err := os.Executable()
-	if err != nil {
-		return err
+// Units started by "hanare up", all transient user services:
+//
+//	hanare.service              QEMU itself
+//	hanare-net.service          pasta + passt (guest networking, LAN block)
+//	hanare-vsock.service        vhost-device-vsock (SSH transport)
+//	hanare-share-<tag>.service  one virtiofsd per shared directory
+//
+// Helpers are PartOf=hanare.service, so stopping the VM stops them.
+const (
+	netUnit   = "hanare-net.service"
+	vsockUnit = "hanare-vsock.service"
+)
+
+// sandboxProps confines a unit to the given $HOME paths: QEMU or a helper
+// that is compromised sees nothing else from $HOME and cannot write outside.
+func sandboxProps(rw, ro []string) []string {
+	props := []string{
+		"-p", "ProtectHome=tmpfs",
+		"-p", "ProtectSystem=strict",
+		"-p", "PrivateTmp=yes",
 	}
+	if len(rw) > 0 {
+		props = append(props, "-p", "BindPaths="+strings.Join(rw, " "))
+	}
+	if len(ro) > 0 {
+		props = append(props, "-p", "BindReadOnlyPaths="+strings.Join(ro, " "))
+	}
+	return props
+}
+
+// runUnit starts a transient user service running argv.
+func runUnit(name, description string, props []string, argv ...string) error {
+	args := []string{"--user", "--quiet", "--collect", "--unit=" + name, "--description=" + description}
+	args = append(args, props...)
+	args = append(append(args, "--"), argv...)
+	if out, err := exec.Command("systemd-run", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("start %s: %v: %s", name, err, out)
+	}
+	return nil
+}
+
+// stopAll stops the VM and every helper unit, including leftovers.
+func stopAll() {
+	exec.Command("systemctl", "--user", "stop", unit, "hanare-*.service").Run()
+}
+
+func startUnit() error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -66,118 +103,7 @@ func startUnit() error {
 	if err := ensureHostKey(false); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(runDir(), 0o700); err != nil {
-		return err
-	}
-	// Even if QEMU or a helper is compromised, it sees only the shared
-	// directories and hanare's own files from $HOME, and nothing writable
-	// outside them.
-	rw := []string{stateDir(), runDir()}
-	ro := []string{configDir(), cfg.Guest.Flake, exe, libexecDir()}
-	if real, err := filepath.EvalSymlinks(configFile()); err == nil {
-		ro = append(ro, real)
-	}
-	for _, s := range cfg.Shares {
-		p, err := cfg.resolveShare(s.Path)
-		if err != nil {
-			return fmt.Errorf("%s: %w", configFile(), err)
-		}
-		if s.ReadOnly {
-			ro = append(ro, p)
-		} else {
-			rw = append(rw, p)
-		}
-	}
-	if err := startNet(cfg, exe); err != nil {
-		return fmt.Errorf("network: %w", err)
-	}
-	cmd := exec.Command("systemd-run", "--user", "--quiet", "--collect",
-		"--unit="+unit, "--description=hanare VM",
-		"-p", "ProtectHome=tmpfs",
-		"-p", "ProtectSystem=strict",
-		"-p", "PrivateTmp=yes",
-		"-p", "NoNewPrivileges=yes",
-		// QEMU and its helpers only talk over AF_UNIX (networking is passt's).
-		"-p", "RestrictAddressFamilies=AF_UNIX",
-		"-p", "LockPersonality=yes",
-		"-p", "RestrictRealtime=yes",
-		"-p", "RestrictSUIDSGID=yes",
-		"-p", "SystemCallArchitectures=native",
-		"-p", "BindPaths="+strings.Join(rw, " "),
-		"-p", "BindReadOnlyPaths="+strings.Join(ro, " "),
-		// The client key logs into the guest; QEMU never needs it.
-		"-p", "InaccessiblePaths="+keyPath(),
-		"--", exe, "_vm")
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		stopUnit(netUnit)
-		return err
-	}
-	return nil
-}
-
-// startNet runs passt inside a rootless network namespace provided by pasta
-// (hanare-net.service), where "hanare _net" installs the LAN block first:
-// the filter sits outside the guest, so guest root cannot remove it.
-func startNet(cfg *Config, exe string) error {
-	stopUnit(netUnit)
-	sock := filepath.Join(runDir(), "passt.sock")
-	os.Remove(sock)
-	lan := "--block-lan"
-	if cfg.Network.AllowLAN {
-		lan = "--allow-lan"
-	}
-	out, err := exec.Command("systemd-run", "--user", "--quiet", "--collect",
-		"--unit="+netUnit, "--description=hanare network (pasta + passt)",
-		"-p", "PartOf="+unit,
-		"-p", "ProtectHome=tmpfs",
-		"-p", "ProtectSystem=strict",
-		"-p", "PrivateTmp=yes",
-		// No NoNewPrivileges here: it stops passt from setting up its own
-		// user namespace inside pasta's. passt and pasta drop privileges and
-		// apply seccomp themselves.
-		"-p", "BindPaths="+runDir(),
-		"-p", "BindReadOnlyPaths="+exe,
-		"--", pasta, "--config-net", "--quiet",
-		"--no-map-gw", "--map-host-loopback", "none", "--dns-forward", nsDNS,
-		"--", exe, "_net", lan).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%v: %s", err, out)
-	}
-	if err := waitSocket(sock); err != nil {
-		stopUnit(netUnit)
-		return err
-	}
-	return nil
-}
-
-// execNet runs inside hanare-net's namespace (as its root): block LAN
-// destinations, then become passt. passt has no host-loopback mapping and
-// forwards the guest's DNS through pasta to the host resolver.
-func execNet(args []string) error {
-	if len(args) != 1 || (args[0] != "--block-lan" && args[0] != "--allow-lan") {
-		return errors.New("usage: hanare _net --block-lan|--allow-lan")
-	}
-	if args[0] == "--block-lan" {
-		cmd := exec.Command(nft, "-f", "-")
-		cmd.Stdin = strings.NewReader(lanBlockRules)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("nft: %v: %s", err, out)
-		}
-	}
-	sock := filepath.Join(runDir(), "passt.sock")
-	return syscall.Exec(passt, []string{passt, "--foreground", "--quiet", "--one-off",
-		"--socket", sock, "--no-map-gw",
-		"--dns", guestDNS, "--dns-forward", guestDNS, "--dns-host", nsDNS}, os.Environ())
-}
-
-// execVM starts virtiofsd per share and the vsock backend, then execs QEMU,
-// which becomes the unit's main process. Runs inside hanare.service.
-func execVM() error {
-	cfg, err := loadConfig()
-	if err != nil {
-		return err
-	}
+	stopAll()
 	run := runDir()
 	if err := os.MkdirAll(run, 0o700); err != nil {
 		return err
@@ -188,17 +114,131 @@ func execVM() error {
 			return err
 		}
 	}
+	// Runtime shares do not survive a VM restart.
+	os.RemoveAll(sharesStateDir())
+
+	args, err := qemuArgs(cfg)
+	if err == nil {
+		err = startNet(cfg)
+	}
+	if err == nil {
+		err = startVsock(cfg)
+	}
+	if err == nil {
+		err = runUnit(unit, "hanare VM", append(sandboxProps(
+			[]string{stateDir(), run},
+			[]string{cfg.Guest.Flake},
+		),
+			"-p", "NoNewPrivileges=yes",
+			// QEMU only talks over AF_UNIX (networking is passt's).
+			"-p", "RestrictAddressFamilies=AF_UNIX",
+			"-p", "LockPersonality=yes",
+			"-p", "RestrictRealtime=yes",
+			"-p", "RestrictSUIDSGID=yes",
+			"-p", "SystemCallArchitectures=native",
+			// The client key logs into the guest; QEMU never needs it.
+			"-p", "InaccessiblePaths="+keyPath(),
+		), args...)
+	}
+	if err != nil {
+		stopAll()
+	}
+	return err
+}
+
+// startShare starts virtiofsd for path as hanare-share-<tag>.service and
+// returns its vhost-user socket. hotplugged shares bind to the running VM.
+func startShare(path string, ro, hotplugged bool) (string, error) {
+	tag := shareTag(path)
+	sock := filepath.Join(runDir(), tag+".sock")
+	os.Remove(sock)
+	rw, roPaths := []string{runDir()}, []string{}
+	if ro {
+		roPaths = append(roPaths, path)
+	} else {
+		rw = append(rw, path)
+	}
+	props := append(sandboxProps(rw, roPaths), "-p", "NoNewPrivileges=yes")
+	if hotplugged {
+		props = append(props, "-p", "BindsTo="+unit, "-p", "After="+unit)
+	} else {
+		props = append(props, "-p", "PartOf="+unit)
+	}
+	if err := runUnit(shareUnit(tag), "hanare share "+path, props,
+		append([]string{virtiofsd}, virtiofsdArgs(sock, path, ro)...)...); err != nil {
+		return "", err
+	}
+	if err := waitSocket(sock); err != nil {
+		stopUnit(shareUnit(tag))
+		return "", err
+	}
+	return sock, nil
+}
+
+// startNet runs passt inside a rootless network namespace provided by pasta.
+// Unless network.allow_lan is set, nftables in that namespace first blocks
+// LAN destinations: the filter sits outside the guest, so guest root cannot
+// remove it. Neither maps the host's loopback; the guest's DNS is forwarded
+// through pasta to the host resolver.
+func startNet(cfg *Config) error {
+	sock := filepath.Join(runDir(), "passt.sock")
+	os.Remove(sock)
+	passtCmd := []string{passt, "--foreground", "--quiet", "--one-off",
+		"--socket", sock, "--no-map-gw",
+		"--dns", guestDNS, "--dns-forward", guestDNS, "--dns-host", nsDNS}
+	inner := passtCmd
+	if !cfg.Network.AllowLAN {
+		rules := filepath.Join(runDir(), "lan-block.nft")
+		if err := os.WriteFile(rules, []byte(lanBlockRules), 0o600); err != nil {
+			return err
+		}
+		quoted := make([]string, len(passtCmd))
+		for i, a := range passtCmd {
+			quoted[i] = shellQuote(a)
+		}
+		inner = []string{"/bin/sh", "-c", nft + " -f " + shellQuote(rules) + " && exec " + strings.Join(quoted, " ")}
+	}
+	// No NoNewPrivileges here: it stops passt from setting up its own user
+	// namespace inside pasta's. passt and pasta drop privileges and apply
+	// seccomp themselves.
+	props := append(sandboxProps([]string{runDir()}, nil), "-p", "PartOf="+unit)
+	argv := append([]string{pasta, "--config-net", "--quiet",
+		"--no-map-gw", "--map-host-loopback", "none", "--dns-forward", nsDNS, "--"}, inner...)
+	if err := runUnit(netUnit, "hanare network (pasta + passt)", props, argv...); err != nil {
+		return err
+	}
+	return waitSocket(sock)
+}
+
+// startVsock runs vhost-device-vsock: the host side of the guest's vsock is
+// an AF_UNIX socket in our 0700 runtime dir instead of AF_VSOCK, which any
+// host user can connect to, and the host kernel never parses guest vsock
+// packets.
+func startVsock(cfg *Config) error {
+	ctl := filepath.Join(runDir(), "vhost-vsock.sock")
+	os.Remove(ctl)
+	os.Remove(vsockSock())
+	props := append(sandboxProps([]string{runDir()}, []string{vhostVsock()}),
+		"-p", "NoNewPrivileges=yes", "-p", "RestrictAddressFamilies=AF_UNIX", "-p", "PartOf="+unit)
+	if err := runUnit(vsockUnit, "hanare vsock (vhost-device-vsock)", props,
+		vhostVsock(), "--guest-cid", strconv.FormatUint(uint64(cfg.VM.VsockCID), 10),
+		"--socket", ctl, "--uds-path", vsockSock()); err != nil {
+		return err
+	}
+	return waitSocket(ctl)
+}
+
+// qemuArgs starts the configured shares and returns the QEMU command line.
+func qemuArgs(cfg *Config) ([]string, error) {
+	run := runDir()
 	pubKey, err := os.ReadFile(keyPath() + ".pub")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	hostKey, err := os.ReadFile(hostKeyPath())
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	// Runtime shares do not survive a VM restart.
-	os.RemoveAll(sharesStateDir())
 
 	// Configured shares, plus the guest flake that "hanare switch" builds from.
 	type mount struct {
@@ -209,19 +249,18 @@ func execVM() error {
 	for _, s := range cfg.Shares {
 		p, err := cfg.resolveShare(s.Path)
 		if err != nil {
-			return err
+			return nil, fmt.Errorf("%s: %w", configFile(), err)
 		}
 		mounts = append(mounts, mount{Share{Path: p, ReadOnly: s.ReadOnly}, p})
 	}
 	var devArgs []string
 	var fstab strings.Builder
 	for _, m := range mounts {
-		tag := shareTag(m.share.Path)
-		sock := filepath.Join(run, tag+".sock")
-		os.Remove(sock)
-		if err := startHelper(sock, virtiofsd, virtiofsdArgs(sock, m.share.Path, m.share.ReadOnly)...); err != nil {
-			return fmt.Errorf("virtiofsd for %s: %w", m.share.Path, err)
+		sock, err := startShare(m.share.Path, m.share.ReadOnly, false)
+		if err != nil {
+			return nil, fmt.Errorf("share %s: %w", m.share.Path, err)
 		}
+		tag := shareTag(m.share.Path)
 		devArgs = append(devArgs,
 			"-chardev", "socket,id=fs-"+tag+",path="+sock,
 			"-device", "vhost-user-fs-pci,chardev=fs-"+tag+",tag="+tag)
@@ -231,18 +270,6 @@ func execVM() error {
 	// Empty PCIe root ports for "hanare share" to hot-plug into.
 	for i := 0; i < hotplugPorts; i++ {
 		devArgs = append(devArgs, "-device", fmt.Sprintf("pcie-root-port,id=hp%d,chassis=%d", i, i+1))
-	}
-
-	// vsock through a vhost-user backend: the host side is an AF_UNIX socket
-	// in our 0700 runtime dir instead of AF_VSOCK, which any host user can
-	// connect to, and the host kernel never parses guest vsock packets.
-	vsockCtl := filepath.Join(run, "vhost-vsock.sock")
-	os.Remove(vsockCtl)
-	os.Remove(vsockSock())
-	if err := startHelper(vsockCtl, vhostVsock(),
-		"--guest-cid", strconv.FormatUint(uint64(cfg.VM.VsockCID), 10),
-		"--socket", vsockCtl, "--uds-path", vsockSock()); err != nil {
-		return fmt.Errorf("vhost-device-vsock: %w", err)
 	}
 
 	cred := func(name string, data []byte) []string {
@@ -259,11 +286,11 @@ func execVM() error {
 		"-smp", strconv.Itoa(cfg.VM.CPUs), "-m", cfg.VM.Memory,
 		"-object", "memory-backend-memfd,id=mem,size=" + cfg.VM.Memory + ",share=on",
 		"-drive", "if=pflash,format=raw,readonly=on,file=" + ovmfCode,
-		"-drive", "if=pflash,format=raw,file=" + vars,
+		"-drive", "if=pflash,format=raw,file=" + filepath.Join(stateDir(), "OVMF_VARS.fd"),
 		"-drive", "if=virtio,format=raw,discard=unmap,file=" + diskPath(),
 		"-netdev", "stream,id=net0,server=off,addr.type=unix,addr.path=" + filepath.Join(run, "passt.sock"),
 		"-device", "virtio-net-pci,netdev=net0",
-		"-chardev", "socket,id=vsock0,path=" + vsockCtl,
+		"-chardev", "socket,id=vsock0,path=" + filepath.Join(run, "vhost-vsock.sock"),
 		"-device", "vhost-user-vsock-pci,chardev=vsock0",
 	}
 	// Guest systemd reads fstab.extra as extra fstab entries; the SSH keys are
@@ -280,17 +307,7 @@ func execVM() error {
 		"-qmp", "unix:"+filepath.Join(run, "qmp.sock")+",server=on,wait=off",
 		"-sandbox", "on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny",
 	)
-	return syscall.Exec(qemu, args, os.Environ())
-}
-
-// startHelper starts a background process and waits for its socket to appear.
-func startHelper(sock, path string, args ...string) error {
-	cmd := exec.Command(path, args...)
-	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	return waitSocket(sock)
+	return args, nil
 }
 
 func waitSocket(sock string) error {
@@ -334,9 +351,7 @@ func down() error {
 			time.Sleep(500 * time.Millisecond)
 		}
 	}
-	if unitActive() {
-		return exec.Command("systemctl", "--user", "stop", unit).Run()
-	}
+	stopAll()
 	fmt.Println("hanare: down")
 	return nil
 }

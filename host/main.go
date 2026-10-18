@@ -1,13 +1,15 @@
-// Command hanare manages the hanare NixOS VM and runs commands inside it.
+// Package host implements the hanare commands that run on the host: managing
+// the VM and running commands inside it.
 //
-// Invoked as "hanare <subcommand>", or through a symlink named after a tool
-// (see "hanare link"), in which case that tool runs inside the VM in the
+// hanare is invoked as "hanare <command>", or through a symlink named after a
+// tool (see "hanare link"), in which case that tool runs inside the VM in the
 // current directory.
-package main
+package host
 
 import (
 	"bufio"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,11 +18,14 @@ import (
 
 const usage = `usage: hanare <command> [args...]
 
-  run CMD [ARGS...]   run CMD in the VM, in the current directory (starts the VM if needed)
+  run [--offline] CMD [ARGS...]
+                      run CMD in the VM, in the current directory (starts the VM if needed);
+                      --offline (or commands.offline in hanare.toml): no network for CMD
   shell               interactive login shell in the VM
   up                  start the VM and wait until it accepts SSH
   down                shut the VM down
   status              show VM state
+  audit [-f] [-n N]   show the guest activity log (executions, connections, writes)
   logs                print the VM console log
   switch              apply the guest flake to the running VM (nixos-rebuild switch)
   reinstall [-y]      build a fresh disk image from the guest flake and replace the VM disk
@@ -35,15 +40,15 @@ const usage = `usage: hanare <command> [args...]
   link TOOL...        create ~/.local/bin/TOOL links that run TOOL in the VM
   unlink TOOL...      remove such links
   links               list such links
+
+guest commands (run inside the VM by its systemd units):
+  guest restrict-userns | unrestrict-userns | audit [-uid N]
 `
 
-func main() {
-	os.Exit(dispatch())
-}
-
-func dispatch() int {
+// Main runs the hanare command line on the host and returns the exit status.
+func Main() int {
 	if name := filepath.Base(os.Args[0]); name != "hanare" {
-		return runCmd(append([]string{name}, os.Args[1:]...))
+		return runCmd(append([]string{name}, os.Args[1:]...), false)
 	}
 	if len(os.Args) < 2 {
 		fmt.Fprint(os.Stderr, usage)
@@ -54,6 +59,10 @@ func dispatch() int {
 	var err error
 	switch cmd {
 	case "run":
+		offline := false
+		if len(args) > 0 && args[0] == "--offline" {
+			offline, args = true, args[1:]
+		}
 		if len(args) > 0 && args[0] == "--" {
 			args = args[1:]
 		}
@@ -61,7 +70,9 @@ func dispatch() int {
 			fmt.Fprint(os.Stderr, usage)
 			return 2
 		}
-		return runCmd(args)
+		return runCmd(args, offline)
+	case "audit":
+		return auditLog(args)
 	case "shell":
 		return shell()
 	case "up":
@@ -88,10 +99,6 @@ func dispatch() int {
 		err = unlink(args)
 	case "links":
 		err = listLinks()
-	case "_vm":
-		err = execVM()
-	case "_net":
-		err = execNet(args)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:
@@ -105,7 +112,7 @@ func dispatch() int {
 	return 0
 }
 
-func runCmd(argv []string) int {
+func runCmd(argv []string, offline bool) int {
 	cfg, err := loadConfig()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hanare: %v\n", err)
@@ -115,6 +122,12 @@ func runCmd(argv []string) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hanare: %v\n", err)
 		return 125
+	}
+	for _, c := range cfg.Commands.Offline {
+		offline = offline || c == filepath.Base(argv[0])
+	}
+	if offline {
+		cfg.sshPort = 23
 	}
 	quoted := make([]string, len(argv))
 	for i, a := range argv {
@@ -134,6 +147,25 @@ func shell() int {
 		dir = "/home/" + guestUser()
 	}
 	return cfg.remote("cd "+shellQuote(dir)+` && exec "$SHELL" -l`, true)
+}
+
+// auditLog shows the guest's activity log (hanare-audit.service, one JSON
+// object per line), optionally following it.
+func auditLog(args []string) int {
+	fs := flag.NewFlagSet("audit", flag.ExitOnError)
+	follow := fs.Bool("f", false, "follow")
+	n := fs.Int("n", 100, "number of lines")
+	fs.Parse(args)
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hanare: %v\n", err)
+		return 125
+	}
+	cmd := fmt.Sprintf("journalctl -u hanare-audit.service -o cat --no-pager -n %d", *n)
+	if *follow {
+		cmd += " -f"
+	}
+	return cfg.remote(cmd, false)
 }
 
 // switchConfig rebuilds the guest from the read-only config share and

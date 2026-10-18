@@ -1,4 +1,4 @@
-package main
+package host
 
 import (
 	"bytes"
@@ -20,15 +20,15 @@ import (
 	"golang.org/x/term"
 )
 
-// dialGuest connects to guest vsock port 22 through vhost-device-vsock's
-// host socket ("hybrid vsock": send "CONNECT <port>", expect "OK <port>").
-func dialGuest() (net.Conn, error) {
+// dialGuest connects to a guest vsock port through vhost-device-vsock's host
+// socket ("hybrid vsock": send "CONNECT <port>", expect "OK <port>").
+func dialGuest(port uint32) (net.Conn, error) {
 	c, err := net.DialTimeout("unix", vsockSock(), 2*time.Second)
 	if err != nil {
 		return nil, err
 	}
 	c.SetDeadline(time.Now().Add(5 * time.Second))
-	if _, err := io.WriteString(c, "CONNECT 22\n"); err != nil {
+	if _, err := fmt.Fprintf(c, "CONNECT %d\n", port); err != nil {
 		c.Close()
 		return nil, err
 	}
@@ -63,7 +63,11 @@ func (c *Config) dial() (*ssh.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	conn, err := dialGuest()
+	port := c.sshPort
+	if port == 0 {
+		port = 22
+	}
+	conn, err := dialGuest(port)
 	if err != nil {
 		return nil, err
 	}

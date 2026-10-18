@@ -1,4 +1,4 @@
-package main
+package host
 
 import (
 	"crypto/sha256"
@@ -14,7 +14,7 @@ import (
 )
 
 // Config mirrors ~/.config/hanare/hanare.toml (host side). Guest-side
-// settings live in the guest flake (see nix/guest.nix).
+// settings live in the guest flake (see guest/module.nix).
 type Config struct {
 	Guest struct {
 		Flake string `toml:"flake"`
@@ -30,8 +30,13 @@ type Config struct {
 	} `toml:"network"`
 	Shares   []Share `toml:"share"`
 	Commands struct {
-		Expose []string `toml:"expose"`
+		Expose  []string `toml:"expose"`
+		Offline []string `toml:"offline"`
 	} `toml:"commands"`
+
+	// sshPort selects the guest sshd: 22 (default) or 23 for offline
+	// sessions, whose processes cannot reach the network.
+	sshPort uint32
 }
 
 // Share is a host directory exposed to the guest at the same path.

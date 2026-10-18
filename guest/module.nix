@@ -4,6 +4,7 @@
 
 let
   cfg = config.hanare;
+  hanare = (import ../nix/packages.nix { inherit pkgs; }).hanare;
   user = cfg.user;
   home = "/home/${user}";
   protect = cfg.protectShares;
@@ -56,31 +57,12 @@ let
     done
   '';
 
-  # Compiled BPF LSM program (see namegate.bpf.c).
-  nameGateObj = pkgs.runCommand "hanare-namegate.bpf.o" {
-    nativeBuildInputs = [ pkgs.llvmPackages.clang-unwrapped ];
-  } ''
-    clang -O2 -g -target bpf -D__TARGET_ARCH_x86 \
-      -I${pkgs.libbpf}/include -I${pkgs.linuxHeaders}/include \
-      -c ${./namegate.bpf.c} -o $out
-  '';
-
-  # Loads the name gate and fills denied_names (keys zero-padded to 64 bytes).
-  nameGateLoad = pkgs.writeShellScript "hanare-namegate-load" ''
-    set -euo pipefail
-    export PATH=${lib.makeBinPath (with pkgs; [ bpftools coreutils gnugrep ])}
-    grep -qw bpf /sys/kernel/security/lsm || { echo "BPF LSM is not active" >&2; exit 1; }
-    d=/sys/fs/bpf/hanare-namegate
-    rm -rf "$d"
-    mkdir -p "$d"
-    bpftool prog loadall ${nameGateObj} "$d/progs" pinmaps "$d/maps" autoattach
-    for name in ${lib.escapeShellArgs protectedNames}; do
-      key=$(printf '%s' "$name" | head -c 64 | od -An -v -tx1)
-      pad=$(( 64 - ''${#name} ))
-      (( pad > 0 )) && key="$key $(head -c "$pad" /dev/zero | od -An -v -tx1)"
-      bpftool map update pinned "$d/maps/denied_names" key hex $key value hex 01
-    done
-  '';
+  # sshd for one vsock connection (see the hanare-ssh sockets).
+  sshdService = {
+    ExecStart = "-${config.services.openssh.package}/bin/sshd -i -f /etc/ssh/sshd_config -o UsePAM=no";
+    StandardInput = "socket";
+    StandardError = "journal";
+  };
 
   # Mounts a hot-plugged share; instance = systemd-escape "TAG|ro|PATH".
   # Only tags made by the host and mount points the user owns below its home
@@ -113,23 +95,30 @@ in
       type = lib.types.str;
       description = "Guest login user; must be the host user that runs hanare (UID/GID 1000 in the guest).";
     };
+    restrictUserNamespaces = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Deny creating user namespaces to everyone but root (BPF LSM), a common
+        first step of kernel exploits. Root, e.g. the nix-daemon build
+        sandbox, is unaffected.
+      '';
+    };
+    audit = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Log program executions, outgoing connections and files opened for
+        writing by the guest user (BPF), per session; see "hanare audit".
+      '';
+    };
     protectShares = lib.mkOption {
       type = lib.types.bool;
       default = true;
       description = ''
         Keep existing host-executed configuration in writable shares (.git,
         .claude, .mcp.json, .envrc, .vscode, ...) read-only in the guest.
-        Newly created paths are blocked separately (blockConfigCreation).
-      '';
-    };
-    blockConfigCreation = lib.mkOption {
-      type = lib.types.bool;
-      default = true;
-      description = ''
-        Deny creating those names (create, mkdir, mknod, symlink, link,
-        rename) on the virtiofs shares, via a BPF LSM program. Guest root
-        could unload it; unprivileged processes cannot. Also blocks e.g.
-        `git init` inside shares from the guest.
+        Newly created paths are not blocked.
       '';
     };
   };
@@ -191,6 +180,15 @@ in
     };
     systemd.tmpfiles.rules = [ "z ${home} 0700 ${user} ${user} -" ];
 
+    # Less kernel attack surface and information for unprivileged processes.
+    boot.kernel.sysctl = {
+      "kernel.io_uring_disabled" = 2;
+      "kernel.unprivileged_bpf_disabled" = 1;
+      "kernel.perf_event_paranoid" = 2;
+      "kernel.kptr_restrict" = 2;
+      "kernel.dmesg_restrict" = 1;
+    };
+
     # passt (user-mode networking): plain DHCP on the virtio NIC.
     networking.useNetworkd = true;
     networking.useDHCP = true;
@@ -209,7 +207,8 @@ in
       group = user;
       # Lets "hanare switch" stream the rebuild log.
       extraGroups = [ "systemd-journal" ];
-      hashedPassword = "!";
+      # "*" rather than "!": without PAM, OpenSSH refuses "!"-locked accounts.
+      hashedPassword = "*";
     };
     users.groups.${user}.gid = 1000;
     security.sudo.enable = false;
@@ -252,6 +251,9 @@ in
         install -m 0600 "$CREDENTIALS_DIRECTORY/hanare.ssh.host_key" /run/hanare/ssh_host_ed25519_key
       '';
     };
+    # Port 22: normal sessions; port 23: offline sessions ("hanare run
+    # --offline"). sshd runs without PAM, so a session's processes stay in
+    # the per-connection unit's cgroup and its restrictions apply to them.
     systemd.sockets.hanare-ssh = {
       wantedBy = [ "sockets.target" ];
       socketConfig = {
@@ -259,15 +261,29 @@ in
         Accept = true;
       };
     };
-    systemd.services."hanare-ssh@" = {
-      # No ordering on hanare-ssh-keys: with Accept=yes it would put the socket
-      # in an ordering cycle. The keys exist long before the host connects, and
-      # hanare retries until SSH succeeds.
-      serviceConfig = {
-        ExecStart = "-${config.services.openssh.package}/bin/sshd -i -f /etc/ssh/sshd_config";
-        StandardInput = "socket";
-        StandardError = "journal";
+    systemd.sockets.hanare-ssh-offline = {
+      wantedBy = [ "sockets.target" ];
+      socketConfig = {
+        ListenStream = "vsock::23";
+        Accept = true;
       };
+    };
+    # No ordering on hanare-ssh-keys: with Accept=yes it would put the socket
+    # in an ordering cycle. The keys exist long before the host connects, and
+    # hanare retries until SSH succeeds.
+    systemd.services."hanare-ssh@".serviceConfig = sshdService;
+    systemd.services."hanare-ssh-offline@".serviceConfig = sshdService // {
+      # No IP at all (cgroup BPF), and no other way out: the resolver (also
+      # via nsncd, NSS's caching daemon), D-Bus and the nix-daemon (which
+      # fetches on a client's behalf) are hidden.
+      PrivateNetwork = true;
+      IPAddressDeny = "any";
+      InaccessiblePaths = [
+        "-/run/nscd"
+        "-/run/systemd/resolve"
+        "-/run/dbus/system_bus_socket"
+        "-/nix/var/nix/daemon-socket"
+      ];
     };
 
     # Shares: configured ones arrive as the fstab.extra credential at boot,
@@ -299,17 +315,26 @@ in
         AccuracySec = "5s";
       };
     };
-    # hanare.blockConfigCreation: BPF LSM name gate on the virtiofs shares.
-    # Starts before user sessions so commands never run without it.
-    systemd.services.hanare-namegate = lib.mkIf cfg.blockConfigCreation {
+    # hanare.restrictUserNamespaces / hanare.audit: BPF programs loaded by
+    # "hanare guest ...", before user sessions so no command runs without them.
+    systemd.services.hanare-userns = lib.mkIf cfg.restrictUserNamespaces {
       wantedBy = [ "multi-user.target" ];
       before = [ "systemd-user-sessions.service" ];
       after = [ "sys-fs-bpf.mount" ];
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
-        ExecStart = "${nameGateLoad}";
-        ExecStop = "${pkgs.coreutils}/bin/rm -rf /sys/fs/bpf/hanare-namegate";
+        ExecStart = "${hanare}/bin/hanare guest restrict-userns";
+        ExecStop = "${hanare}/bin/hanare guest unrestrict-userns";
+      };
+    };
+    systemd.services.hanare-audit = lib.mkIf cfg.audit {
+      wantedBy = [ "multi-user.target" ];
+      before = [ "systemd-user-sessions.service" ];
+      serviceConfig = {
+        ExecStart = "${hanare}/bin/hanare guest audit -uid 1000";
+        Restart = "always";
+        RestartSec = "2s";
       };
     };
 

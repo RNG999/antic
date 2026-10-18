@@ -1,4 +1,4 @@
-module hanare
+module github.com/RNG999/hanare
 
 go 1.26.0
 
@@ -9,3 +9,5 @@ require (
 )
 
 require github.com/BurntSushi/toml v1.6.0
+
+require github.com/cilium/ebpf v0.22.0

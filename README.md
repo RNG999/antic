@@ -7,7 +7,13 @@ executes a command inside the VM in your current directory.
 
 ## How it works
 
-- **VM:** QEMU (KVM) runs as a transient user unit, `hanare.service`.
+- **Units:** everything runs as transient user units, visible with
+  `systemctl --user list-units 'hanare*'`:
+  - `hanare.service` runs QEMU;
+  - `hanare-net.service` runs pasta and passt;
+  - `hanare-vsock.service` runs vhost-device-vsock;
+  - `hanare-share-<tag>.service` runs one virtiofsd per share.
+- **VM:** QEMU (KVM) runs in `hanare.service`.
   - The unit is sandboxed with `ProtectHome=tmpfs`, `ProtectSystem=strict`
     and `RestrictAddressFamilies=AF_UNIX`. QEMU sees only the shared
     directories and hanare's own files, not the SSH client key.
@@ -34,6 +40,21 @@ executes a command inside the VM in your current directory.
     no key.
   - sshd allows only that user and no forwarding. The guest has no
     passwords, no sudo and no root login.
+  - Each `hanare run` is one sshd unit instance in the guest (PAM is off,
+    so the session stays in that unit's cgroup).
+  - `hanare run --offline`, and the commands in `commands.offline`, use a
+    second sshd unit with no network at all: a private network namespace
+    plus `IPAddressDeny=any`. The resolver, nsncd, D-Bus and the nix-daemon
+    are hidden there.
+- **Guest kernel (BPF and sysctl):**
+  - Unless `hanare.restrictUserNamespaces = false`, a BPF LSM program
+    denies user namespaces to everyone but root, removing a common first
+    step of kernel exploits.
+  - io_uring and unprivileged BPF are disabled, and perf, kernel pointers
+    and dmesg are restricted.
+  - With `hanare.audit` (default on), a BPF program logs the guest user's
+    program executions, outgoing connections and files opened for writing,
+    per session; see `hanare audit`.
 - **Guest filesystem:**
   - `/` is tmpfs and is reset on every boot.
   - `/nix` is kept on disk under `/persist`. Shortly after every boot it is
@@ -48,10 +69,21 @@ systemd v256 or later.
 You also need Nix with flakes. It can run rootless, for example as a static
 `nix` binary with `store = local?root=$HOME/.local/share/nix-root`.
 
-## Layout
+## Repository
 
 ```
-~/.local/src/hanare/      this repository (CLI + nixosModules.default)
+main.go           entry point of the single hanare binary
+host/             commands that run on the host (VM management, run, share, ...)
+guest/            what runs in the VM: module.nix (nixosModules.default), the
+                  "hanare guest ..." commands and their BPF programs (bpf/)
+nix/packages.nix  builds hanare and the static vhost-device-vsock
+examples/         hanare.toml and a guest flake to start from
+```
+
+## Layout on the host
+
+```
+~/.local/src/hanare/      this repository
 ~/.local/libexec/hanare/  vhost-device-vsock (installed by "hanare update")
 ~/.config/hanare/
 ├── hanare.toml           host settings: VM size, shares, exposed commands
@@ -82,9 +114,10 @@ store root.
 ## Usage
 
 ```
-hanare run CMD...           run CMD in the VM, in the current directory
+hanare run [--offline] CMD...   run CMD in the VM, in the current directory
 hanare shell                interactive shell in the VM
 hanare up | down | status | logs
+hanare audit [-f] [-n N]    guest activity log (JSON lines)
 hanare switch               apply the guest flake to the running VM (nixos-rebuild switch)
 hanare reinstall            replace the VM disk with an image built from the guest flake
 hanare update               rebuild ~/.local/src/hanare and reinstall the hanare binary
