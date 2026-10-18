@@ -1,21 +1,24 @@
 {
-  description = "hanare: NixOS VM sandbox for CLI tools";
+  description = "hanare: run CLI tools in isolated NixOS guests";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
   outputs = { nixpkgs, ... }:
     let
-      packages = import ./nix/packages.nix { pkgs = nixpkgs.legacyPackages.x86_64-linux; };
+      systems = [ "x86_64-linux" "aarch64-linux" ];
+      forAll = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
     in
     {
       # Guest side; import from your guest flake (see examples/guest).
-      nixosModules.default = ./guest/module.nix;
+      nixosModules.guest = ./nix/module.nix;
+      nixosModules.default = ./nix/module.nix;
 
-      # "hanare update" builds these and installs them to ~/.local/bin and
-      # ~/.local/libexec/hanare.
-      packages.x86_64-linux = {
-        default = packages.hanare;
-        inherit (packages) hanare vhost-device-vsock;
-      };
+      # hanare (host CLI), banken (used by the module) and the static
+      # cloud-hypervisor "hanare upgrade" installs.
+      packages = forAll (pkgs:
+        let p = import ./nix/packages.nix { inherit pkgs; };
+        in p // { default = p.hanare; });
+
+      checks = forAll (pkgs: import ./nix/checks.nix { inherit pkgs; });
     };
 }

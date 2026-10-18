@@ -1,102 +1,117 @@
 # hanare
 
-NixOS VMs ("guests") for running CLI tools, especially ones an AI agent
-drives, isolated from the host. Everything runs as your own user, with no root
-daemon. Host directories are shared at the same path, and `hanare run`
-executes a command inside the VM in your current directory.
+hanare runs CLI tools, especially ones an AI agent drives, in NixOS virtual
+machines ("guests") that are isolated from the host. Everything runs as your
+own user; there is no root daemon. Host directories are shared at the same
+path, and `hanare run CMD` runs CMD inside a guest, in your current
+directory.
+
+The guest side is **banken** (番犬, "watchdog"): an agent and BPF programs
+that run inside each guest.
 
 ## How it works
 
-- **Guests:** defined in `hanare.toml` as `[guests.NAME]`; each gets a
-  random ID when its disk is first built. State lives under
-  `~/.local/state/hanare/guests/<ID>/`, and `names/<NAME>` links to it.
-- **Units:** everything runs as transient user units, managed over D-Bus,
-  in one slice per guest (`systemctl --user status hanare-<ID>.slice`):
-  - `hanare@<ID>.service` runs QEMU;
-  - `hanare-net@<ID>.service` runs pasta and passt;
-  - `hanare-vsock@<ID>.service` runs vhost-device-vsock;
-  - `hanare-share@<ID>:<tag>.service` runs one virtiofsd per share.
-- **VM:** QEMU (KVM) runs in `hanare@<ID>.service`.
-  - The unit is sandboxed with `ProtectHome=tmpfs`, `ProtectSystem=strict`
-    and `RestrictAddressFamilies=AF_UNIX`. QEMU sees only the shared
-    directories and hanare's own files, not the SSH client key.
-  - QEMU runs with `-nodefaults`, nested virtualization off and
-    `-sandbox on`.
-- **Shares:** one rootless `virtiofsd` per shared directory. Only your
-  UID/GID is mapped, so files the guest writes are owned by you on the host.
-  `ro` is enforced by virtiofsd itself.
-- **Network:** `passt` runs in a rootless network namespace provided by
-  `pasta` (`hanare-net.service`).
-  - Neither maps the host's loopback, so the guest cannot reach services on
-    the host's `127.0.0.1`.
-  - Unless `allow_lan` is set for the guest, nftables in that namespace rejects
-    private, link-local (including cloud metadata) and CGNAT (Tailscale)
-    destinations. The rules sit outside the guest, so guest root cannot
-    remove them.
-- **Access:** SSH over vsock with a dedicated key.
-  - vsock goes through `vhost-device-vsock`, so the host end is an AF_UNIX
-    socket in hanare's 0700 runtime directory. Other host users cannot reach
-    it, and the host kernel does not parse guest vsock traffic.
-  - The host generates the guest's SSH host key and pins it.
-  - At boot, the host passes the guest's host key and its own public key
-    (marked `restrict,pty`) as systemd credentials, so the guest flake holds
-    no key.
-  - sshd allows only that user and no forwarding. The guest has no
-    passwords, no sudo and no root login.
-  - Each `hanare run` is one sshd unit instance in the guest (PAM is off,
-    so the session stays in that unit's cgroup).
-  - `hanare run --offline`, and the commands in the guest's `offline`, use a
-    second sshd unit with no network at all: a private network namespace
-    plus `IPAddressDeny=any`. The resolver, nsncd, D-Bus and the nix-daemon
-    are hidden there.
-- **Guest kernel (BPF and sysctl):**
-  - Unless `hanare.restrictUserNamespaces = false`, a BPF LSM program
-    denies user namespaces to everyone but root, removing a common first
-    step of kernel exploits.
-  - io_uring and unprivileged BPF are disabled, and perf, kernel pointers
-    and dmesg are restricted.
-  - With `hanare.audit` (default on), a BPF program logs the guest user's
-    program executions, outgoing connections and files opened for writing,
-    per session; see `hanare audit`.
-- **Guest filesystem:**
-  - `/` is tmpfs and is reset on every boot.
-  - `/nix` is kept on disk under `/persist`. Shortly after every boot it is
-    checked against the Nix database, and `hanare status` shows the result.
-  - Only the shared directories hold data that lasts.
-
-## Requirements
-
-Arch Linux packages: `qemu-base virtiofsd edk2-ovmf passt nftables`, plus
-systemd v256 or later.
-
-You also need Nix with flakes. It can run rootless, for example as a static
-`nix` binary with `store = local?root=$HOME/.local/share/nix-root`.
+- **VM:** [cloud-hypervisor] with KVM, booted directly from a kernel and
+  initrd. The configuration, including credentials, goes through its API
+  socket, never the command line.
+- **Guest filesystem:** `/` is tmpfs. `/nix` is the guest's own Nix store,
+  kept on the host and mounted read-only, so nothing in the guest survives a
+  reboot and even guest root cannot change installed software.
+  - `hanare guest apply` builds the guest's NixOS on the host, copies it into
+    that store, and switches the running guest to it. The guest needs no
+    network and evaluates nothing itself.
+- **Shares:** one rootless [virtiofsd] per shared directory, mapping only
+  your UID (as the guest user).
+  - Inside writable shares, the host exports existing paths that host tools
+    execute or trust read-only: `.git` (and bare-repository layouts),
+    `.claude`, `.mcp.json`, `CLAUDE.md`, `AGENTS.md`, `.envrc`, `.vscode`,
+    `.devcontainer`, `mise.toml`, and so on (`proto.ProtectedNames` plus
+    `policy.protect`). The guest cannot change them, even as root. Newly
+    created ones are not blocked.
+  - Runtime shares are hot-plugged through cloud-hypervisor's API and
+    mounted by banken.
+- **Network:** [passt] (vhost-user) inside a rootless network namespace from
+  pasta.
+  - nftables there implements `network = "filtered"`: internet only, no
+    LAN, CGNAT/Tailscale, link-local, host addresses or loopback.
+  - `"lan"` still blocks the host and loopback; `"none"` gives the guest no
+    network device at all.
+  - The filter is outside the guest, so guest root cannot change it.
+- **Access:** SSH over vsock. The host end is cloud-hypervisor's unix
+  socket in a 0700 directory, so other host users cannot reach the guest.
+  - The host generates and pins the guest's host key and passes it, with
+    your public key (`restrict,pty`), as systemd credentials.
+  - No passwords, sudo, setuid wrappers or root login.
+  - Each `hanare run` is one sshd unit instance in the guest. Sessions:
+    - wait for `banken-ready.target` (keys, shares, userns restriction,
+      audit), so nothing runs without those;
+    - run with `NoNewPrivileges`, `RestrictNamespaces` and a syscall filter;
+    - with `--offline` (or `commands.offline`) also have no network: a
+      private network namespace, only `AF_UNIX`, and no access to the
+      resolver, nsncd, D-Bus or vsock.
+- **banken's agent:** a root agent on vsock port 24 that accepts only the
+  host (the guest kernel sets the peer CID). It mounts runtime shares (no
+  symlink is ever followed: `openat2` + `fsmount`/`move_mount`), switches
+  systems, shows the journal, and lists or stops sessions. The guest user
+  cannot talk to it.
+- **Guest kernel hardening:**
+  - a BPF LSM program denies user namespaces to non-root (a common first
+    step of kernel exploits);
+  - `lockdown=integrity`, kernel modules locked after boot;
+  - io_uring, unprivileged BPF and userfaultfd disabled.
+- **Audit:** BPF logs the guest user's executions (argv captured at exec),
+  connections and datagrams (inet, inet6, unix, vsock) and files opened for
+  writing, with the session they belong to. banken writes the records to a
+  serial port that cloud-hypervisor appends to a file on the host, one per
+  boot. The guest can neither rewrite nor delete what was logged.
+- **Host sandbox:** every unit sees only what it needs from `$HOME` and
+  runs with private PIDs, IPC and /tmp, a read-only system and no new
+  privileges. cloud-hypervisor also runs with seccomp, `AF_UNIX` only and no
+  network.
+  - Units: `hanare-vm@ID` (cloud-hypervisor), `hanare-net@ID`,
+    `hanare-share@ID:TAG`, in `hanare-ID.slice`. Helpers are bound to the VM
+    unit and stop with it.
 
 ## Repository
 
 ```
-main.go           entry point of the single hanare binary
-host/             commands that run on the host (VM management, run, share, ...)
-guest/            what runs in the VM: module.nix (nixosModules.default), the
-                  "hanare guest ..." commands and their BPF programs (bpf/)
-nix/packages.nix  builds hanare and the static vhost-device-vsock
-examples/         hanare.toml and a guest flake to start from
+cmd/hanare/        host CLI
+cmd/banken/        guest agent and BPF loaders (run by the guest's units)
+internal/proto/    the host/guest contract (ports, credentials, agent protocol)
+internal/host/     config, instance (IDs, directories, locks), systemd, chv
+                   (cloud-hypervisor API), transport (vsock, SSH, agent),
+                   nixbuild, share (policy, protected paths), guest, cli
+internal/guest/    agent, userns and audit (with their BPF programs)
+nix/module.nix     the guest NixOS module (nixosModules.guest)
+nix/packages.nix   hanare, banken, static cloud-hypervisor
+examples/          hanare.toml and a guest flake to start from
 ```
 
-## Layout on the host
+## Host layout
 
 ```
-~/.local/src/hanare/      this repository
-~/.local/libexec/hanare/  vhost-device-vsock (installed by "hanare update")
-~/.config/hanare/
-├── hanare.toml           the guests: OS (flake, attr), size, shares, network, commands
-└── guest/                your guest flake (nixosConfigurations.<attr>)
-~/.local/state/hanare/    guests/<ID>/ (disk, pinned host key), names/, ssh/ (client key)
+~/.config/hanare/hanare.toml        guests, policy
+~/.local/state/hanare/
+  guests/<ID>/store/nix             a guest's Nix store (its /nix)
+  guests/<ID>/audit/*.jsonl         audit log, one file per boot
+  guests/<ID>/log/console.log       console
+  names/<NAME> -> ../guests/<ID>    name to ID (IDs are never reused)
+  ssh/id_ed25519                    your client key
+~/.local/libexec/hanare/            cloud-hypervisor ("hanare upgrade")
+$XDG_RUNTIME_DIR/hanare/<ID>/       sockets, boot record
 ```
 
-None of these may be inside a shared directory: a guest that could write
-them would control what the host builds and runs. `hanare` refuses to share
-`~/.config` and `~/.local`.
+Keep guest flakes and this repository outside shared directories: a guest
+that could write them would control what the host builds. hanare refuses to
+share hidden directories of `$HOME` (and what symlinks there point to),
+`$PATH` directories, its own directories and guest flakes.
+
+## Requirements
+
+- Linux with KVM and systemd ≥ 257 (user units with `PrivatePIDs`).
+- Arch packages: `virtiofsd passt nftables`.
+- Nix with flakes (it can be a rootless static `nix` with
+  `store = local?root=$HOME/.local/share/nix-root`).
 
 ## Setup
 
@@ -106,64 +121,61 @@ mkdir -p ~/.config/hanare ~/.local/state/hanare/ssh
 cp ~/.local/src/hanare/examples/hanare.toml ~/.config/hanare/
 cp -r ~/.local/src/hanare/examples/guest ~/.config/hanare/guest   # set hanare.user
 ssh-keygen -t ed25519 -N '' -C hanare -f ~/.local/state/hanare/ssh/id_ed25519
-install -m 0755 "$(nix build --no-link --print-out-paths path:$HOME/.local/src/hanare)/bin/hanare" ~/.local/bin/
-hanare update             # also installs vhost-device-vsock
-hanare guest reset dev    # build the disk of [guests.dev]
-hanare guest up
+nix run path:$HOME/.local/src/hanare -- upgrade   # installs hanare and cloud-hypervisor
+hanare doctor
+hanare guest create dev
+hanare run uname -a
 ```
-
-If you use a rootless Nix store, prefix the build output path with the
-store root.
 
 ## Usage
 
 ```
-hanare [-g GUEST] run [--offline] CMD...   run CMD in the guest, in the current directory
-hanare shell                               interactive shell in the guest
-hanare audit [-f] [-n N]                   guest activity log (JSON lines)
+hanare run [--offline] [-t|-T] [--] CMD...   run CMD in the guest, in the current directory
+hanare shell
+hanare audit [-f] [-n N] [--all] [--session S] [--json]
 
-hanare guest ls                            all guests and their state
-hanare guest ps [NAME]                     sessions ("hanare run"s) in a guest
-hanare guest up|down [NAME...]
-hanare guest status|logs [NAME]
-hanare guest apply [NAME]                  apply changes in the guest's flake (nixos-rebuild switch)
-hanare guest reset [-y] [NAME]             replace the disk with a fresh image from the flake
-hanare guest create NAME [--from GUEST]    add [guests.NAME] and build its disk
-hanare guest rm [-y] NAME                  delete a guest's disk and state
+hanare guest ls [--json] [-q]
+hanare guest create NAME [--from GUEST | --flake F --attr A]
+hanare guest rm NAME... [-y] [--keep-config]
+hanare guest start|restart [NAME...]
+hanare guest stop NAME... | --all
+hanare guest inspect [NAME] [--json]
+hanare guest logs [NAME] [-f] [--journal [-u UNIT] [-n N]]
+hanare guest apply [NAME]
+hanare guest prune [-y]
 
-hanare share ls | add [--ro] [--save] DIR... | rm DIR...
-hanare link ls | sync | add TOOL... | rm TOOL...
-hanare update                              rebuild hanare from ~/.local/src/hanare and install it
+hanare session ls [--json] | kill SESSION...
+hanare share ls [--json] | add [--ro] [--persist] [-y] DIR... | rm [--persist] DIR...
+hanare link ls [--json] | sync | add TOOL... | rm TOOL...
+hanare config path | check | edit
+hanare doctor | upgrade [--source DIR] | version | completion SHELL
 ```
 
-The guest is chosen by a NAME argument, `-g`, `$HANARE_GUEST`, or `default`
-in `hanare.toml`. Add tools to `environment.systemPackages` in your guest
-flake's `configuration.nix`, then run `hanare guest apply`.
+The guest is chosen by an argument (guest subcommands), `-g NAME`,
+`$HANARE_GUEST`, `default_guest`, or is the only one defined. `run` exits
+with the command's status; hanare's own errors exit with 125.
 
-`apply` and `reset` stop early if the guest flake's lock pins an older
-state of a local-path input, such as a local hanare checkout. `apply` also
-stops if a local-path input lies outside the guest flake, because the guest
-builds from a read-only copy of that directory alone.
+Add tools to `environment.systemPackages` in your guest flake, then run
+`hanare guest apply`. A changed kernel needs `hanare guest restart`.
+
+`apply` refuses to build if the guest flake's lock pins an older state of a
+local-path input, or if a local input lies inside a share.
 
 ## Caveats
 
-- **Writable shares are trusted input:** whatever the guest writes into a
-  writable share is later read, and possibly executed, by host tools. That
-  includes git hooks and `.git/config` (including bare-repo layouts), agent
-  settings such as `.claude/settings.json`, `.mcp.json`, `.envrc`, build
-  scripts and binaries.
-  - With `hanare.protectShares` (the default), existing paths of that kind
-    (`.git`, `.claude`, `.envrc`, `.vscode`, ...) are bind-mounted read-only
-    inside the guest at boot, on `hanare share`, and every 30s.
-  - Newly created ones are not blocked.
-  - Neutralize such files on the host side, for example:
-    - run git with `safe.bareRepository=explicit` (protected config) and a
-      `core.hooksPath` you control;
-    - start agents with project hooks disabled in shared directories;
-    - use read-only shares where the guest only needs to read.
-- **Linked tool names:** links in `~/.local/bin` lose to host commands that
-  come earlier in `PATH`. `hanare link add` and `hanare link sync` skip
-  those names.
-- **Refused shares:** `hanare` will not share `$HOME` itself, `~/.ssh`,
-  `~/.gnupg`, `~/.claude`, `~/.config` or `~/.local`, nor any directory
-  that contains them.
+- **Writable shares are trusted input.** Whatever the guest writes into a
+  writable share may later be read or executed on the host: new
+  `.git`/`.claude`/`.envrc`, build scripts, binaries. Review changes, keep
+  host tools from auto-trusting workspaces, and use read-only shares where
+  the guest only needs to read.
+- **Network egress is open in `filtered` mode** (internet only); shares
+  can be exfiltrated. Use `--offline`, `commands.offline` or
+  `network = "none"` for tools that need no network.
+- **Audit is a record, not a barrier,** and the guest kernel produces it:
+  guest root could stop it (from then on, not retroactively).
+- **Links in `~/.local/bin`** lose to host commands earlier in `PATH`;
+  `hanare link ls` reports those as shadowed.
+
+[cloud-hypervisor]: https://www.cloudhypervisor.org/
+[virtiofsd]: https://gitlab.com/virtio-fs/virtiofsd
+[passt]: https://passt.top/

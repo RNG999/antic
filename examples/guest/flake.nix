@@ -7,11 +7,10 @@
   };
 
   outputs = { hanare, nixpkgs, ... }: {
-    # "hanare guest apply" and "hanare guest reset" build nixosConfigurations.<attr>
-    # (attr in hanare.toml, default "hanare").
+    # "hanare guest apply" builds nixosConfigurations.<attr> (attr in hanare.toml).
     nixosConfigurations.hanare = nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
-      modules = [ hanare.nixosModules.default ./configuration.nix ];
+      modules = [ hanare.nixosModules.guest ./configuration.nix ];
     };
   };
 }

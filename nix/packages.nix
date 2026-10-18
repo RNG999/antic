@@ -1,32 +1,41 @@
-# hanare (host commands and the in-VM "hanare vm" commands, one static binary) and the
-# static vhost-device-vsock backend it runs on the host.
+# hanare (host CLI), banken (guest agent and BPF programs) and a static
+# cloud-hypervisor, all built from this repository's pinned nixpkgs.
 { pkgs }:
 
 let
   inherit (pkgs) lib;
-in
-{
-  hanare = pkgs.buildGoModule {
-    pname = "hanare";
-    version = "0.3.0";
-    src = lib.fileset.toSource {
-      root = ../.;
-      fileset = lib.fileset.unions [
-        ../go.mod
-        ../go.sum
-        ../main.go
-        ../host
-        (lib.fileset.fileFilter (f: !f.hasExt "o") ../guest)
-      ];
-    };
-    vendorHash = "sha256-8HzxNZNWk7Co6wdpx5iJAJIJGdIp7BHQGbAXuzoxZKo=";
-    nativeBuildInputs = [ pkgs.llvmPackages.clang-unwrapped ];
+  src = lib.fileset.toSource {
+    root = ../.;
+    fileset = lib.fileset.unions [
+      ../go.mod
+      ../go.sum
+      ../cmd
+      (lib.fileset.fileFilter (f: !f.hasExt "o") ../internal)
+      ./proto.json
+    ];
+  };
+  goModule = args: pkgs.buildGoModule ({
+    version = "0.4.0";
+    inherit src;
+    vendorHash = "sha256-VUZzKblYW6bt8QH0bH9+OHbR+2On/daOg+5RnGJg8bE=";
     env.CGO_ENABLED = 0;
     ldflags = [ "-s" "-w" ];
-    # The BPF objects are embedded into the binary (guest/*.go).
+  } // args);
+in
+{
+  hanare = goModule {
+    pname = "hanare";
+    subPackages = [ "cmd/hanare" ];
+  };
+
+  banken = goModule {
+    pname = "banken";
+    subPackages = [ "cmd/banken" ];
+    nativeBuildInputs = [ pkgs.llvmPackages.clang-unwrapped ];
+    # The BPF objects are embedded into the binary.
     preBuild = ''
-      for f in guest/bpf/*.bpf.c; do
-        clang -O2 -g -target bpf -D__TARGET_ARCH_x86 \
+      for f in internal/guest/*/bpf/*.bpf.c; do
+        clang -O2 -g -target bpf -D__TARGET_ARCH_${pkgs.stdenv.hostPlatform.linuxArch} \
           -I${pkgs.libbpf}/include -I${pkgs.linuxHeaders}/include \
           -c "$f" -o "''${f%.c}.o"
       done
@@ -35,6 +44,5 @@ in
     overrideModAttrs = _: { preBuild = ""; };
   };
 
-  # Its tests need AF_VSOCK, which the build sandbox lacks.
-  vhost-device-vsock = pkgs.pkgsStatic.vhost-device-vsock.overrideAttrs { doCheck = false; };
+  cloud-hypervisor = pkgs.pkgsStatic.cloud-hypervisor;
 }

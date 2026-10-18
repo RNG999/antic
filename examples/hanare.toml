@@ -1,22 +1,28 @@
 # ~/.config/hanare/hanare.toml
+version = 1
+default_guest = "dev"
 
-# Guest used when no NAME / -g / $HANARE_GUEST is given.
-default = "dev"
+[policy]
+# "hanare share add" outside these asks for confirmation.
+share_roots = ["~/Work"]
+# Never share these (in addition to the built-in list).
+deny = []
+# Export these names read-only inside shares too (in addition to .git, .claude, ...).
+protect = []
 
 [guests.dev]
-# The guest OS: nixosConfigurations.<attr> in this flake. Shared read-only
-# with the guest for "hanare guest apply"; keep it outside any share.
+description = "tools for my agent"
+# The guest OS: nixosConfigurations.<attr> in this flake. Keep it outside shares.
 flake = "~/.config/hanare/guest"
 attr = "hanare"
 cpus = 2
 memory = "4G"
-disk_size = "20G"
-# true: let the guest reach LAN, Tailscale (CGNAT) and link-local addresses.
-# Enforced on the host (nftables in the guest's rootless network namespace).
-allow_lan = false
-# ~/.local/bin links that run these commands in this guest ("hanare link sync").
-expose = []
-# Commands that always run without network (like "hanare run --offline").
+network = "filtered"   # none | filtered (internet only) | lan
+
+[guests.dev.commands]
+# ~/.local/bin links that run these in this guest ("hanare link sync").
+link = []
+# Commands that always run without network.
 offline = []
 
 # Host directories visible in the guest at the same path.
