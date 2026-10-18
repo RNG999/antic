@@ -54,13 +54,13 @@ func (c *Config) dial() (*ssh.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	conn, err := dialVsock(c.CID, 22)
+	conn, err := dialVsock(c.VM.VsockCID, 22)
 	if err != nil {
 		return nil, err
 	}
 	conn.(vsockConn).SetDeadline(time.Now().Add(10 * time.Second))
 	sc, chans, reqs, err := ssh.NewClientConn(conn, "hanare", &ssh.ClientConfig{
-		User:            c.User,
+		User:            guestUser(),
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
 		HostKeyCallback: pinHostKey,
 	})
@@ -72,7 +72,7 @@ func (c *Config) dial() (*ssh.Client, error) {
 	return ssh.NewClient(sc, chans, reqs), nil
 }
 
-// pinHostKey trusts the guest's host key on first use; "hanare rebuild"
+// pinHostKey trusts the guest's host key on first use; "hanare reinstall"
 // forgets it because a fresh image generates new keys.
 func pinHostKey(_ string, _ net.Addr, key ssh.PublicKey) error {
 	got := ssh.MarshalAuthorizedKey(key)

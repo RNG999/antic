@@ -3,46 +3,60 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/BurntSushi/toml"
 )
 
-// Config mirrors ~/.config/hanare/hanare.json, which the guest's
-// configuration.nix reads as well.
+// Config mirrors ~/.config/hanare/hanare.toml (host side). Guest-side
+// settings live in the guest flake (see nix/guest.nix).
 type Config struct {
-	User   string `json:"user"`
-	SSHKey string `json:"ssh_authorized_key"`
-	CID    uint32 `json:"cid"`
-	CPUs   int    `json:"cpus"`
-	Memory string `json:"memory"`
-	Disk   string `json:"disk"`
-	LAN    bool   `json:"lan"`
-	// Pointer so an absent key keeps the guest's default (true) on save.
-	ProtectGit *bool    `json:"protect_git,omitempty"`
-	Shares     []Share  `json:"shares"`
-	Links      []string `json:"links"`
+	Guest struct {
+		Flake string `toml:"flake"`
+	} `toml:"guest"`
+	VM struct {
+		CPUs     int    `toml:"cpus"`
+		Memory   string `toml:"memory"`
+		DiskSize string `toml:"disk_size"`
+		VsockCID uint32 `toml:"vsock_cid"`
+	} `toml:"vm"`
+	Shares   []Share `toml:"share"`
+	Commands struct {
+		Expose []string `toml:"expose"`
+	} `toml:"commands"`
 }
 
 // Share is a host directory exposed to the guest at the same path.
 type Share struct {
-	Path string `json:"path"`
-	RO   bool   `json:"ro,omitempty"`
+	Path     string `toml:"path" json:"path"`
+	ReadOnly bool   `toml:"read_only" json:"read_only,omitempty"`
 }
 
 const unit = "hanare.service"
 
 func home() string        { h, _ := os.UserHomeDir(); return h }
 func configDir() string   { return filepath.Join(home(), ".config/hanare") }
-func configFile() string  { return filepath.Join(configDir(), "hanare.json") }
+func configFile() string  { return filepath.Join(configDir(), "hanare.toml") }
+func srcDir() string      { return filepath.Join(home(), ".local/src/hanare") }
 func stateDir() string    { return filepath.Join(home(), ".local/state/hanare") }
 func binDir() string      { return filepath.Join(home(), ".local/bin") }
 func diskPath() string    { return filepath.Join(stateDir(), "hanare.raw") }
 func keyPath() string     { return filepath.Join(stateDir(), "ssh/id_ed25519") }
 func hostKeyPath() string { return filepath.Join(stateDir(), "host_key.pub") }
+
+// guestUser is the login user in the guest: the same name as the host user
+// (hanare.user in the guest flake), which owns the shares as UID 1000.
+func guestUser() string {
+	if u, err := user.Current(); err == nil {
+		return u.Username
+	}
+	return os.Getenv("USER")
+}
 
 func runDir() string {
 	if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" {
@@ -52,34 +66,58 @@ func runDir() string {
 }
 
 func loadConfig() (*Config, error) {
-	b, err := os.ReadFile(configFile())
-	if err != nil {
-		return nil, err
-	}
 	var c Config
-	if err := json.Unmarshal(b, &c); err != nil {
-		return nil, fmt.Errorf("hanare.json: %w", err)
+	if _, err := toml.DecodeFile(configFile(), &c); err != nil {
+		return nil, fmt.Errorf("%s: %w", configFile(), err)
 	}
-	if c.User == "" || c.CID < 3 || c.CPUs < 1 || c.Memory == "" || c.Disk == "" {
-		return nil, fmt.Errorf("hanare.json: user, cid, cpus, memory and disk are required")
+	if c.Guest.Flake == "" {
+		c.Guest.Flake = filepath.Join(configDir(), "guest")
+	}
+	c.Guest.Flake = expandHome(c.Guest.Flake)
+	if c.VM.CPUs == 0 {
+		c.VM.CPUs = 2
+	}
+	if c.VM.Memory == "" {
+		c.VM.Memory = "4G"
+	}
+	if c.VM.DiskSize == "" {
+		c.VM.DiskSize = "20G"
+	}
+	if c.VM.VsockCID == 0 {
+		c.VM.VsockCID = 4242
+	}
+	if c.VM.VsockCID < 3 {
+		return nil, fmt.Errorf("%s: vm.vsock_cid must be >= 3", configFile())
 	}
 	// Shares appear in the guest at their host path, under the guest user's home.
-	if home() != "/home/"+c.User {
-		return nil, fmt.Errorf("hanare.json: user %q does not match home directory %s", c.User, home())
+	if home() != "/home/"+guestUser() {
+		return nil, fmt.Errorf("home directory %s is not /home/%s", home(), guestUser())
 	}
 	return &c, nil
 }
 
-func (c *Config) save() error {
-	b, err := json.MarshalIndent(c, "", "  ")
+// appendShare records a share in hanare.toml, keeping the file's comments.
+func appendShare(s Share) error {
+	f, err := os.OpenFile(configFile(), os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		return err
 	}
-	tmp := configFile() + ".new"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+	block := fmt.Sprintf("\n[[share]]\npath = %q\n", tildePath(s.Path))
+	if s.ReadOnly {
+		block += "read_only = true\n"
+	}
+	if _, err := f.WriteString(block); err != nil {
+		f.Close()
 		return err
 	}
-	return os.Rename(tmp, configFile())
+	return f.Close()
+}
+
+func expandHome(p string) string {
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		return filepath.Join(home(), strings.TrimPrefix(p, "~"))
+	}
+	return p
 }
 
 // sensitive lists directories that must never be shared, nor any directory
@@ -98,10 +136,7 @@ func sensitive() []string {
 
 // resolveShare validates a share path and returns its real absolute path.
 func resolveShare(p string) (string, error) {
-	if p == "~" || strings.HasPrefix(p, "~/") {
-		p = filepath.Join(home(), strings.TrimPrefix(p, "~"))
-	}
-	abs, err := filepath.Abs(p)
+	abs, err := filepath.Abs(expandHome(p))
 	if err != nil {
 		return "", err
 	}
@@ -139,7 +174,7 @@ func (c *Config) activeShares() []Share {
 	var out []Share
 	for _, s := range c.Shares {
 		if p, err := resolveShare(s.Path); err == nil {
-			out = append(out, Share{Path: p, RO: s.RO})
+			out = append(out, Share{Path: p, ReadOnly: s.ReadOnly})
 		}
 	}
 	return append(out, runtimeShares()...)

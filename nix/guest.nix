@@ -1,0 +1,270 @@
+# Guest side of hanare. Import this module (nixosModules.default) from your
+# own flake and set at least `hanare.user`; see README.md.
+{ config, lib, modulesPath, pkgs, ... }:
+
+let
+  cfg = config.hanare;
+  user = cfg.user;
+  home = "/home/${user}";
+  protectGit = cfg.protectGit;
+
+  # Makes every .git directory inside writable shares read-only (bind mounts
+  # owned by root, so unprivileged tools cannot lift them): a guest that could
+  # write .git/hooks or .git/config would get code run by git on the host.
+  # Usage: hanare-gitguard [DIR...] (default: all writable virtiofs mounts).
+  gitGuard = pkgs.writeShellScript "hanare-gitguard" ''
+    set -uo pipefail
+    export PATH=${lib.makeBinPath [ pkgs.util-linux pkgs.findutils pkgs.gnugrep pkgs.coreutils ]}
+    roots=("$@")
+    if (( ''${#roots[@]} == 0 )); then
+      mapfile -t roots < <(findmnt -rn -t virtiofs -O rw -o TARGET | grep '^${home}/')
+    fi
+    for root in "''${roots[@]}"; do
+      find "$root" -xdev -maxdepth 6 -type d -name node_modules -prune -o -type d -name .git -print -prune |
+        while IFS= read -r d; do
+          findmnt -rn --mountpoint "$d" -O ro >/dev/null && continue
+          mount --bind "$d" "$d" && mount -o remount,bind,ro "$d"
+        done
+    done
+  '';
+
+  # Mounts a hot-plugged share; instance = systemd-escape "TAG|ro|PATH".
+  # Only tags made by the host and mount points the user owns below its home
+  # are accepted, so the user cannot mount host content over system paths.
+  hanareMount = pkgs.writeShellScript "hanare-mount" ''
+    set -euo pipefail
+    IFS='|' read -r tag mode path <<<"$(${pkgs.systemd}/bin/systemd-escape --unescape -- "$2")"
+    [[ $tag =~ ^s-[0-9a-f]{12}$ && ($mode == ro || $mode == rw) ]] || { echo "bad instance" >&2; exit 1; }
+    real=$(${pkgs.coreutils}/bin/realpath -e -- "$path")
+    [[ $real == ${home}/* && $(${pkgs.coreutils}/bin/stat -c %U -- "$real") == ${user} ]] \
+      || { echo "refusing mount point $real" >&2; exit 1; }
+    case $1 in
+      start)
+        ${pkgs.util-linux}/bin/mount -t virtiofs -o "$mode,nosuid,nodev" -- "$tag" "$real"
+        ${lib.optionalString protectGit ''[[ $mode == rw ]] && ${gitGuard} "$real"''}
+        ;;
+      stop) exec ${pkgs.util-linux}/bin/umount -R -- "$real" ;;
+    esac
+  '';
+in
+{
+  imports = [ "${modulesPath}/profiles/qemu-guest.nix" ];
+
+  options.hanare = {
+    user = lib.mkOption {
+      type = lib.types.str;
+      description = "Guest login user; must be the host user that runs hanare (UID/GID 1000 in the guest).";
+    };
+    allowLan = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Allow traffic to private/LAN, CGNAT (Tailscale) and link-local addresses.";
+    };
+    protectGit = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Bind-mount .git directories in writable shares read-only.";
+    };
+  };
+
+  config = {
+
+    system.stateVersion = "26.05";
+    networking.hostName = "hanare";
+
+    boot.loader.systemd-boot.enable = true;
+    boot.loader.efi.canTouchEfiVariables = false;
+    boot.initrd.systemd.enable = true;
+    # systemd.ssh_auto=0: keep systemd-ssh-generator from creating its own vsock/AF_UNIX sshd sockets.
+    boot.kernelParams = [ "console=hvc0" "systemd.ssh_auto=0" ];
+    # dmi_sysfs: lets systemd read credentials (fstab.extra = shares) from SMBIOS.
+    boot.initrd.kernelModules = [ "dmi_sysfs" ];
+    boot.kernelModules = [ "vmw_vsock_virtio_transport" ];
+    # The stock growpart targets "/", which is tmpfs here; grow /persist instead
+    # (the image is truncated to vm.disk_size in hanare.toml by "hanare reinstall").
+    boot.growPartition = false;
+    systemd.services.hanare-growpart = {
+      wantedBy = [ "multi-user.target" ];
+      after = [ "persist.mount" ];
+      serviceConfig.Type = "oneshot";
+      path = with pkgs; [ cloud-utils.guest util-linux e2fsprogs gawk gnused ];
+      script = ''
+        part=$(readlink -f /dev/disk/by-label/nixos)
+        disk=/dev/$(lsblk -no PKNAME "$part")
+        growpart "$disk" "$(cat /sys/class/block/''${part#/dev/}/partition)" || true
+        resize2fs "$part"
+      '';
+    };
+
+    # Ephemeral root: everything except /nix and /persist is reset on every boot.
+    # The disk's ext4 (label "nixos", the whole image) is mounted at /persist.
+    fileSystems = {
+      "/" = lib.mkForce {
+        device = "none";
+        fsType = "tmpfs";
+        options = [ "mode=755" "size=50%" ];
+      };
+      "/persist" = {
+        device = "/dev/disk/by-label/nixos";
+        fsType = "ext4";
+        autoResize = true;
+        neededForBoot = true;
+      };
+      "/nix" = {
+        device = "/persist/nix";
+        fsType = "none";
+        options = [ "bind" ];
+        neededForBoot = true;
+      };
+      "/boot" = {
+        device = "/dev/disk/by-label/ESP";
+        fsType = "vfat";
+        options = [ "umask=0077" ];
+      };
+    };
+    systemd.tmpfiles.rules = [ "z ${home} 0700 ${user} ${user} -" ];
+
+    # passt (user-mode networking): plain DHCP on the virtio NIC.
+    networking.useNetworkd = true;
+    networking.useDHCP = true;
+    networking.nftables.enable = true;
+    networking.firewall.enable = true;
+    # hanare.allowLan = false: no traffic to private/LAN, Tailscale (CGNAT)
+    # or link-local addresses; DNS goes to passt's forwarder (192.0.2.53).
+    networking.nftables.tables.hanare-egress = lib.mkIf (!cfg.allowLan) {
+      family = "inet";
+      content = ''
+        chain output {
+          type filter hook output priority filter; policy accept;
+          oifname "lo" accept
+          ip daddr 192.0.2.53 accept
+          udp dport 67 accept
+          ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16 } reject
+          meta l4proto ipv6-icmp accept
+          ip6 daddr { fc00::/7, fe80::/10 } reject
+        }
+      '';
+    };
+
+    # Only key-based logins over vsock; no passwords, no sudo.
+    users.mutableUsers = false;
+    users.users.root.hashedPassword = "!";
+    users.users.${user} = {
+      isNormalUser = true;
+      uid = 1000;
+      # Primary GID must match the host (1000): virtiofsd only maps 1000:1000.
+      group = user;
+      # Lets "hanare switch" stream the rebuild log.
+      extraGroups = [ "systemd-journal" ];
+      hashedPassword = "!";
+    };
+    users.groups.${user}.gid = 1000;
+    security.sudo.enable = false;
+    users.allowNoPasswordLogin = true;
+
+    # SSH only over vsock (port 22, socket-activated per connection); no TCP listener.
+    services.openssh = {
+      enable = true;
+      openFirewall = false;
+      listenAddresses = [ { addr = "127.0.0.1"; port = 22; } ];
+      # Persisted so the host's pinned key stays valid across reboots.
+      hostKeys = [ { path = "/persist/ssh/ssh_host_ed25519_key"; type = "ed25519"; } ];
+      # The host passes its public key as the hanare.ssh.authorized_keys credential.
+      authorizedKeysFiles = [ "/run/hanare/authorized_keys" ];
+      settings = {
+        PermitRootLogin = "no";
+        PasswordAuthentication = false;
+        KbdInteractiveAuthentication = false;
+      };
+    };
+    systemd.services.sshd.enable = false;
+    systemd.services.hanare-authorized-keys = {
+      wantedBy = [ "multi-user.target" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ImportCredential = "hanare.ssh.authorized_keys";
+        RuntimeDirectory = "hanare";
+        RuntimeDirectoryPreserve = true;
+        ExecStart = "${pkgs.coreutils}/bin/install -m 0644 \${CREDENTIALS_DIRECTORY}/hanare.ssh.authorized_keys /run/hanare/authorized_keys";
+      };
+    };
+    systemd.sockets.hanare-ssh = {
+      wantedBy = [ "sockets.target" ];
+      socketConfig = {
+        ListenStream = "vsock::22";
+        Accept = true;
+      };
+    };
+    systemd.services."hanare-ssh@" = {
+      # No ordering on hanare-authorized-keys: with Accept=yes it would put the
+      # socket in an ordering cycle. The key file exists long before the host
+      # connects, and hanare retries until SSH succeeds.
+      after = [ "sshd-keygen.service" ];
+      wants = [ "sshd-keygen.service" ];
+      serviceConfig = {
+        ExecStart = "-${config.services.openssh.package}/bin/sshd -i -f /etc/ssh/sshd_config";
+        StandardInput = "socket";
+        StandardError = "journal";
+      };
+    };
+
+    # Shares: configured ones arrive as the fstab.extra credential at boot,
+    # runtime ones are mounted by this unit (started by the user via polkit).
+    systemd.services."hanare-mount@" = {
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = "${hanareMount} start %i";
+        ExecStop = "${hanareMount} stop %i";
+      };
+    };
+
+    # hanare.protectGit (default true): see gitGuard above. Runs once
+    # the boot-time shares are mounted, then every 30s for repositories created later.
+    systemd.services.hanare-gitguard = lib.mkIf protectGit {
+      wantedBy = [ "multi-user.target" ];
+      after = [ "local-fs.target" "remote-fs.target" ];
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${gitGuard}";
+      };
+    };
+    systemd.timers.hanare-gitguard = lib.mkIf protectGit {
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnActiveSec = "30s";
+        OnUnitActiveSec = "30s";
+        AccuracySec = "5s";
+      };
+    };
+
+    # "hanare switch": rebuild from the host's config, shared read-only at
+    # /run/hanare-config, without replacing the disk.
+    systemd.services.hanare-switch = {
+      serviceConfig.Type = "oneshot";
+      path = [ config.nix.package pkgs.git ];
+      script = ''
+        ${config.system.build.nixos-rebuild}/bin/nixos-rebuild switch --flake path:/run/hanare-config#hanare
+      '';
+    };
+
+    security.polkit.enable = true;
+    security.polkit.extraConfig = ''
+      polkit.addRule(function(action, subject) {
+        if (action.id != "org.freedesktop.systemd1.manage-units" || subject.user != "${user}")
+          return polkit.Result.NOT_HANDLED;
+        var unit = action.lookup("unit") || "", verb = action.lookup("verb");
+        if (unit == "hanare-switch.service" && verb == "start")
+          return polkit.Result.YES;
+        if (/^hanare-mount@[^\/]+\.service$/.test(unit) && (verb == "start" || verb == "stop"))
+          return polkit.Result.YES;
+        return polkit.Result.NOT_HANDLED;
+      });
+    '';
+
+    nix.settings.experimental-features = [ "nix-command" "flakes" ];
+
+    environment.systemPackages = with pkgs; [ git ];
+  };
+}

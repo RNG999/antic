@@ -49,13 +49,13 @@ func startUnit() error {
 	// directories and hanare's own files from $HOME, and nothing writable
 	// outside them.
 	rw := []string{stateDir(), runDir()}
-	ro := []string{configDir(), exe}
+	ro := []string{configDir(), cfg.Guest.Flake, exe}
 	for _, s := range cfg.Shares {
 		p, err := resolveShare(s.Path)
 		if err != nil {
-			return fmt.Errorf("hanare.json: %w", err)
+			return fmt.Errorf("%s: %w", configFile(), err)
 		}
-		if s.RO {
+		if s.ReadOnly {
 			ro = append(ro, p)
 		} else {
 			rw = append(rw, p)
@@ -95,6 +95,11 @@ func execVM() error {
 		}
 	}
 
+	pubKey, err := os.ReadFile(keyPath() + ".pub")
+	if err != nil {
+		return err
+	}
+
 	// Runtime shares do not survive a VM restart.
 	os.RemoveAll(sharesStateDir())
 
@@ -103,13 +108,13 @@ func execVM() error {
 		share  Share
 		target string
 	}
-	mounts := []mount{{Share{Path: configDir(), RO: true}, "/run/hanare-config"}}
+	mounts := []mount{{Share{Path: cfg.Guest.Flake, ReadOnly: true}, "/run/hanare-config"}}
 	for _, s := range cfg.Shares {
 		p, err := resolveShare(s.Path)
 		if err != nil {
 			return err
 		}
-		mounts = append(mounts, mount{Share{Path: p, RO: s.RO}, p})
+		mounts = append(mounts, mount{Share{Path: p, ReadOnly: s.ReadOnly}, p})
 	}
 	var fsArgs []string
 	var fstab strings.Builder
@@ -117,14 +122,14 @@ func execVM() error {
 		tag := shareTag(m.share.Path)
 		sock := filepath.Join(run, tag+".sock")
 		os.Remove(sock)
-		if err := startHelper(sock, virtiofsd, virtiofsdArgs(sock, m.share.Path, m.share.RO)...); err != nil {
+		if err := startHelper(sock, virtiofsd, virtiofsdArgs(sock, m.share.Path, m.share.ReadOnly)...); err != nil {
 			return fmt.Errorf("virtiofsd for %s: %w", m.share.Path, err)
 		}
 		fsArgs = append(fsArgs,
 			"-chardev", "socket,id=fs-"+tag+",path="+sock,
 			"-device", "vhost-user-fs-pci,chardev=fs-"+tag+",tag="+tag)
 		fmt.Fprintf(&fstab, "%s %s virtiofs %s,nosuid,nodev,nofail,x-systemd.before=hanare-gitguard.service 0 0\n",
-			tag, strings.ReplaceAll(m.target, " ", `\040`), mode(m.share.RO))
+			tag, strings.ReplaceAll(m.target, " ", `\040`), mode(m.share.ReadOnly))
 	}
 	// Empty PCIe root ports for "hanare share" to hot-plug into.
 	for i := 0; i < hotplugPorts; i++ {
@@ -144,17 +149,20 @@ func execVM() error {
 	args := []string{qemu,
 		"-name", "hanare",
 		"-machine", "q35,accel=kvm,memory-backend=mem",
-		"-cpu", "host", "-smp", strconv.Itoa(cfg.CPUs), "-m", cfg.Memory,
-		"-object", "memory-backend-memfd,id=mem,size=" + cfg.Memory + ",share=on",
+		"-cpu", "host", "-smp", strconv.Itoa(cfg.VM.CPUs), "-m", cfg.VM.Memory,
+		"-object", "memory-backend-memfd,id=mem,size=" + cfg.VM.Memory + ",share=on",
 		"-drive", "if=pflash,format=raw,readonly=on,file=" + ovmfCode,
 		"-drive", "if=pflash,format=raw,file=" + vars,
 		"-drive", "if=virtio,format=raw,discard=unmap,file=" + diskPath(),
 		"-netdev", "stream,id=net0,server=off,addr.type=unix,addr.path=" + netSock,
 		"-device", "virtio-net-pci,netdev=net0",
-		"-device", fmt.Sprintf("vhost-vsock-pci,guest-cid=%d", cfg.CID),
+		"-device", fmt.Sprintf("vhost-vsock-pci,guest-cid=%d", cfg.VM.VsockCID),
 		// Guest systemd reads this credential as extra fstab entries.
 		"-smbios", "type=11,value=io.systemd.credential.binary:fstab.extra=" +
 			base64.StdEncoding.EncodeToString([]byte(fstab.String())),
+		// Read by hanare-authorized-keys.service; the guest flake holds no key.
+		"-smbios", "type=11,value=io.systemd.credential.binary:hanare.ssh.authorized_keys=" +
+			base64.StdEncoding.EncodeToString(pubKey),
 	}
 	args = append(args, fsArgs...)
 	args = append(args,
@@ -270,7 +278,10 @@ func reinstall(yes bool) error {
 		!confirm("Replace the VM disk? The guest's /nix and /persist are discarded.") {
 		return errors.New("aborted")
 	}
-	out, err := nixBuild("image")
+	if err := checkGuestFlake(cfg, false); err != nil {
+		return err
+	}
+	out, err := nixBuild(cfg.Guest.Flake, "nixosConfigurations.hanare.config.system.build.images.raw-efi")
 	if err != nil {
 		return err
 	}
@@ -278,7 +289,7 @@ func reinstall(yes bool) error {
 	if len(imgs) != 1 {
 		return fmt.Errorf("expected one .img in %s", out)
 	}
-	size, err := parseSize(cfg.Disk)
+	size, err := parseSize(cfg.VM.DiskSize)
 	if err != nil {
 		return err
 	}
@@ -300,9 +311,9 @@ func reinstall(yes bool) error {
 	return nil
 }
 
-// selfUpdate builds .#hanare and installs it as ~/.local/bin/hanare.
+// selfUpdate builds ~/.local/src/hanare and installs it as ~/.local/bin/hanare.
 func selfUpdate() error {
-	out, err := nixBuild("hanare")
+	out, err := nixBuild(srcDir(), "default")
 	if err != nil {
 		return err
 	}
@@ -318,10 +329,9 @@ func selfUpdate() error {
 	return nil
 }
 
-// nixBuild builds a package of the ~/.config/hanare flake and returns its
-// output path as seen from the host.
-func nixBuild(attr string) (string, error) {
-	build := exec.Command("nix", "build", "--no-link", "--print-out-paths", "path:"+configDir()+"#"+attr)
+// nixBuild builds flake#attr and returns its output path as seen from the host.
+func nixBuild(flake, attr string) (string, error) {
+	build := exec.Command("nix", "build", "--no-link", "--print-out-paths", "path:"+flake+"#"+attr)
 	build.Stderr = os.Stderr
 	out, err := build.Output()
 	if err != nil {

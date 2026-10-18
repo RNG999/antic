@@ -73,7 +73,7 @@ func share(args []string) error {
 		return err
 	}
 	if !unitActive() {
-		return errors.New("VM is not running (start it with \"hanare up\", or add the share to hanare.json)")
+		return errors.New("VM is not running (start it with \"hanare up\", or add a [[share]] to hanare.toml)")
 	}
 	for _, p := range paths {
 		real, err := resolveShare(p)
@@ -90,8 +90,7 @@ func share(args []string) error {
 		}
 		fmt.Println("hanare: shared", real, map[bool]string{true: "(read-only)", false: ""}[ro])
 		if save {
-			cfg.Shares = append(cfg.Shares, Share{Path: tildePath(real), RO: ro})
-			if err := cfg.save(); err != nil {
+			if err := appendShare(Share{Path: real, ReadOnly: ro}); err != nil {
 				return err
 			}
 		}
@@ -156,7 +155,7 @@ func hotplug(cfg *Config, path string, ro bool) error {
 	if err := os.MkdirAll(sharesStateDir(), 0o700); err != nil {
 		return err
 	}
-	b, _ := json.Marshal(Share{Path: path, RO: ro})
+	b, _ := json.Marshal(Share{Path: path, ReadOnly: ro})
 	if err := os.WriteFile(filepath.Join(sharesStateDir(), tag+".json"), b, 0o600); err != nil {
 		return err
 	}
@@ -188,7 +187,7 @@ func unshare(args []string) error {
 			real = r
 		}
 		if _, err := os.Stat(filepath.Join(sharesStateDir(), shareTag(real)+".json")); err != nil {
-			return fmt.Errorf("%s is not a runtime share (configured shares are changed in hanare.json)", real)
+			return fmt.Errorf("%s is not a runtime share (configured shares are changed in hanare.toml)", real)
 		}
 		if err := unplug(cfg, real); err != nil {
 			return err
@@ -205,7 +204,7 @@ func unplug(cfg *Config, path string) error {
 	if b, err := os.ReadFile(state); err == nil {
 		json.Unmarshal(b, &s)
 	}
-	if mu, err := mountUnit(tag, path, s.RO); err == nil {
+	if mu, err := mountUnit(tag, path, s.ReadOnly); err == nil {
 		cfg.remote("systemctl stop "+shellQuote(mu), false)
 	}
 	if m, err := dialQMP(); err == nil {
@@ -231,10 +230,10 @@ func listShares() error {
 			fmt.Printf("%s\tconfigured\tINVALID: %v\n", s.Path, err)
 			continue
 		}
-		fmt.Printf("%s\tconfigured\t%s\n", p, mode(s.RO))
+		fmt.Printf("%s\tconfigured\t%s\n", p, mode(s.ReadOnly))
 	}
 	for _, s := range runtimeShares() {
-		fmt.Printf("%s\truntime\t%s\n", s.Path, mode(s.RO))
+		fmt.Printf("%s\truntime\t%s\n", s.Path, mode(s.ReadOnly))
 	}
 	return nil
 }

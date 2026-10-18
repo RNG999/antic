@@ -22,16 +22,16 @@ const usage = `usage: hanare <command> [args...]
   down                shut the VM down
   status              show VM state
   logs                print the VM console log
-  switch              apply ~/.config/hanare to the running VM (nixos-rebuild switch)
-  reinstall [-y]      build a fresh disk image from ~/.config/hanare and replace the VM disk
-  update              build this tool from ~/.config/hanare and install it to ~/.local/bin
+  switch              apply the guest flake to the running VM (nixos-rebuild switch)
+  reinstall [-y]      build a fresh disk image from the guest flake and replace the VM disk
+  update              build this tool from ~/.local/src/hanare and install it to ~/.local/bin
 
   share               list shared directories
   share [--ro] [--save] DIR...
-                      share DIR with the running VM at the same path (--save: also add to hanare.json)
+                      share DIR with the running VM at the same path (--save: also add to hanare.toml)
   unshare DIR...      remove a share added with "share"
 
-  link                sync ~/.local/bin links with "links" in hanare.json
+  link                sync ~/.local/bin links with commands.expose in hanare.toml
   link TOOL...        create ~/.local/bin/TOOL links that run TOOL in the VM
   unlink TOOL...      remove such links
   links               list such links
@@ -129,7 +129,7 @@ func shell() int {
 	}
 	dir, err := cfg.guestDir()
 	if err != nil {
-		dir = "/home/" + cfg.User
+		dir = "/home/" + guestUser()
 	}
 	return cfg.remote("cd "+shellQuote(dir)+` && exec "$SHELL" -l`, true)
 }
@@ -141,6 +141,10 @@ func switchConfig() int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hanare: %v\n", err)
 		return 125
+	}
+	if err := checkGuestFlake(cfg, true); err != nil {
+		fmt.Fprintf(os.Stderr, "hanare: %v\n", err)
+		return 1
 	}
 	return cfg.remote(`journalctl -f -n0 -o cat -u hanare-switch.service & j=$!
 systemctl start hanare-switch.service; rc=$?
@@ -159,14 +163,14 @@ func link(tools []string) error {
 	return nil
 }
 
-// syncLinks makes the hanare links in ~/.local/bin match hanare.json.
+// syncLinks makes the hanare links in ~/.local/bin match commands.expose in hanare.toml.
 func syncLinks() error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
 	want := map[string]bool{}
-	for _, t := range cfg.Links {
+	for _, t := range cfg.Commands.Expose {
 		want[t] = true
 		if err := addLink(t); err != nil {
 			fmt.Fprintf(os.Stderr, "hanare: %v\n", err)
