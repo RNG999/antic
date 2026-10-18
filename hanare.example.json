@@ -1,0 +1,18 @@
+{
+  "user": "alice",
+  "ssh_authorized_key": "ssh-ed25519 AAAA... hanare",
+  "cid": 4242,
+  "cpus": 2,
+  "memory": "4G",
+  "disk": "20G",
+  "lan": false,
+  "shares": [
+    {
+      "path": "~/Work"
+    },
+    {
+      "path": "~/Projects"
+    }
+  ],
+  "links": []
+}
