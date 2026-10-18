@@ -6,6 +6,7 @@
   "memory": "4G",
   "disk": "20G",
   "lan": false,
+  "protect_git": true,
   "shares": [
     {
       "path": "~/Work"

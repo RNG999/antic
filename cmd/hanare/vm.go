@@ -123,7 +123,7 @@ func execVM() error {
 		fsArgs = append(fsArgs,
 			"-chardev", "socket,id=fs-"+tag+",path="+sock,
 			"-device", "vhost-user-fs-pci,chardev=fs-"+tag+",tag="+tag)
-		fmt.Fprintf(&fstab, "%s %s virtiofs %s,nosuid,nodev,nofail 0 0\n",
+		fmt.Fprintf(&fstab, "%s %s virtiofs %s,nosuid,nodev,nofail,x-systemd.before=hanare-gitguard.service 0 0\n",
 			tag, strings.ReplaceAll(m.target, " ", `\040`), mode(m.share.RO))
 	}
 	// Empty PCIe root ports for "hanare share" to hot-plug into.

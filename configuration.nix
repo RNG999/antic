@@ -4,6 +4,27 @@ let
   cfg = builtins.fromJSON (builtins.readFile ./hanare.json);
   user = cfg.user;
   home = "/home/${user}";
+  protectGit = cfg.protect_git or true;
+
+  # Makes every .git directory inside writable shares read-only (bind mounts
+  # owned by root, so unprivileged tools cannot lift them): a guest that could
+  # write .git/hooks or .git/config would get code run by git on the host.
+  # Usage: hanare-gitguard [DIR...] (default: all writable virtiofs mounts).
+  gitGuard = pkgs.writeShellScript "hanare-gitguard" ''
+    set -uo pipefail
+    export PATH=${lib.makeBinPath [ pkgs.util-linux pkgs.findutils pkgs.gnugrep pkgs.coreutils ]}
+    roots=("$@")
+    if (( ''${#roots[@]} == 0 )); then
+      mapfile -t roots < <(findmnt -rn -t virtiofs -O rw -o TARGET | grep '^${home}/')
+    fi
+    for root in "''${roots[@]}"; do
+      find "$root" -xdev -maxdepth 6 -type d -name node_modules -prune -o -type d -name .git -print -prune |
+        while IFS= read -r d; do
+          findmnt -rn --mountpoint "$d" -O ro >/dev/null && continue
+          mount --bind "$d" "$d" && mount -o remount,bind,ro "$d"
+        done
+    done
+  '';
 
   # Mounts a hot-plugged share; instance = systemd-escape "TAG|ro|PATH".
   # Only tags made by the host and mount points the user owns below its home
@@ -16,8 +37,11 @@ let
     [[ $real == ${home}/* && $(${pkgs.coreutils}/bin/stat -c %U -- "$real") == ${user} ]] \
       || { echo "refusing mount point $real" >&2; exit 1; }
     case $1 in
-      start) exec ${pkgs.util-linux}/bin/mount -t virtiofs -o "$mode,nosuid,nodev" -- "$tag" "$real" ;;
-      stop) exec ${pkgs.util-linux}/bin/umount -- "$real" ;;
+      start)
+        ${pkgs.util-linux}/bin/mount -t virtiofs -o "$mode,nosuid,nodev" -- "$tag" "$real"
+        ${lib.optionalString protectGit ''[[ $mode == rw ]] && ${gitGuard} "$real"''}
+        ;;
+      stop) exec ${pkgs.util-linux}/bin/umount -R -- "$real" ;;
     esac
   '';
 in
@@ -161,6 +185,25 @@ in
     };
   };
 
+  # "protect_git" in hanare.json (default true): see gitGuard above. Runs once
+  # the boot-time shares are mounted, then every 30s for repositories created later.
+  systemd.services.hanare-gitguard = lib.mkIf protectGit {
+    wantedBy = [ "multi-user.target" ];
+    after = [ "local-fs.target" "remote-fs.target" ];
+    serviceConfig = {
+      Type = "oneshot";
+      ExecStart = "${gitGuard}";
+    };
+  };
+  systemd.timers.hanare-gitguard = lib.mkIf protectGit {
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnActiveSec = "30s";
+      OnUnitActiveSec = "30s";
+      AccuracySec = "5s";
+    };
+  };
+
   # "hanare switch": rebuild from the host's config, shared read-only at
   # /run/hanare-config, without replacing the disk.
   systemd.services.hanare-switch = {
@@ -188,5 +231,24 @@ in
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
   # Tools available in the VM; apply changes with "hanare switch".
-  environment.systemPackages = with pkgs; [ git vim tree ];
+  environment.systemPackages = with pkgs; [
+    git
+    vim
+    tree
+
+    # SMT solvers
+    z3
+    cvc5
+    # Model checkers
+    tlaplus
+    alloy6
+    spin
+    nusmv
+    cbmc
+    # Proof assistants / verifiers
+    lean4
+    coq
+    why3
+    dafny
+  ];
 }

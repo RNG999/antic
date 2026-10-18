@@ -24,7 +24,7 @@ const usage = `usage: hanare <command> [args...]
   logs                print the VM console log
   switch              apply ~/.config/hanare to the running VM (nixos-rebuild switch)
   reinstall [-y]      build a fresh disk image from ~/.config/hanare and replace the VM disk
-  self-update         build this tool from ~/.config/hanare and install it to ~/.local/bin
+  update              build this tool from ~/.config/hanare and install it to ~/.local/bin
 
   share               list shared directories
   share [--ro] [--save] DIR...
@@ -80,7 +80,7 @@ func dispatch() int {
 		err = share(args)
 	case "unshare":
 		err = unshare(args)
-	case "self-update":
+	case "update":
 		err = selfUpdate()
 	case "link":
 		err = link(args)

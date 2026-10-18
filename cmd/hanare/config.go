@@ -14,15 +14,17 @@ import (
 // Config mirrors ~/.config/hanare/hanare.json, which the guest's
 // configuration.nix reads as well.
 type Config struct {
-	User   string   `json:"user"`
-	SSHKey string   `json:"ssh_authorized_key"`
-	CID    uint32   `json:"cid"`
-	CPUs   int      `json:"cpus"`
-	Memory string   `json:"memory"`
-	Disk   string   `json:"disk"`
-	LAN    bool     `json:"lan"`
-	Shares []Share  `json:"shares"`
-	Links  []string `json:"links"`
+	User   string `json:"user"`
+	SSHKey string `json:"ssh_authorized_key"`
+	CID    uint32 `json:"cid"`
+	CPUs   int    `json:"cpus"`
+	Memory string `json:"memory"`
+	Disk   string `json:"disk"`
+	LAN    bool   `json:"lan"`
+	// Pointer so an absent key keeps the guest's default (true) on save.
+	ProtectGit *bool    `json:"protect_git,omitempty"`
+	Shares     []Share  `json:"shares"`
+	Links      []string `json:"links"`
 }
 
 // Share is a host directory exposed to the guest at the same path.

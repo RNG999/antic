@@ -55,7 +55,7 @@ hanare shell                interactive shell in the VM
 hanare up | down | status | logs
 hanare switch               apply configuration.nix / hanare.json to the running VM
 hanare reinstall            replace the VM disk with a freshly built image
-hanare self-update          rebuild and reinstall the hanare binary
+hanare update               rebuild and reinstall the hanare binary
 hanare share [--ro] [--save] DIR...   hot-plug a share; --save also records it in hanare.json
 hanare unshare DIR...
 hanare link                 sync ~/.local/bin links from "links" in hanare.json
@@ -68,7 +68,12 @@ Add the tools you need to `environment.systemPackages` in
 
 - **Shared repositories:** a guest with write access to a git repository can
   plant hooks or `.git/config` settings. The host then runs them the next
-  time it uses git in that repository.
+  time it uses git in that repository. With `"protect_git": true` (the
+  default), the guest bind-mounts every `.git` inside writable shares
+  read-only. This happens at boot, on `hanare share`, and every 30s after
+  that. Unprivileged guest processes cannot undo these mounts. A repository
+  created after the last pass stays writable until the next one, and git
+  operations that write `.git` must run on the host.
 - **Linked tool names:** links in `~/.local/bin` lose to host commands that
   come earlier in `PATH`. `hanare link` skips those names.
 - **Refused shares:** `hanare` will not share `$HOME` itself, `~/.ssh`,

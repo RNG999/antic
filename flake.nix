@@ -12,7 +12,7 @@
       # VM disk image; "hanare reinstall" builds and installs it.
       image = self.nixosConfigurations.hanare.config.system.build.images.raw-efi;
 
-      # Host-side CLI (static); "hanare self-update" builds and installs it to ~/.local/bin.
+      # Host-side CLI (static); "hanare update" builds and installs it to ~/.local/bin.
       hanare = nixpkgs.legacyPackages.x86_64-linux.buildGoModule {
         pname = "hanare";
         version = "0.1.0";
