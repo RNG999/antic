@@ -76,7 +76,7 @@ func share(args []string) error {
 		return errors.New("VM is not running (start it with \"hanare up\", or add a [[share]] to hanare.toml)")
 	}
 	for _, p := range paths {
-		real, err := resolveShare(p)
+		real, err := cfg.resolveShare(p)
 		if err != nil {
 			return err
 		}
@@ -225,7 +225,7 @@ func listShares() error {
 		return err
 	}
 	for _, s := range cfg.Shares {
-		p, err := resolveShare(s.Path)
+		p, err := cfg.resolveShare(s.Path)
 		if err != nil {
 			fmt.Printf("%s\tconfigured\tINVALID: %v\n", s.Path, err)
 			continue

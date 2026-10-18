@@ -20,22 +20,40 @@ import (
 const (
 	virtiofsd = "/usr/lib/virtiofsd"
 	passt     = "/usr/bin/passt"
+	pasta     = "/usr/bin/pasta"
+	nft       = "/usr/bin/nft"
 	qemu      = "/usr/bin/qemu-system-x86_64"
 	ovmfCode  = "/usr/share/edk2/x64/OVMF_CODE.4m.fd"
 	ovmfVars  = "/usr/share/edk2/x64/OVMF_VARS.4m.fd"
-	// Guest-visible DNS address; passt forwards queries sent to it to the
-	// host's resolver. Taken from TEST-NET-1 so it never clashes with a real host.
+	netUnit   = "hanare-net.service"
+	// Guest-visible DNS address; passt forwards queries sent to it. Taken from
+	// TEST-NET-1 so it never clashes with a real host.
 	guestDNS = "192.0.2.53"
-	// systemd-resolved's stub; passt otherwise sends forwarded queries to 127.0.0.1.
-	hostDNS = "127.0.0.53"
+	// Inside hanare-net's namespace, pasta forwards DNS sent here to the
+	// host's resolver.
+	nsDNS = "192.0.2.54"
 )
+
+// Destinations the guest may not reach unless network.allow_lan is set:
+// private/LAN, CGNAT (Tailscale), link-local (incl. cloud metadata) and the
+// namespace's own loopback.
+const lanBlockRules = `table inet hanare {
+  chain output {
+    type filter hook output priority filter; policy accept;
+    ip daddr ` + nsDNS + ` accept
+    ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 127.0.0.0/8 } reject
+    ip6 daddr { fc00::/7, fe80::/10, ::1 } reject
+  }
+}
+`
 
 func unitActive() bool {
 	return exec.Command("systemctl", "--user", "is-active", "--quiet", unit).Run() == nil
 }
 
-// startUnit runs "hanare _vm" as a transient user service, so the VM and its
-// helper processes live in one cgroup that systemd cleans up as a whole.
+// startUnit starts the network unit and then "hanare _vm" as a transient
+// user service, so the VM and its helpers live in one cgroup that systemd
+// cleans up as a whole.
 func startUnit() error {
 	exe, err := os.Executable()
 	if err != nil {
@@ -45,13 +63,22 @@ func startUnit() error {
 	if err != nil {
 		return err
 	}
+	if err := ensureHostKey(false); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(runDir(), 0o700); err != nil {
+		return err
+	}
 	// Even if QEMU or a helper is compromised, it sees only the shared
 	// directories and hanare's own files from $HOME, and nothing writable
 	// outside them.
 	rw := []string{stateDir(), runDir()}
-	ro := []string{configDir(), cfg.Guest.Flake, exe}
+	ro := []string{configDir(), cfg.Guest.Flake, exe, libexecDir()}
+	if real, err := filepath.EvalSymlinks(configFile()); err == nil {
+		ro = append(ro, real)
+	}
 	for _, s := range cfg.Shares {
-		p, err := resolveShare(s.Path)
+		p, err := cfg.resolveShare(s.Path)
 		if err != nil {
 			return fmt.Errorf("%s: %w", configFile(), err)
 		}
@@ -61,8 +88,8 @@ func startUnit() error {
 			rw = append(rw, p)
 		}
 	}
-	if err := os.MkdirAll(runDir(), 0o700); err != nil {
-		return err
+	if err := startNet(cfg, exe); err != nil {
+		return fmt.Errorf("network: %w", err)
 	}
 	cmd := exec.Command("systemd-run", "--user", "--quiet", "--collect",
 		"--unit="+unit, "--description=hanare VM",
@@ -70,15 +97,82 @@ func startUnit() error {
 		"-p", "ProtectSystem=strict",
 		"-p", "PrivateTmp=yes",
 		"-p", "NoNewPrivileges=yes",
+		// QEMU and its helpers only talk over AF_UNIX (networking is passt's).
+		"-p", "RestrictAddressFamilies=AF_UNIX",
+		"-p", "LockPersonality=yes",
+		"-p", "RestrictRealtime=yes",
+		"-p", "RestrictSUIDSGID=yes",
+		"-p", "SystemCallArchitectures=native",
 		"-p", "BindPaths="+strings.Join(rw, " "),
 		"-p", "BindReadOnlyPaths="+strings.Join(ro, " "),
+		// The client key logs into the guest; QEMU never needs it.
+		"-p", "InaccessiblePaths="+keyPath(),
 		"--", exe, "_vm")
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		stopUnit(netUnit)
+		return err
+	}
+	return nil
 }
 
-// execVM starts one virtiofsd per share plus passt, then execs QEMU, which
-// becomes the unit's main process. Runs inside hanare.service.
+// startNet runs passt inside a rootless network namespace provided by pasta
+// (hanare-net.service), where "hanare _net" installs the LAN block first:
+// the filter sits outside the guest, so guest root cannot remove it.
+func startNet(cfg *Config, exe string) error {
+	stopUnit(netUnit)
+	sock := filepath.Join(runDir(), "passt.sock")
+	os.Remove(sock)
+	lan := "--block-lan"
+	if cfg.Network.AllowLAN {
+		lan = "--allow-lan"
+	}
+	out, err := exec.Command("systemd-run", "--user", "--quiet", "--collect",
+		"--unit="+netUnit, "--description=hanare network (pasta + passt)",
+		"-p", "PartOf="+unit,
+		"-p", "ProtectHome=tmpfs",
+		"-p", "ProtectSystem=strict",
+		"-p", "PrivateTmp=yes",
+		// No NoNewPrivileges here: it stops passt from setting up its own
+		// user namespace inside pasta's. passt and pasta drop privileges and
+		// apply seccomp themselves.
+		"-p", "BindPaths="+runDir(),
+		"-p", "BindReadOnlyPaths="+exe,
+		"--", pasta, "--config-net", "--quiet",
+		"--no-map-gw", "--map-host-loopback", "none", "--dns-forward", nsDNS,
+		"--", exe, "_net", lan).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v: %s", err, out)
+	}
+	if err := waitSocket(sock); err != nil {
+		stopUnit(netUnit)
+		return err
+	}
+	return nil
+}
+
+// execNet runs inside hanare-net's namespace (as its root): block LAN
+// destinations, then become passt. passt has no host-loopback mapping and
+// forwards the guest's DNS through pasta to the host resolver.
+func execNet(args []string) error {
+	if len(args) != 1 || (args[0] != "--block-lan" && args[0] != "--allow-lan") {
+		return errors.New("usage: hanare _net --block-lan|--allow-lan")
+	}
+	if args[0] == "--block-lan" {
+		cmd := exec.Command(nft, "-f", "-")
+		cmd.Stdin = strings.NewReader(lanBlockRules)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("nft: %v: %s", err, out)
+		}
+	}
+	sock := filepath.Join(runDir(), "passt.sock")
+	return syscall.Exec(passt, []string{passt, "--foreground", "--quiet", "--one-off",
+		"--socket", sock, "--no-map-gw",
+		"--dns", guestDNS, "--dns-forward", guestDNS, "--dns-host", nsDNS}, os.Environ())
+}
+
+// execVM starts virtiofsd per share and the vsock backend, then execs QEMU,
+// which becomes the unit's main process. Runs inside hanare.service.
 func execVM() error {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -94,8 +188,11 @@ func execVM() error {
 			return err
 		}
 	}
-
 	pubKey, err := os.ReadFile(keyPath() + ".pub")
+	if err != nil {
+		return err
+	}
+	hostKey, err := os.ReadFile(hostKeyPath())
 	if err != nil {
 		return err
 	}
@@ -103,20 +200,20 @@ func execVM() error {
 	// Runtime shares do not survive a VM restart.
 	os.RemoveAll(sharesStateDir())
 
-	// Configured shares, plus the config dir that "hanare switch" builds from.
+	// Configured shares, plus the guest flake that "hanare switch" builds from.
 	type mount struct {
 		share  Share
 		target string
 	}
 	mounts := []mount{{Share{Path: cfg.Guest.Flake, ReadOnly: true}, "/run/hanare-config"}}
 	for _, s := range cfg.Shares {
-		p, err := resolveShare(s.Path)
+		p, err := cfg.resolveShare(s.Path)
 		if err != nil {
 			return err
 		}
 		mounts = append(mounts, mount{Share{Path: p, ReadOnly: s.ReadOnly}, p})
 	}
-	var fsArgs []string
+	var devArgs []string
 	var fstab strings.Builder
 	for _, m := range mounts {
 		tag := shareTag(m.share.Path)
@@ -125,51 +222,61 @@ func execVM() error {
 		if err := startHelper(sock, virtiofsd, virtiofsdArgs(sock, m.share.Path, m.share.ReadOnly)...); err != nil {
 			return fmt.Errorf("virtiofsd for %s: %w", m.share.Path, err)
 		}
-		fsArgs = append(fsArgs,
+		devArgs = append(devArgs,
 			"-chardev", "socket,id=fs-"+tag+",path="+sock,
 			"-device", "vhost-user-fs-pci,chardev=fs-"+tag+",tag="+tag)
-		fmt.Fprintf(&fstab, "%s %s virtiofs %s,nosuid,nodev,nofail,x-systemd.before=hanare-gitguard.service 0 0\n",
+		fmt.Fprintf(&fstab, "%s %s virtiofs %s,nosuid,nodev,nofail,x-systemd.before=hanare-guard.service 0 0\n",
 			tag, strings.ReplaceAll(m.target, " ", `\040`), mode(m.share.ReadOnly))
 	}
 	// Empty PCIe root ports for "hanare share" to hot-plug into.
 	for i := 0; i < hotplugPorts; i++ {
-		fsArgs = append(fsArgs, "-device", fmt.Sprintf("pcie-root-port,id=hp%d,chassis=%d", i, i+1))
+		devArgs = append(devArgs, "-device", fmt.Sprintf("pcie-root-port,id=hp%d,chassis=%d", i, i+1))
 	}
 
-	// passt without --map-host-loopback: the guest cannot reach services
-	// bound to the host's loopback; only DNS is forwarded explicitly.
-	netSock := filepath.Join(run, "passt.sock")
-	os.Remove(netSock)
-	if err := startHelper(netSock, passt, "--foreground", "--quiet", "--one-off",
-		"--socket", netSock, "--no-map-gw",
-		"--dns", guestDNS, "--dns-forward", guestDNS, "--dns-host", hostDNS); err != nil {
-		return fmt.Errorf("passt: %w", err)
+	// vsock through a vhost-user backend: the host side is an AF_UNIX socket
+	// in our 0700 runtime dir instead of AF_VSOCK, which any host user can
+	// connect to, and the host kernel never parses guest vsock packets.
+	vsockCtl := filepath.Join(run, "vhost-vsock.sock")
+	os.Remove(vsockCtl)
+	os.Remove(vsockSock())
+	if err := startHelper(vsockCtl, vhostVsock(),
+		"--guest-cid", strconv.FormatUint(uint64(cfg.VM.VsockCID), 10),
+		"--socket", vsockCtl, "--uds-path", vsockSock()); err != nil {
+		return fmt.Errorf("vhost-device-vsock: %w", err)
 	}
 
+	cred := func(name string, data []byte) []string {
+		return []string{"-smbios", "type=11,value=io.systemd.credential.binary:" + name + "=" +
+			base64.StdEncoding.EncodeToString(data)}
+	}
 	args := []string{qemu,
 		"-name", "hanare",
+		"-nodefaults",
 		"-machine", "q35,accel=kvm,memory-backend=mem",
-		"-cpu", "host", "-smp", strconv.Itoa(cfg.VM.CPUs), "-m", cfg.VM.Memory,
+		// No nested virtualization: keeps the guest away from KVM's nested
+		// code paths (e.g. CVE-2026-53359, "Januscape").
+		"-cpu", "host,-vmx,-svm",
+		"-smp", strconv.Itoa(cfg.VM.CPUs), "-m", cfg.VM.Memory,
 		"-object", "memory-backend-memfd,id=mem,size=" + cfg.VM.Memory + ",share=on",
 		"-drive", "if=pflash,format=raw,readonly=on,file=" + ovmfCode,
 		"-drive", "if=pflash,format=raw,file=" + vars,
 		"-drive", "if=virtio,format=raw,discard=unmap,file=" + diskPath(),
-		"-netdev", "stream,id=net0,server=off,addr.type=unix,addr.path=" + netSock,
+		"-netdev", "stream,id=net0,server=off,addr.type=unix,addr.path=" + filepath.Join(run, "passt.sock"),
 		"-device", "virtio-net-pci,netdev=net0",
-		"-device", fmt.Sprintf("vhost-vsock-pci,guest-cid=%d", cfg.VM.VsockCID),
-		// Guest systemd reads this credential as extra fstab entries.
-		"-smbios", "type=11,value=io.systemd.credential.binary:fstab.extra=" +
-			base64.StdEncoding.EncodeToString([]byte(fstab.String())),
-		// Read by hanare-authorized-keys.service; the guest flake holds no key.
-		"-smbios", "type=11,value=io.systemd.credential.binary:hanare.ssh.authorized_keys=" +
-			base64.StdEncoding.EncodeToString(pubKey),
+		"-chardev", "socket,id=vsock0,path=" + vsockCtl,
+		"-device", "vhost-user-vsock-pci,chardev=vsock0",
 	}
-	args = append(args, fsArgs...)
+	// Guest systemd reads fstab.extra as extra fstab entries; the SSH keys are
+	// installed by hanare-ssh-keys.service, so the guest flake holds no key.
+	args = append(args, cred("fstab.extra", []byte(fstab.String()))...)
+	args = append(args, cred("hanare.ssh.authorized_keys", pubKey)...)
+	args = append(args, cred("hanare.ssh.host_key", hostKey)...)
+	args = append(args, devArgs...)
 	args = append(args,
 		"-device", "virtio-serial-pci",
 		"-chardev", "file,id=con0,path="+filepath.Join(run, "console.log"),
 		"-device", "virtconsole,chardev=con0",
-		"-display", "none", "-serial", "none", "-monitor", "none",
+		"-vga", "none", "-display", "none", "-serial", "none", "-monitor", "none",
 		"-qmp", "unix:"+filepath.Join(run, "qmp.sock")+",server=on,wait=off",
 		"-sandbox", "on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny",
 	)
@@ -249,9 +356,26 @@ func status() error {
 		fmt.Printf("hanare: running, SSH not ready (%v)\n", err)
 		return nil
 	}
-	client.Close()
+	defer client.Close()
 	fmt.Printf("hanare: running, SSH ok (%d ms)\n", time.Since(start).Milliseconds())
+	if sess, err := client.NewSession(); err == nil {
+		out, _ := sess.Output("systemctl show -p ActiveState -p Result --value hanare-verify-store.service | paste -sd ' '")
+		sess.Close()
+		fmt.Printf("hanare: /nix verification: %s\n", verifyState(strings.TrimSpace(string(out))))
+	}
 	return nil
+}
+
+func verifyState(s string) string {
+	switch s {
+	case "inactive success":
+		return "ok"
+	case "activating success":
+		return "running"
+	case "failed exit-code", "inactive exit-code":
+		return "FAILED (see: hanare run journalctl -u hanare-verify-store)"
+	}
+	return s
 }
 
 func logs() error {
@@ -306,32 +430,49 @@ func reinstall(yes bool) error {
 	if err := os.Rename(tmp, diskPath()); err != nil {
 		return err
 	}
-	os.Remove(hostKeyPath())
+	// A fresh guest gets a fresh host key; the host generates and pins it.
+	if err := ensureHostKey(true); err != nil {
+		return err
+	}
 	fmt.Println("hanare: disk replaced:", diskPath())
 	return nil
 }
 
-// selfUpdate builds ~/.local/src/hanare and installs it as ~/.local/bin/hanare.
+// selfUpdate builds ~/.local/src/hanare and installs hanare to ~/.local/bin
+// and the vsock backend to ~/.local/libexec/hanare.
 func selfUpdate() error {
-	out, err := nixBuild(srcDir(), "default")
-	if err != nil {
-		return err
+	for _, t := range []struct{ attr, bin, dst string }{
+		{"default", "hanare", filepath.Join(binDir(), "hanare")},
+		{"vhost-device-vsock", "vhost-device-vsock", vhostVsock()},
+	} {
+		out, err := nixBuild(srcDir(), t.attr)
+		if err != nil {
+			return err
+		}
+		if err := installFile(filepath.Join(out, "bin", t.bin), t.dst, 0o755); err != nil {
+			return err
+		}
+		fmt.Println("hanare: installed", t.dst)
 	}
-	tmp := filepath.Join(binDir(), ".hanare.new")
-	os.Remove(tmp)
-	if err := copyFile(filepath.Join(out, "bin/hanare"), tmp, 0o755); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, filepath.Join(binDir(), "hanare")); err != nil {
-		return err
-	}
-	fmt.Println("hanare: installed", filepath.Join(binDir(), "hanare"))
 	return nil
+}
+
+func installFile(src, dst string, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	tmp := filepath.Join(filepath.Dir(dst), "."+filepath.Base(dst)+".new")
+	os.Remove(tmp)
+	if err := copyFile(src, tmp, mode); err != nil {
+		return err
+	}
+	return os.Rename(tmp, dst)
 }
 
 // nixBuild builds flake#attr and returns its output path as seen from the host.
 func nixBuild(flake, attr string) (string, error) {
-	build := exec.Command("nix", "build", "--no-link", "--print-out-paths", "path:"+flake+"#"+attr)
+	// "^out": only the main output (packages may also have man/doc outputs).
+	build := exec.Command("nix", "build", "--no-link", "--print-out-paths", "path:"+flake+"#"+attr+"^out")
 	build.Stderr = os.Stderr
 	out, err := build.Output()
 	if err != nil {

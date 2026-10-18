@@ -90,6 +90,8 @@ func dispatch() int {
 		err = listLinks()
 	case "_vm":
 		err = execVM()
+	case "_net":
+		err = execNet(args)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:

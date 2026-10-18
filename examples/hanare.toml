@@ -11,6 +11,11 @@ memory = "4G"
 disk_size = "20G"
 vsock_cid = 4242
 
+[network]
+# true: let the guest reach LAN, Tailscale (CGNAT) and link-local addresses.
+# Enforced on the host (nftables in hanare's rootless network namespace).
+allow_lan = false
+
 # Host directories visible in the guest at the same path.
 [[share]]
 path = "~/Work"

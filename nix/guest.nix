@@ -6,25 +6,79 @@ let
   cfg = config.hanare;
   user = cfg.user;
   home = "/home/${user}";
-  protectGit = cfg.protectGit;
+  protect = cfg.protectShares;
 
-  # Makes every .git directory inside writable shares read-only (bind mounts
-  # owned by root, so unprivileged tools cannot lift them): a guest that could
-  # write .git/hooks or .git/config would get code run by git on the host.
-  # Usage: hanare-gitguard [DIR...] (default: all writable virtiofs mounts).
-  gitGuard = pkgs.writeShellScript "hanare-gitguard" ''
+  # Paths inside shares that host-side tools execute or trust as configuration
+  # (git, Claude Code, Codex, Gemini CLI, Cursor, VS Code, direnv, mise, ...).
+  # A guest that could write them would get code run on the host.
+  protectedNames = [
+    ".git" ".claude" ".codex" ".gemini" ".cursor" ".vscode" ".idea" ".devcontainer"
+    ".husky" ".githooks" ".mise" ".mcp.json" "CLAUDE.md" "CLAUDE.local.md" "AGENTS.md"
+    "GEMINI.md" ".cursorrules" ".envrc" "mise.toml" ".mise.toml"
+  ];
+  namesRegex = lib.concatMapStringsSep "|" lib.escapeRegex protectedNames;
+  guardPath = lib.makeBinPath (with pkgs; [ util-linux findutils gnugrep gnused coreutils ]);
+
+  # Bind-mounts existing protected paths read-only (root-owned mounts, so
+  # unprivileged guest processes cannot lift them), including bare-repository
+  # layouts and the targets of ".git" gitdir files.
+  # Usage: hanare-guard [DIR...] (default: all writable shares).
+  shareGuard = pkgs.writeShellScript "hanare-guard" ''
     set -uo pipefail
-    export PATH=${lib.makeBinPath [ pkgs.util-linux pkgs.findutils pkgs.gnugrep pkgs.coreutils ]}
+    export PATH=${guardPath}
     roots=("$@")
     if (( ''${#roots[@]} == 0 )); then
       mapfile -t roots < <(findmnt -rn -t virtiofs -O rw -o TARGET | grep '^${home}/')
     fi
+    protect() {
+      [[ -e $1 ]] || return 0
+      findmnt -rn --mountpoint "$1" -O ro >/dev/null && return 0
+      mount --bind -- "$1" "$1" && mount -o remount,bind,ro -- "$1"
+    }
     for root in "''${roots[@]}"; do
-      find "$root" -xdev -maxdepth 6 -type d -name node_modules -prune -o -type d -name .git -print -prune |
-        while IFS= read -r d; do
-          findmnt -rn --mountpoint "$d" -O ro >/dev/null && continue
-          mount --bind "$d" "$d" && mount -o remount,bind,ro "$d"
-        done
+      while IFS= read -r -d "" p; do
+        protect "$p"
+        # Worktrees/submodules: ".git" is a file pointing at the real gitdir.
+        if [[ -f $p && ''${p##*/} == .git ]]; then
+          target=$(sed -n 's/^gitdir: //p' "$p" | head -1)
+          [[ $target == /* ]] || target=$(dirname "$p")/$target
+          target=$(realpath -m -- "$target")
+          [[ $target == "$root"/* ]] && protect "$target"
+        fi
+      done < <(find "$root" -xdev -maxdepth 6 -name node_modules -prune -o \
+                 -regextype posix-extended -regex '.*/(${namesRegex})' -print0 -prune)
+      # Bare-repository layouts outside .git (git would treat them as repos).
+      while IFS= read -r -d "" head; do
+        d=$(dirname "$head")
+        [[ -d $d/objects && -d $d/refs ]] && protect "$d"
+      done < <(find "$root" -xdev -maxdepth 6 \( -name node_modules -o -name .git \) -prune -o \
+                 -type f -name HEAD -print0)
+    done
+  '';
+
+  # Compiled BPF LSM program (see namegate.bpf.c).
+  nameGateObj = pkgs.runCommand "hanare-namegate.bpf.o" {
+    nativeBuildInputs = [ pkgs.llvmPackages.clang-unwrapped ];
+  } ''
+    clang -O2 -g -target bpf -D__TARGET_ARCH_x86 \
+      -I${pkgs.libbpf}/include -I${pkgs.linuxHeaders}/include \
+      -c ${./namegate.bpf.c} -o $out
+  '';
+
+  # Loads the name gate and fills denied_names (keys zero-padded to 64 bytes).
+  nameGateLoad = pkgs.writeShellScript "hanare-namegate-load" ''
+    set -euo pipefail
+    export PATH=${lib.makeBinPath (with pkgs; [ bpftools coreutils gnugrep ])}
+    grep -qw bpf /sys/kernel/security/lsm || { echo "BPF LSM is not active" >&2; exit 1; }
+    d=/sys/fs/bpf/hanare-namegate
+    rm -rf "$d"
+    mkdir -p "$d"
+    bpftool prog loadall ${nameGateObj} "$d/progs" pinmaps "$d/maps" autoattach
+    for name in ${lib.escapeShellArgs protectedNames}; do
+      key=$(printf '%s' "$name" | head -c 64 | od -An -v -tx1)
+      pad=$(( 64 - ''${#name} ))
+      (( pad > 0 )) && key="$key $(head -c "$pad" /dev/zero | od -An -v -tx1)"
+      bpftool map update pinned "$d/maps/denied_names" key hex $key value hex 01
     done
   '';
 
@@ -41,7 +95,11 @@ let
     case $1 in
       start)
         ${pkgs.util-linux}/bin/mount -t virtiofs -o "$mode,nosuid,nodev" -- "$tag" "$real"
-        ${lib.optionalString protectGit ''[[ $mode == rw ]] && ${gitGuard} "$real"''}
+        ${lib.optionalString protect ''
+          if [[ $mode == rw ]]; then
+            ${shareGuard} "$real"
+          fi
+        ''}
         ;;
       stop) exec ${pkgs.util-linux}/bin/umount -R -- "$real" ;;
     esac
@@ -55,15 +113,24 @@ in
       type = lib.types.str;
       description = "Guest login user; must be the host user that runs hanare (UID/GID 1000 in the guest).";
     };
-    allowLan = lib.mkOption {
-      type = lib.types.bool;
-      default = false;
-      description = "Allow traffic to private/LAN, CGNAT (Tailscale) and link-local addresses.";
-    };
-    protectGit = lib.mkOption {
+    protectShares = lib.mkOption {
       type = lib.types.bool;
       default = true;
-      description = "Bind-mount .git directories in writable shares read-only.";
+      description = ''
+        Keep existing host-executed configuration in writable shares (.git,
+        .claude, .mcp.json, .envrc, .vscode, ...) read-only in the guest.
+        Newly created paths are blocked separately (blockConfigCreation).
+      '';
+    };
+    blockConfigCreation = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Deny creating those names (create, mkdir, mknod, symlink, link,
+        rename) on the virtiofs shares, via a BPF LSM program. Guest root
+        could unload it; unprivileged processes cannot. Also blocks e.g.
+        `git init` inside shares from the guest.
+      '';
     };
   };
 
@@ -127,24 +194,10 @@ in
     # passt (user-mode networking): plain DHCP on the virtio NIC.
     networking.useNetworkd = true;
     networking.useDHCP = true;
+    # LAN/loopback egress is filtered on the host (network.allow_lan in
+    # hanare.toml), where guest root cannot change it.
     networking.nftables.enable = true;
     networking.firewall.enable = true;
-    # hanare.allowLan = false: no traffic to private/LAN, Tailscale (CGNAT)
-    # or link-local addresses; DNS goes to passt's forwarder (192.0.2.53).
-    networking.nftables.tables.hanare-egress = lib.mkIf (!cfg.allowLan) {
-      family = "inet";
-      content = ''
-        chain output {
-          type filter hook output priority filter; policy accept;
-          oifname "lo" accept
-          ip daddr 192.0.2.53 accept
-          udp dport 67 accept
-          ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16 } reject
-          meta l4proto ipv6-icmp accept
-          ip6 daddr { fc00::/7, fe80::/10 } reject
-        }
-      '';
-    };
 
     # Only key-based logins over vsock; no passwords, no sudo.
     users.mutableUsers = false;
@@ -167,27 +220,37 @@ in
       enable = true;
       openFirewall = false;
       listenAddresses = [ { addr = "127.0.0.1"; port = 22; } ];
-      # Persisted so the host's pinned key stays valid across reboots.
-      hostKeys = [ { path = "/persist/ssh/ssh_host_ed25519_key"; type = "ed25519"; } ];
-      # The host passes its public key as the hanare.ssh.authorized_keys credential.
+      # Both keys come from the host as credentials (see hanare-ssh-keys):
+      # the host pins the host key it generated, and the flake holds no key.
+      hostKeys = [ ];
       authorizedKeysFiles = [ "/run/hanare/authorized_keys" ];
+      extraConfig = "HostKey /run/hanare/ssh_host_ed25519_key";
       settings = {
         PermitRootLogin = "no";
         PasswordAuthentication = false;
         KbdInteractiveAuthentication = false;
+        AllowUsers = [ user ];
+        DisableForwarding = true;
+        PermitTunnel = "no";
+        MaxAuthTries = 2;
       };
     };
     systemd.services.sshd.enable = false;
-    systemd.services.hanare-authorized-keys = {
+    systemd.services.hanare-ssh-keys = {
       wantedBy = [ "multi-user.target" ];
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
-        ImportCredential = "hanare.ssh.authorized_keys";
+        ImportCredential = [ "hanare.ssh.authorized_keys" "hanare.ssh.host_key" ];
         RuntimeDirectory = "hanare";
         RuntimeDirectoryPreserve = true;
-        ExecStart = "${pkgs.coreutils}/bin/install -m 0644 \${CREDENTIALS_DIRECTORY}/hanare.ssh.authorized_keys /run/hanare/authorized_keys";
       };
+      # "restrict,pty": no forwarding of any kind, only a terminal.
+      script = ''
+        ${pkgs.gnused}/bin/sed 's/^/restrict,pty /' "$CREDENTIALS_DIRECTORY/hanare.ssh.authorized_keys" > /run/hanare/authorized_keys
+        chmod 0644 /run/hanare/authorized_keys
+        install -m 0600 "$CREDENTIALS_DIRECTORY/hanare.ssh.host_key" /run/hanare/ssh_host_ed25519_key
+      '';
     };
     systemd.sockets.hanare-ssh = {
       wantedBy = [ "sockets.target" ];
@@ -197,11 +260,9 @@ in
       };
     };
     systemd.services."hanare-ssh@" = {
-      # No ordering on hanare-authorized-keys: with Accept=yes it would put the
-      # socket in an ordering cycle. The key file exists long before the host
-      # connects, and hanare retries until SSH succeeds.
-      after = [ "sshd-keygen.service" ];
-      wants = [ "sshd-keygen.service" ];
+      # No ordering on hanare-ssh-keys: with Accept=yes it would put the socket
+      # in an ordering cycle. The keys exist long before the host connects, and
+      # hanare retries until SSH succeeds.
       serviceConfig = {
         ExecStart = "-${config.services.openssh.package}/bin/sshd -i -f /etc/ssh/sshd_config";
         StandardInput = "socket";
@@ -220,23 +281,52 @@ in
       };
     };
 
-    # hanare.protectGit (default true): see gitGuard above. Runs once
-    # the boot-time shares are mounted, then every 30s for repositories created later.
-    systemd.services.hanare-gitguard = lib.mkIf protectGit {
+    # hanare.protectShares: guard existing paths once the boot-time shares are
+    # mounted and every 30s after.
+    systemd.services.hanare-guard = lib.mkIf protect {
       wantedBy = [ "multi-user.target" ];
       after = [ "local-fs.target" "remote-fs.target" ];
       serviceConfig = {
         Type = "oneshot";
-        ExecStart = "${gitGuard}";
+        ExecStart = "${shareGuard}";
       };
     };
-    systemd.timers.hanare-gitguard = lib.mkIf protectGit {
+    systemd.timers.hanare-guard = lib.mkIf protect {
       wantedBy = [ "timers.target" ];
       timerConfig = {
         OnActiveSec = "30s";
         OnUnitActiveSec = "30s";
         AccuracySec = "5s";
       };
+    };
+    # hanare.blockConfigCreation: BPF LSM name gate on the virtiofs shares.
+    # Starts before user sessions so commands never run without it.
+    systemd.services.hanare-namegate = lib.mkIf cfg.blockConfigCreation {
+      wantedBy = [ "multi-user.target" ];
+      before = [ "systemd-user-sessions.service" ];
+      after = [ "sys-fs-bpf.mount" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = "${nameGateLoad}";
+        ExecStop = "${pkgs.coreutils}/bin/rm -rf /sys/fs/bpf/hanare-namegate";
+      };
+    };
+
+    # /nix persists across boots, so tampering would outlive a session; check
+    # the store's contents against its database shortly after each boot
+    # ("hanare status" reports the result).
+    systemd.services.hanare-verify-store = {
+      serviceConfig = {
+        Type = "oneshot";
+        Nice = 19;
+        IOSchedulingClass = "idle";
+        ExecStart = "${config.nix.package}/bin/nix-store --verify --check-contents";
+      };
+    };
+    systemd.timers.hanare-verify-store = {
+      wantedBy = [ "timers.target" ];
+      timerConfig.OnBootSec = "1min";
     };
 
     # "hanare switch": rebuild from the host's config, shared read-only at

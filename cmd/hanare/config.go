@@ -25,6 +25,9 @@ type Config struct {
 		DiskSize string `toml:"disk_size"`
 		VsockCID uint32 `toml:"vsock_cid"`
 	} `toml:"vm"`
+	Network struct {
+		AllowLAN bool `toml:"allow_lan"`
+	} `toml:"network"`
 	Shares   []Share `toml:"share"`
 	Commands struct {
 		Expose []string `toml:"expose"`
@@ -47,7 +50,10 @@ func stateDir() string    { return filepath.Join(home(), ".local/state/hanare") 
 func binDir() string      { return filepath.Join(home(), ".local/bin") }
 func diskPath() string    { return filepath.Join(stateDir(), "hanare.raw") }
 func keyPath() string     { return filepath.Join(stateDir(), "ssh/id_ed25519") }
-func hostKeyPath() string { return filepath.Join(stateDir(), "host_key.pub") }
+func hostKeyPath() string { return filepath.Join(stateDir(), "ssh/host_ed25519") }
+func libexecDir() string  { return filepath.Join(home(), ".local/libexec/hanare") }
+func vhostVsock() string  { return filepath.Join(libexecDir(), "vhost-device-vsock") }
+func vsockSock() string   { return filepath.Join(runDir(), "vsock.sock") }
 
 // guestUser is the login user in the guest: the same name as the host user
 // (hanare.user in the guest flake), which owns the shares as UID 1000.
@@ -74,6 +80,9 @@ func loadConfig() (*Config, error) {
 		c.Guest.Flake = filepath.Join(configDir(), "guest")
 	}
 	c.Guest.Flake = expandHome(c.Guest.Flake)
+	if real, err := filepath.EvalSymlinks(c.Guest.Flake); err == nil {
+		c.Guest.Flake = real
+	}
 	if c.VM.CPUs == 0 {
 		c.VM.CPUs = 2
 	}
@@ -122,20 +131,26 @@ func expandHome(p string) string {
 
 // sensitive lists directories that must never be shared, nor any directory
 // containing them: secrets, and files the host executes or trusts (a guest
-// that could write these would escape to the host).
-func sensitive() []string {
+// that could write these would escape to the host). Symlinked config (e.g.
+// into a dotfiles checkout) is covered through its resolved location.
+func (c *Config) sensitive() []string {
 	h := home()
-	return []string{
+	out := []string{
 		filepath.Join(h, ".ssh"),
 		filepath.Join(h, ".gnupg"),
 		filepath.Join(h, ".claude"),
 		filepath.Join(h, ".config"),
 		filepath.Join(h, ".local"),
+		c.Guest.Flake,
 	}
+	if real, err := filepath.EvalSymlinks(configFile()); err == nil {
+		out = append(out, filepath.Dir(real))
+	}
+	return out
 }
 
 // resolveShare validates a share path and returns its real absolute path.
-func resolveShare(p string) (string, error) {
+func (c *Config) resolveShare(p string) (string, error) {
 	abs, err := filepath.Abs(expandHome(p))
 	if err != nil {
 		return "", err
@@ -150,7 +165,7 @@ func resolveShare(p string) (string, error) {
 	if !within(real, home()) || real == home() {
 		return "", fmt.Errorf("%s: only directories below %s can be shared", real, home())
 	}
-	for _, s := range sensitive() {
+	for _, s := range c.sensitive() {
 		if within(real, s) || within(s, real) {
 			return "", fmt.Errorf("%s: refusing to share (overlaps %s)", real, s)
 		}
@@ -173,7 +188,7 @@ func shareTag(path string) string {
 func (c *Config) activeShares() []Share {
 	var out []Share
 	for _, s := range c.Shares {
-		if p, err := resolveShare(s.Path); err == nil {
+		if p, err := c.resolveShare(s.Path); err == nil {
 			out = append(out, Share{Path: p, ReadOnly: s.ReadOnly})
 		}
 	}

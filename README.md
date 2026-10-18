@@ -7,28 +7,43 @@ executes a command inside the VM in your current directory.
 
 ## How it works
 
-- **VM:** QEMU (KVM) runs as a transient user unit, `hanare.service`. The
-  unit is sandboxed with `ProtectHome=tmpfs` and `ProtectSystem=strict`, so
-  QEMU sees only the shared directories and hanare's own files.
+- **VM:** QEMU (KVM) runs as a transient user unit, `hanare.service`.
+  - The unit is sandboxed with `ProtectHome=tmpfs`, `ProtectSystem=strict`
+    and `RestrictAddressFamilies=AF_UNIX`. QEMU sees only the shared
+    directories and hanare's own files, not the SSH client key.
+  - QEMU runs with `-nodefaults`, nested virtualization off and
+    `-sandbox on`.
 - **Shares:** one rootless `virtiofsd` per shared directory. Only your
   UID/GID is mapped, so files the guest writes are owned by you on the host.
   `ro` is enforced by virtiofsd itself.
-- **Network:** `passt` without host-loopback mapping, so the guest cannot
-  reach services on the host's `127.0.0.1`. Unless `hanare.allowLan` is set,
-  the guest firewall also blocks private, link-local and CGNAT (Tailscale)
-  ranges.
-- **Access:** SSH over vsock with a dedicated key. The host passes the public
-  key as a systemd credential at boot, so the guest flake holds no key. The
-  guest has no passwords, no sudo and no root login.
+- **Network:** `passt` runs in a rootless network namespace provided by
+  `pasta` (`hanare-net.service`).
+  - Neither maps the host's loopback, so the guest cannot reach services on
+    the host's `127.0.0.1`.
+  - Unless `network.allow_lan` is set, nftables in that namespace rejects
+    private, link-local (including cloud metadata) and CGNAT (Tailscale)
+    destinations. The rules sit outside the guest, so guest root cannot
+    remove them.
+- **Access:** SSH over vsock with a dedicated key.
+  - vsock goes through `vhost-device-vsock`, so the host end is an AF_UNIX
+    socket in hanare's 0700 runtime directory. Other host users cannot reach
+    it, and the host kernel does not parse guest vsock traffic.
+  - The host generates the guest's SSH host key and pins it.
+  - At boot, the host passes the guest's host key and its own public key
+    (marked `restrict,pty`) as systemd credentials, so the guest flake holds
+    no key.
+  - sshd allows only that user and no forwarding. The guest has no
+    passwords, no sudo and no root login.
 - **Guest filesystem:**
   - `/` is tmpfs and is reset on every boot.
-  - `/nix` and the SSH host key are kept on disk under `/persist`.
+  - `/nix` is kept on disk under `/persist`. Shortly after every boot it is
+    checked against the Nix database, and `hanare status` shows the result.
   - Only the shared directories hold data that lasts.
 
 ## Requirements
 
-Arch Linux packages: `qemu-base virtiofsd edk2-ovmf passt`, plus systemd
-v256 or later.
+Arch Linux packages: `qemu-base virtiofsd edk2-ovmf passt nftables`, plus
+systemd v256 or later.
 
 You also need Nix with flakes. It can run rootless, for example as a static
 `nix` binary with `store = local?root=$HOME/.local/share/nix-root`.
@@ -37,6 +52,7 @@ You also need Nix with flakes. It can run rootless, for example as a static
 
 ```
 ~/.local/src/hanare/      this repository (CLI + nixosModules.default)
+~/.local/libexec/hanare/  vhost-device-vsock (installed by "hanare update")
 ~/.config/hanare/
 ├── hanare.toml           host settings: VM size, shares, exposed commands
 └── guest/                your guest flake (nixosConfigurations.hanare)
@@ -56,6 +72,7 @@ cp ~/.local/src/hanare/examples/hanare.toml ~/.config/hanare/
 cp -r ~/.local/src/hanare/examples/guest ~/.config/hanare/guest   # set hanare.user
 ssh-keygen -t ed25519 -N '' -C hanare -f ~/.local/state/hanare/ssh/id_ed25519
 install -m 0755 "$(nix build --no-link --print-out-paths path:$HOME/.local/src/hanare)/bin/hanare" ~/.local/bin/
+hanare update        # also installs vhost-device-vsock
 hanare reinstall && hanare up
 ```
 
@@ -86,14 +103,20 @@ builds from a read-only copy of that directory alone.
 
 ## Caveats
 
-- **Shared repositories:** a guest with write access to a git repository can
-  plant hooks or `.git/config` settings. The host then runs them the next
-  time it uses git in that repository. With `hanare.protectGit` (the
-  default), the guest bind-mounts every `.git` inside writable shares
-  read-only. This happens at boot, on `hanare share`, and every 30s after
-  that. Unprivileged guest processes cannot undo these mounts. A repository
-  created after the last pass stays writable until the next one, and git
-  operations that write `.git` must run on the host.
+- **Writable shares are trusted input:** whatever the guest writes into a
+  writable share is later read, and possibly executed, by host tools. That
+  includes git hooks and `.git/config` (including bare-repo layouts), agent
+  settings such as `.claude/settings.json`, `.mcp.json`, `.envrc`, build
+  scripts and binaries.
+  - With `hanare.protectShares` (the default), existing paths of that kind
+    (`.git`, `.claude`, `.envrc`, `.vscode`, ...) are bind-mounted read-only
+    inside the guest at boot, on `hanare share`, and every 30s.
+  - Newly created ones are not blocked.
+  - Neutralize such files on the host side, for example:
+    - run git with `safe.bareRepository=explicit` (protected config) and a
+      `core.hooksPath` you control;
+    - start agents with project hooks disabled in shared directories;
+    - use read-only shares where the guest only needs to read.
 - **Linked tool names:** links in `~/.local/bin` lose to host commands that
   come earlier in `PATH`. `hanare link` skips those names.
 - **Refused shares:** `hanare` will not share `$HOME` itself, `~/.ssh`,

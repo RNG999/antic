@@ -2,13 +2,16 @@ package main
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -17,31 +20,37 @@ import (
 	"golang.org/x/term"
 )
 
-// vsockConn adapts a connected AF_VSOCK socket to net.Conn; *os.File already
-// provides Read/Write/Close and deadlines for non-blocking descriptors.
-type vsockConn struct{ *os.File }
-
-type vsockAddr struct{}
-
-func (vsockAddr) Network() string      { return "vsock" }
-func (vsockAddr) String() string       { return "vsock" }
-func (vsockConn) LocalAddr() net.Addr  { return vsockAddr{} }
-func (vsockConn) RemoteAddr() net.Addr { return vsockAddr{} }
-
-func dialVsock(cid, port uint32) (net.Conn, error) {
-	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+// dialGuest connects to guest vsock port 22 through vhost-device-vsock's
+// host socket ("hybrid vsock": send "CONNECT <port>", expect "OK <port>").
+func dialGuest() (net.Conn, error) {
+	c, err := net.DialTimeout("unix", vsockSock(), 2*time.Second)
 	if err != nil {
 		return nil, err
 	}
-	if err := unix.Connect(fd, &unix.SockaddrVM{CID: cid, Port: port}); err != nil {
-		unix.Close(fd)
+	c.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.WriteString(c, "CONNECT 22\n"); err != nil {
+		c.Close()
 		return nil, err
 	}
-	if err := unix.SetNonblock(fd, true); err != nil {
-		unix.Close(fd)
-		return nil, err
+	// Read the reply byte by byte so no SSH data is consumed.
+	var line []byte
+	b := make([]byte, 1)
+	for len(line) < 64 {
+		if _, err := c.Read(b); err != nil {
+			c.Close()
+			return nil, fmt.Errorf("vsock handshake: %w", err)
+		}
+		if b[0] == '\n' {
+			break
+		}
+		line = append(line, b[0])
 	}
-	return vsockConn{os.NewFile(uintptr(fd), "vsock")}, nil
+	if !bytes.HasPrefix(line, []byte("OK ")) {
+		c.Close()
+		return nil, fmt.Errorf("vsock handshake: %q", line)
+	}
+	c.SetDeadline(time.Time{})
+	return c, nil
 }
 
 // dial opens an SSH connection to the guest over vsock port 22.
@@ -54,11 +63,11 @@ func (c *Config) dial() (*ssh.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	conn, err := dialVsock(c.VM.VsockCID, 22)
+	conn, err := dialGuest()
 	if err != nil {
 		return nil, err
 	}
-	conn.(vsockConn).SetDeadline(time.Now().Add(10 * time.Second))
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
 	sc, chans, reqs, err := ssh.NewClientConn(conn, "hanare", &ssh.ClientConfig{
 		User:            guestUser(),
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
@@ -68,25 +77,48 @@ func (c *Config) dial() (*ssh.Client, error) {
 		conn.Close()
 		return nil, err
 	}
-	conn.(vsockConn).SetDeadline(time.Time{})
+	conn.SetDeadline(time.Time{})
 	return ssh.NewClient(sc, chans, reqs), nil
 }
 
-// pinHostKey trusts the guest's host key on first use; "hanare reinstall"
-// forgets it because a fresh image generates new keys.
+// pinHostKey accepts only the host key hanare generated for this guest
+// (see ensureHostKey); there is no trust-on-first-use window.
 func pinHostKey(_ string, _ net.Addr, key ssh.PublicKey) error {
-	got := ssh.MarshalAuthorizedKey(key)
-	want, err := os.ReadFile(hostKeyPath())
-	if errors.Is(err, fs.ErrNotExist) {
-		return os.WriteFile(hostKeyPath(), got, 0o600)
-	}
+	want, err := os.ReadFile(hostKeyPath() + ".pub")
 	if err != nil {
 		return err
 	}
-	if !bytes.Equal(bytes.TrimSpace(want), bytes.TrimSpace(got)) {
-		return fmt.Errorf("guest host key changed (delete %s if the image was rebuilt)", hostKeyPath())
+	if !bytes.Equal(bytes.TrimSpace(want), bytes.TrimSpace(ssh.MarshalAuthorizedKey(key))) {
+		return errors.New("guest host key does not match the one hanare generated")
 	}
 	return nil
+}
+
+// ensureHostKey creates the guest's SSH host key (passed to the guest as a
+// credential at boot) if missing, or always when regenerate is set.
+func ensureHostKey(regenerate bool) error {
+	if _, err := os.Stat(hostKeyPath()); err == nil && !regenerate {
+		return nil
+	}
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return err
+	}
+	block, err := ssh.MarshalPrivateKey(priv, "hanare guest host key")
+	if err != nil {
+		return err
+	}
+	sshPub, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(hostKeyPath()), 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(hostKeyPath()+".pub", ssh.MarshalAuthorizedKey(sshPub), 0o644); err != nil {
+		return err
+	}
+	return os.WriteFile(hostKeyPath(), pem.EncodeToMemory(block), 0o600)
 }
 
 // connect dials the guest, starting the VM first if it is not running.
