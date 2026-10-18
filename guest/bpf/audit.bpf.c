@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 // Activity log for one guest user: program executions, outgoing connections
 // and files opened for writing, sent to user space through a ring buffer.
-// Observes only (never denies). Loaded by "hanare guest audit".
+// Observes only (never denies). Loaded by "hanare vm audit".
 
 #include <linux/types.h>
 #include <linux/bpf.h>

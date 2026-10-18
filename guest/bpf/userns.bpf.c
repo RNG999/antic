@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 // Deny creating user namespaces to everyone but root in the guest. Most
 // kernel exploits start from an unprivileged user namespace; root (e.g. the
-// nix-daemon build sandbox) keeps working. Loaded by "hanare guest userns".
+// nix-daemon build sandbox) keeps working. Loaded by "hanare vm userns".
 
 #include <linux/types.h>
 #include <linux/bpf.h>

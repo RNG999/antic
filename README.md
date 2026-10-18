@@ -1,19 +1,22 @@
 # hanare
 
-A NixOS VM for running CLI tools, especially ones an AI agent drives,
-isolated from the host. Everything runs as your own user, with no root
+NixOS VMs ("guests") for running CLI tools, especially ones an AI agent
+drives, isolated from the host. Everything runs as your own user, with no root
 daemon. Host directories are shared at the same path, and `hanare run`
 executes a command inside the VM in your current directory.
 
 ## How it works
 
-- **Units:** everything runs as transient user units, visible with
-  `systemctl --user list-units 'hanare*'`:
-  - `hanare.service` runs QEMU;
-  - `hanare-net.service` runs pasta and passt;
-  - `hanare-vsock.service` runs vhost-device-vsock;
-  - `hanare-share-<tag>.service` runs one virtiofsd per share.
-- **VM:** QEMU (KVM) runs in `hanare.service`.
+- **Guests:** defined in `hanare.toml` as `[guests.NAME]`; each gets a
+  random ID when its disk is first built. State lives under
+  `~/.local/state/hanare/guests/<ID>/`, and `names/<NAME>` links to it.
+- **Units:** everything runs as transient user units, managed over D-Bus,
+  in one slice per guest (`systemctl --user status hanare-<ID>.slice`):
+  - `hanare@<ID>.service` runs QEMU;
+  - `hanare-net@<ID>.service` runs pasta and passt;
+  - `hanare-vsock@<ID>.service` runs vhost-device-vsock;
+  - `hanare-share@<ID>:<tag>.service` runs one virtiofsd per share.
+- **VM:** QEMU (KVM) runs in `hanare@<ID>.service`.
   - The unit is sandboxed with `ProtectHome=tmpfs`, `ProtectSystem=strict`
     and `RestrictAddressFamilies=AF_UNIX`. QEMU sees only the shared
     directories and hanare's own files, not the SSH client key.
@@ -26,7 +29,7 @@ executes a command inside the VM in your current directory.
   `pasta` (`hanare-net.service`).
   - Neither maps the host's loopback, so the guest cannot reach services on
     the host's `127.0.0.1`.
-  - Unless `network.allow_lan` is set, nftables in that namespace rejects
+  - Unless `allow_lan` is set for the guest, nftables in that namespace rejects
     private, link-local (including cloud metadata) and CGNAT (Tailscale)
     destinations. The rules sit outside the guest, so guest root cannot
     remove them.
@@ -42,7 +45,7 @@ executes a command inside the VM in your current directory.
     passwords, no sudo and no root login.
   - Each `hanare run` is one sshd unit instance in the guest (PAM is off,
     so the session stays in that unit's cgroup).
-  - `hanare run --offline`, and the commands in `commands.offline`, use a
+  - `hanare run --offline`, and the commands in the guest's `offline`, use a
     second sshd unit with no network at all: a private network namespace
     plus `IPAddressDeny=any`. The resolver, nsncd, D-Bus and the nix-daemon
     are hidden there.
@@ -86,9 +89,9 @@ examples/         hanare.toml and a guest flake to start from
 ~/.local/src/hanare/      this repository
 ~/.local/libexec/hanare/  vhost-device-vsock (installed by "hanare update")
 ~/.config/hanare/
-├── hanare.toml           host settings: VM size, shares, exposed commands
-└── guest/                your guest flake (nixosConfigurations.hanare)
-~/.local/state/hanare/    VM disk, SSH key, pinned guest host key
+├── hanare.toml           the guests: OS (flake, attr), size, shares, network, commands
+└── guest/                your guest flake (nixosConfigurations.<attr>)
+~/.local/state/hanare/    guests/<ID>/ (disk, pinned host key), names/, ssh/ (client key)
 ```
 
 None of these may be inside a shared directory: a guest that could write
@@ -104,8 +107,9 @@ cp ~/.local/src/hanare/examples/hanare.toml ~/.config/hanare/
 cp -r ~/.local/src/hanare/examples/guest ~/.config/hanare/guest   # set hanare.user
 ssh-keygen -t ed25519 -N '' -C hanare -f ~/.local/state/hanare/ssh/id_ed25519
 install -m 0755 "$(nix build --no-link --print-out-paths path:$HOME/.local/src/hanare)/bin/hanare" ~/.local/bin/
-hanare update        # also installs vhost-device-vsock
-hanare reinstall && hanare up
+hanare update             # also installs vhost-device-vsock
+hanare guest reset dev    # build the disk of [guests.dev]
+hanare guest up
 ```
 
 If you use a rootless Nix store, prefix the build output path with the
@@ -114,23 +118,30 @@ store root.
 ## Usage
 
 ```
-hanare run [--offline] CMD...   run CMD in the VM, in the current directory
-hanare shell                interactive shell in the VM
-hanare up | down | status | logs
-hanare audit [-f] [-n N]    guest activity log (JSON lines)
-hanare switch               apply the guest flake to the running VM (nixos-rebuild switch)
-hanare reinstall            replace the VM disk with an image built from the guest flake
-hanare update               rebuild ~/.local/src/hanare and reinstall the hanare binary
-hanare share [--ro] [--save] DIR...   hot-plug a share; --save also appends it to hanare.toml
-hanare unshare DIR...
-hanare link                 sync ~/.local/bin links with commands.expose in hanare.toml
+hanare [-g GUEST] run [--offline] CMD...   run CMD in the guest, in the current directory
+hanare shell                               interactive shell in the guest
+hanare audit [-f] [-n N]                   guest activity log (JSON lines)
+
+hanare guest ls                            all guests and their state
+hanare guest ps [NAME]                     sessions ("hanare run"s) in a guest
+hanare guest up|down [NAME...]
+hanare guest status|logs [NAME]
+hanare guest apply [NAME]                  apply changes in the guest's flake (nixos-rebuild switch)
+hanare guest reset [-y] [NAME]             replace the disk with a fresh image from the flake
+hanare guest create NAME [--from GUEST]    add [guests.NAME] and build its disk
+hanare guest rm [-y] NAME                  delete a guest's disk and state
+
+hanare share ls | add [--ro] [--save] DIR... | rm DIR...
+hanare link ls | sync | add TOOL... | rm TOOL...
+hanare update                              rebuild hanare from ~/.local/src/hanare and install it
 ```
 
-Add the tools you need to `environment.systemPackages` in your guest
-flake's `configuration.nix`, then run `hanare switch`.
+The guest is chosen by a NAME argument, `-g`, `$HANARE_GUEST`, or `default`
+in `hanare.toml`. Add tools to `environment.systemPackages` in your guest
+flake's `configuration.nix`, then run `hanare guest apply`.
 
-`switch` and `reinstall` stop early if the guest flake's lock pins an older
-state of a local-path input, such as a local hanare checkout. `switch` also
+`apply` and `reset` stop early if the guest flake's lock pins an older
+state of a local-path input, such as a local hanare checkout. `apply` also
 stops if a local-path input lies outside the guest flake, because the guest
 builds from a read-only copy of that directory alone.
 
@@ -151,7 +162,8 @@ builds from a read-only copy of that directory alone.
     - start agents with project hooks disabled in shared directories;
     - use read-only shares where the guest only needs to read.
 - **Linked tool names:** links in `~/.local/bin` lose to host commands that
-  come earlier in `PATH`. `hanare link` skips those names.
+  come earlier in `PATH`. `hanare link add` and `hanare link sync` skip
+  those names.
 - **Refused shares:** `hanare` will not share `$HOME` itself, `~/.ssh`,
   `~/.gnupg`, `~/.claude`, `~/.config` or `~/.local`, nor any directory
   that contains them.

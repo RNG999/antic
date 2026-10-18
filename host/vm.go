@@ -1,6 +1,8 @@
 package host
 
 import (
+	sd "github.com/coreos/go-systemd/v22/dbus"
+
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -13,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 )
 
@@ -45,131 +48,115 @@ const lanBlockRules = `table inet hanare {
 }
 `
 
-func unitActive() bool {
-	return exec.Command("systemctl", "--user", "is-active", "--quiet", unit).Run() == nil
+func (g *Guest) unitActive() bool {
+	if g.ID == "" {
+		return false
+	}
+	return unitActive(g.unit())
 }
 
-// Units started by "hanare up", all transient user services:
+// Units started by "hanare guest up" for the guest with ID, all transient
+// user services in hanare-ID.slice:
 //
-//	hanare.service              QEMU itself
-//	hanare-net.service          pasta + passt (guest networking, LAN block)
-//	hanare-vsock.service        vhost-device-vsock (SSH transport)
-//	hanare-share-<tag>.service  one virtiofsd per shared directory
+//	hanare@ID.service              QEMU itself
+//	hanare-net@ID.service          pasta + passt (guest networking, LAN block)
+//	hanare-vsock@ID.service        vhost-device-vsock (SSH transport)
+//	hanare-share@ID:<tag>.service  one virtiofsd per shared directory
 //
-// Helpers are PartOf=hanare.service, so stopping the VM stops them.
-const (
-	netUnit   = "hanare-net.service"
-	vsockUnit = "hanare-vsock.service"
-)
+// Each runs in its own sandbox with only what it needs. Helpers are PartOf=
+// the QEMU unit, so stopping the VM stops them.
 
-// sandboxProps confines a unit to the given $HOME paths: QEMU or a helper
-// that is compromised sees nothing else from $HOME and cannot write outside.
-func sandboxProps(rw, ro []string) []string {
-	props := []string{
-		"-p", "ProtectHome=tmpfs",
-		"-p", "ProtectSystem=strict",
-		"-p", "PrivateTmp=yes",
-	}
-	if len(rw) > 0 {
-		props = append(props, "-p", "BindPaths="+strings.Join(rw, " "))
-	}
-	if len(ro) > 0 {
-		props = append(props, "-p", "BindReadOnlyPaths="+strings.Join(ro, " "))
-	}
-	return props
+// runUnit starts a transient service of the guest (in its slice) running argv.
+func (g *Guest) runUnit(name, description string, props []sd.Property, argv ...string) error {
+	return startTransient(name, g.slice(), description, props, argv...)
 }
 
-// runUnit starts a transient user service running argv.
-func runUnit(name, description string, props []string, argv ...string) error {
-	args := []string{"--user", "--quiet", "--collect", "--unit=" + name, "--description=" + description}
-	args = append(args, props...)
-	args = append(append(args, "--"), argv...)
-	if out, err := exec.Command("systemd-run", args...).CombinedOutput(); err != nil {
-		return fmt.Errorf("start %s: %v: %s", name, err, out)
+// stopAll stops the guest's VM and every helper unit, including leftovers.
+func (g *Guest) stopAll() {
+	if g.ID != "" {
+		stopUnit(g.unit())
+		stopUnit(g.slice())
 	}
-	return nil
 }
 
-// stopAll stops the VM and every helper unit, including leftovers.
-func stopAll() {
-	exec.Command("systemctl", "--user", "stop", unit, "hanare-*.service").Run()
-}
-
-func startUnit() error {
-	cfg, err := loadConfig()
-	if err != nil {
+// start boots the guest: helpers first, then QEMU.
+func (g *Guest) start() error {
+	if g.ID == "" {
+		return fmt.Errorf("guest %s has no disk yet; run \"hanare guest reset %s\"", g.Name, g.Name)
+	}
+	if _, err := os.Stat(g.diskPath()); err != nil {
+		return fmt.Errorf("guest %s has no disk yet; run \"hanare guest reset %s\"", g.Name, g.Name)
+	}
+	if err := g.ensureHostKey(false); err != nil {
 		return err
 	}
-	if err := ensureHostKey(false); err != nil {
-		return err
-	}
-	stopAll()
-	run := runDir()
+	g.stopAll()
+	run := g.runDir()
 	if err := os.MkdirAll(run, 0o700); err != nil {
 		return err
 	}
-	vars := filepath.Join(stateDir(), "OVMF_VARS.fd")
+	vars := filepath.Join(g.stateDir(), "OVMF_VARS.fd")
 	if _, err := os.Stat(vars); errors.Is(err, os.ErrNotExist) {
 		if err := copyFile(ovmfVars, vars, 0o600); err != nil {
 			return err
 		}
 	}
 	// Runtime shares do not survive a VM restart.
-	os.RemoveAll(sharesStateDir())
+	os.RemoveAll(g.sharesStateDir())
 
-	args, err := qemuArgs(cfg)
+	args, err := g.qemuArgs()
 	if err == nil {
-		err = startNet(cfg)
+		err = g.startNet()
 	}
 	if err == nil {
-		err = startVsock(cfg)
+		err = g.startVsock()
 	}
 	if err == nil {
-		err = runUnit(unit, "hanare VM", append(sandboxProps(
-			[]string{stateDir(), run},
-			[]string{cfg.Guest.Flake},
+		// Only this guest's state dir is visible; the shared SSH client key
+		// (~/.local/state/hanare/ssh) is not.
+		err = g.runUnit(g.unit(), "hanare guest "+g.Name, append(sandboxProps(
+			[]string{g.stateDir(), run},
+			[]string{g.Flake},
 		),
-			"-p", "NoNewPrivileges=yes",
+			prop("NoNewPrivileges", true),
 			// QEMU only talks over AF_UNIX (networking is passt's).
-			"-p", "RestrictAddressFamilies=AF_UNIX",
-			"-p", "LockPersonality=yes",
-			"-p", "RestrictRealtime=yes",
-			"-p", "RestrictSUIDSGID=yes",
-			"-p", "SystemCallArchitectures=native",
-			// The client key logs into the guest; QEMU never needs it.
-			"-p", "InaccessiblePaths="+keyPath(),
+			unixOnly,
+			prop("LockPersonality", true),
+			prop("RestrictRealtime", true),
+			prop("RestrictSUIDSGID", true),
+			prop("SystemCallArchitectures", []string{"native"}),
 		), args...)
 	}
 	if err != nil {
-		stopAll()
+		g.stopAll()
 	}
 	return err
 }
 
 // startShare starts virtiofsd for path as hanare-share-<tag>.service and
 // returns its vhost-user socket. hotplugged shares bind to the running VM.
-func startShare(path string, ro, hotplugged bool) (string, error) {
+func (g *Guest) startShare(path string, ro, hotplugged bool) (string, error) {
 	tag := shareTag(path)
-	sock := filepath.Join(runDir(), tag+".sock")
+	sock := filepath.Join(g.runDir(), tag+".sock")
 	os.Remove(sock)
-	rw, roPaths := []string{runDir()}, []string{}
+	rw, roPaths := []string{g.runDir()}, []string{}
 	if ro {
 		roPaths = append(roPaths, path)
 	} else {
 		rw = append(rw, path)
 	}
-	props := append(sandboxProps(rw, roPaths), "-p", "NoNewPrivileges=yes")
+	props := append(sandboxProps(rw, roPaths), prop("NoNewPrivileges", true))
 	if hotplugged {
-		props = append(props, "-p", "BindsTo="+unit, "-p", "After="+unit)
+		props = append(props, prop("BindsTo", []string{g.unit()}), prop("After", []string{g.unit()}))
 	} else {
-		props = append(props, "-p", "PartOf="+unit)
+		props = append(props, partOf(g.unit()))
 	}
-	if err := runUnit(shareUnit(tag), "hanare share "+path, props,
+	if err := g.runUnit(g.shareUnit(tag), "hanare share "+path+" ("+g.Name+")", props,
 		append([]string{virtiofsd}, virtiofsdArgs(sock, path, ro)...)...); err != nil {
 		return "", err
 	}
 	if err := waitSocket(sock); err != nil {
-		stopUnit(shareUnit(tag))
+		stopUnit(g.shareUnit(tag))
 		return "", err
 	}
 	return sock, nil
@@ -180,15 +167,15 @@ func startShare(path string, ro, hotplugged bool) (string, error) {
 // LAN destinations: the filter sits outside the guest, so guest root cannot
 // remove it. Neither maps the host's loopback; the guest's DNS is forwarded
 // through pasta to the host resolver.
-func startNet(cfg *Config) error {
-	sock := filepath.Join(runDir(), "passt.sock")
+func (g *Guest) startNet() error {
+	sock := filepath.Join(g.runDir(), "passt.sock")
 	os.Remove(sock)
 	passtCmd := []string{passt, "--foreground", "--quiet", "--one-off",
 		"--socket", sock, "--no-map-gw",
 		"--dns", guestDNS, "--dns-forward", guestDNS, "--dns-host", nsDNS}
 	inner := passtCmd
-	if !cfg.Network.AllowLAN {
-		rules := filepath.Join(runDir(), "lan-block.nft")
+	if !g.AllowLAN {
+		rules := filepath.Join(g.runDir(), "lan-block.nft")
 		if err := os.WriteFile(rules, []byte(lanBlockRules), 0o600); err != nil {
 			return err
 		}
@@ -201,10 +188,10 @@ func startNet(cfg *Config) error {
 	// No NoNewPrivileges here: it stops passt from setting up its own user
 	// namespace inside pasta's. passt and pasta drop privileges and apply
 	// seccomp themselves.
-	props := append(sandboxProps([]string{runDir()}, nil), "-p", "PartOf="+unit)
+	props := append(sandboxProps([]string{g.runDir()}, nil), partOf(g.unit()))
 	argv := append([]string{pasta, "--config-net", "--quiet",
 		"--no-map-gw", "--map-host-loopback", "none", "--dns-forward", nsDNS, "--"}, inner...)
-	if err := runUnit(netUnit, "hanare network (pasta + passt)", props, argv...); err != nil {
+	if err := g.runUnit(g.netUnit(), "hanare network (pasta + passt) for "+g.Name, props, argv...); err != nil {
 		return err
 	}
 	return waitSocket(sock)
@@ -214,40 +201,40 @@ func startNet(cfg *Config) error {
 // an AF_UNIX socket in our 0700 runtime dir instead of AF_VSOCK, which any
 // host user can connect to, and the host kernel never parses guest vsock
 // packets.
-func startVsock(cfg *Config) error {
-	ctl := filepath.Join(runDir(), "vhost-vsock.sock")
+func (g *Guest) startVsock() error {
+	ctl := filepath.Join(g.runDir(), "vhost-vsock.sock")
 	os.Remove(ctl)
-	os.Remove(vsockSock())
-	props := append(sandboxProps([]string{runDir()}, []string{vhostVsock()}),
-		"-p", "NoNewPrivileges=yes", "-p", "RestrictAddressFamilies=AF_UNIX", "-p", "PartOf="+unit)
-	if err := runUnit(vsockUnit, "hanare vsock (vhost-device-vsock)", props,
-		vhostVsock(), "--guest-cid", strconv.FormatUint(uint64(cfg.VM.VsockCID), 10),
-		"--socket", ctl, "--uds-path", vsockSock()); err != nil {
+	os.Remove(g.vsockSock())
+	props := append(sandboxProps([]string{g.runDir()}, []string{vhostVsock()}),
+		prop("NoNewPrivileges", true), unixOnly, partOf(g.unit()))
+	if err := g.runUnit(g.vsockUnit(), "hanare vsock (vhost-device-vsock) for "+g.Name, props,
+		vhostVsock(), "--guest-cid", strconv.FormatUint(uint64(g.VsockCID), 10),
+		"--socket", ctl, "--uds-path", g.vsockSock()); err != nil {
 		return err
 	}
 	return waitSocket(ctl)
 }
 
 // qemuArgs starts the configured shares and returns the QEMU command line.
-func qemuArgs(cfg *Config) ([]string, error) {
-	run := runDir()
+func (g *Guest) qemuArgs() ([]string, error) {
+	run := g.runDir()
 	pubKey, err := os.ReadFile(keyPath() + ".pub")
 	if err != nil {
 		return nil, err
 	}
-	hostKey, err := os.ReadFile(hostKeyPath())
+	hostKey, err := os.ReadFile(g.hostKeyPath())
 	if err != nil {
 		return nil, err
 	}
 
-	// Configured shares, plus the guest flake that "hanare switch" builds from.
+	// Configured shares, plus the guest flake that "hanare guest apply" builds from.
 	type mount struct {
 		share  Share
 		target string
 	}
-	mounts := []mount{{Share{Path: cfg.Guest.Flake, ReadOnly: true}, "/run/hanare-config"}}
-	for _, s := range cfg.Shares {
-		p, err := cfg.resolveShare(s.Path)
+	mounts := []mount{{Share{Path: g.Flake, ReadOnly: true}, "/run/hanare-config"}}
+	for _, s := range g.Shares {
+		p, err := g.resolveShare(s.Path)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", configFile(), err)
 		}
@@ -256,7 +243,7 @@ func qemuArgs(cfg *Config) ([]string, error) {
 	var devArgs []string
 	var fstab strings.Builder
 	for _, m := range mounts {
-		sock, err := startShare(m.share.Path, m.share.ReadOnly, false)
+		sock, err := g.startShare(m.share.Path, m.share.ReadOnly, false)
 		if err != nil {
 			return nil, fmt.Errorf("share %s: %w", m.share.Path, err)
 		}
@@ -267,7 +254,7 @@ func qemuArgs(cfg *Config) ([]string, error) {
 		fmt.Fprintf(&fstab, "%s %s virtiofs %s,nosuid,nodev,nofail,x-systemd.before=hanare-guard.service 0 0\n",
 			tag, strings.ReplaceAll(m.target, " ", `\040`), mode(m.share.ReadOnly))
 	}
-	// Empty PCIe root ports for "hanare share" to hot-plug into.
+	// Empty PCIe root ports for "hanare share add" to hot-plug into.
 	for i := 0; i < hotplugPorts; i++ {
 		devArgs = append(devArgs, "-device", fmt.Sprintf("pcie-root-port,id=hp%d,chassis=%d", i, i+1))
 	}
@@ -277,17 +264,17 @@ func qemuArgs(cfg *Config) ([]string, error) {
 			base64.StdEncoding.EncodeToString(data)}
 	}
 	args := []string{qemu,
-		"-name", "hanare",
+		"-name", "hanare-" + g.Name,
 		"-nodefaults",
 		"-machine", "q35,accel=kvm,memory-backend=mem",
 		// No nested virtualization: keeps the guest away from KVM's nested
 		// code paths (e.g. CVE-2026-53359, "Januscape").
 		"-cpu", "host,-vmx,-svm",
-		"-smp", strconv.Itoa(cfg.VM.CPUs), "-m", cfg.VM.Memory,
-		"-object", "memory-backend-memfd,id=mem,size=" + cfg.VM.Memory + ",share=on",
+		"-smp", strconv.Itoa(g.CPUs), "-m", g.Memory,
+		"-object", "memory-backend-memfd,id=mem,size=" + g.Memory + ",share=on",
 		"-drive", "if=pflash,format=raw,readonly=on,file=" + ovmfCode,
-		"-drive", "if=pflash,format=raw,file=" + filepath.Join(stateDir(), "OVMF_VARS.fd"),
-		"-drive", "if=virtio,format=raw,discard=unmap,file=" + diskPath(),
+		"-drive", "if=pflash,format=raw,file=" + filepath.Join(g.stateDir(), "OVMF_VARS.fd"),
+		"-drive", "if=virtio,format=raw,discard=unmap,file=" + g.diskPath(),
 		"-netdev", "stream,id=net0,server=off,addr.type=unix,addr.path=" + filepath.Join(run, "passt.sock"),
 		"-device", "virtio-net-pci,netdev=net0",
 		"-chardev", "socket,id=vsock0,path=" + filepath.Join(run, "vhost-vsock.sock"),
@@ -298,6 +285,8 @@ func qemuArgs(cfg *Config) ([]string, error) {
 	args = append(args, cred("fstab.extra", []byte(fstab.String()))...)
 	args = append(args, cred("hanare.ssh.authorized_keys", pubKey)...)
 	args = append(args, cred("hanare.ssh.host_key", hostKey)...)
+	// Which nixosConfigurations.<attr> "hanare guest apply" rebuilds in the guest.
+	args = append(args, cred("hanare.flake_attr", []byte(g.Attr))...)
 	args = append(args, devArgs...)
 	args = append(args,
 		"-device", "virtio-serial-pci",
@@ -320,65 +309,121 @@ func waitSocket(sock string) error {
 	return fmt.Errorf("socket %s did not appear", sock)
 }
 
-func up() error {
-	cfg, err := loadConfig()
-	if err != nil {
-		return err
-	}
-	if !unitActive() {
-		if err := startUnit(); err != nil {
+func (g *Guest) up() error {
+	if !g.unitActive() {
+		if err := g.start(); err != nil {
 			return err
 		}
 	}
-	client, err := cfg.waitReady(120 * time.Second)
+	client, err := g.waitReady(120 * time.Second)
 	if err != nil {
 		return err
 	}
 	client.Close()
-	fmt.Println("hanare: up")
+	fmt.Printf("hanare: %s is up\n", g.Name)
 	return nil
 }
 
-func down() error {
-	if !unitActive() {
-		fmt.Println("hanare: not running")
+func (g *Guest) down() error {
+	if !g.unitActive() {
+		fmt.Printf("hanare: %s is not running\n", g.Name)
+		g.stopAll()
 		return nil
 	}
-	if err := qmpOnce("system_powerdown"); err != nil {
-		fmt.Fprintf(os.Stderr, "hanare: ACPI shutdown failed (%v), stopping unit\n", err)
+	if err := g.qmpOnce("system_powerdown"); err != nil {
+		fmt.Fprintf(os.Stderr, "hanare: ACPI shutdown of %s failed (%v), stopping units\n", g.Name, err)
 	} else {
-		for i := 0; i < 120 && unitActive(); i++ {
+		for i := 0; i < 120 && g.unitActive(); i++ {
 			time.Sleep(500 * time.Millisecond)
 		}
 	}
-	stopAll()
-	fmt.Println("hanare: down")
+	g.stopAll()
+	fmt.Printf("hanare: %s is down\n", g.Name)
 	return nil
 }
 
-func status() error {
-	cfg, err := loadConfig()
-	if err != nil {
-		return err
-	}
-	if !unitActive() {
-		fmt.Println("hanare: stopped")
+func (g *Guest) status() error {
+	fmt.Printf("hanare: %s: %s\n", g.Name, g.state())
+	if !g.unitActive() {
 		return nil
 	}
 	start := time.Now()
-	client, err := cfg.dial()
+	client, err := g.dial()
 	if err != nil {
-		fmt.Printf("hanare: running, SSH not ready (%v)\n", err)
+		fmt.Printf("hanare: %s: SSH not ready (%v)\n", g.Name, err)
 		return nil
 	}
 	defer client.Close()
-	fmt.Printf("hanare: running, SSH ok (%d ms)\n", time.Since(start).Milliseconds())
+	fmt.Printf("hanare: %s: SSH ok (%d ms)\n", g.Name, time.Since(start).Milliseconds())
 	if sess, err := client.NewSession(); err == nil {
 		out, _ := sess.Output("systemctl show -p ActiveState -p Result --value hanare-verify-store.service | paste -sd ' '")
 		sess.Close()
-		fmt.Printf("hanare: /nix verification: %s\n", verifyState(strings.TrimSpace(string(out))))
+		fmt.Printf("hanare: %s: /nix verification: %s\n", g.Name, verifyState(strings.TrimSpace(string(out))))
 	}
 	return nil
+}
+
+// state describes the guest like "docker ps" does: "Up 5 minutes",
+// "Stopped" or "Not created".
+func (g *Guest) state() string {
+	if !g.unitActive() {
+		if g.ID == "" {
+			return "Not created"
+		}
+		if _, err := os.Stat(g.diskPath()); err != nil {
+			return "Not created"
+		}
+		return "Stopped"
+	}
+	t, err := unitActiveSince(g.unit())
+	if err != nil {
+		return "Up"
+	}
+	return "Up " + humanDuration(time.Since(t))
+}
+
+func humanDuration(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "less than a minute"
+	case d < 2*time.Minute:
+		return "1 minute"
+	case d < time.Hour:
+		return fmt.Sprintf("%d minutes", int(d.Minutes()))
+	case d < 2*time.Hour:
+		return "1 hour"
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%d hours", int(d.Hours()))
+	}
+	return fmt.Sprintf("%d days", int(d.Hours()/24))
+}
+
+// ps lists all guests in hanare.toml, "docker ps -a" style.
+func ps(f *File) error {
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(tw, "ID\tNAME\tSTATUS\tOS\tCPUS\tMEMORY\tSHARES\tLAN")
+	for _, n := range f.names() {
+		g := f.Guests[n]
+		name := n
+		if n == f.Default {
+			name += " (default)"
+		}
+		lan := "blocked"
+		if g.AllowLAN {
+			lan = "allowed"
+		}
+		shares := len(g.Shares)
+		if g.unitActive() {
+			shares += len(g.runtimeShares())
+		}
+		id := g.ID
+		if id == "" {
+			id = "-"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s#%s\t%d\t%s\t%d\t%s\n",
+			id, name, g.state(), tildePath(g.Flake), g.Attr, g.CPUs, g.Memory, shares, lan)
+	}
+	return tw.Flush()
 }
 
 func verifyState(s string) string {
@@ -393,8 +438,8 @@ func verifyState(s string) string {
 	return s
 }
 
-func logs() error {
-	f, err := os.Open(filepath.Join(runDir(), "console.log"))
+func (g *Guest) logs() error {
+	f, err := os.Open(filepath.Join(g.runDir(), "console.log"))
 	if err != nil {
 		return err
 	}
@@ -403,24 +448,20 @@ func logs() error {
 	return err
 }
 
-// reinstall builds .#image from ~/.config/hanare and replaces the VM disk,
-// discarding /persist (the guest's Nix store and host keys).
-func reinstall(yes bool) error {
-	cfg, err := loadConfig()
-	if err != nil {
-		return err
+// reset builds the guest's image from its flake and replaces its disk,
+// discarding /persist (the guest's Nix store).
+func (g *Guest) reset(yes bool) error {
+	if g.unitActive() {
+		return fmt.Errorf("guest %s is running; run \"hanare guest down %s\" first", g.Name, g.Name)
 	}
-	if unitActive() {
-		return errors.New("VM is running; run \"hanare down\" first")
-	}
-	if _, err := os.Stat(diskPath()); err == nil && !yes &&
-		!confirm("Replace the VM disk? The guest's /nix and /persist are discarded.") {
+	if _, err := os.Stat(g.diskPath()); g.ID != "" && err == nil && !yes &&
+		!confirm(fmt.Sprintf("Replace the disk of %s? The guest's /nix and /persist are discarded.", g.Name)) {
 		return errors.New("aborted")
 	}
-	if err := checkGuestFlake(cfg, false); err != nil {
+	if err := g.checkFlake(false); err != nil {
 		return err
 	}
-	out, err := nixBuild(cfg.Guest.Flake, "nixosConfigurations.hanare.config.system.build.images.raw-efi")
+	out, err := nixBuild(g.Flake, "nixosConfigurations."+g.Attr+".config.system.build.images.raw-efi")
 	if err != nil {
 		return err
 	}
@@ -428,11 +469,14 @@ func reinstall(yes bool) error {
 	if len(imgs) != 1 {
 		return fmt.Errorf("expected one .img in %s", out)
 	}
-	size, err := parseSize(cfg.VM.DiskSize)
+	size, err := parseSize(g.DiskSize)
 	if err != nil {
 		return err
 	}
-	tmp := diskPath() + ".new"
+	if err := g.assignID(); err != nil {
+		return err
+	}
+	tmp := g.diskPath() + ".new"
 	if err := exec.Command("cp", "--sparse=always", imgs[0], tmp).Run(); err != nil {
 		return fmt.Errorf("copy image: %w", err)
 	}
@@ -442,14 +486,33 @@ func reinstall(yes bool) error {
 	if err := os.Truncate(tmp, size); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, diskPath()); err != nil {
+	if err := os.Rename(tmp, g.diskPath()); err != nil {
 		return err
 	}
 	// A fresh guest gets a fresh host key; the host generates and pins it.
-	if err := ensureHostKey(true); err != nil {
+	if err := g.ensureHostKey(true); err != nil {
 		return err
 	}
-	fmt.Println("hanare: disk replaced:", diskPath())
+	fmt.Println("hanare: disk replaced:", g.diskPath())
+	return nil
+}
+
+// remove deletes the guest's state (disk, UEFI variables, host key).
+func (g *Guest) remove(yes bool) error {
+	if g.ID == "" {
+		return fmt.Errorf("guest %s has no state", g.Name)
+	}
+	if g.unitActive() {
+		return fmt.Errorf("guest %s is running; run \"hanare guest down %s\" first", g.Name, g.Name)
+	}
+	if !yes && !confirm(fmt.Sprintf("Delete the disk and state of %s (%s)?", g.Name, g.stateDir())) {
+		return errors.New("aborted")
+	}
+	if err := os.RemoveAll(g.stateDir()); err != nil {
+		return err
+	}
+	os.Remove(filepath.Join(namesDir(), g.Name))
+	fmt.Printf("hanare: removed %s; its [guests.%s] table in %s is left as is\n", g.stateDir(), g.Name, configFile())
 	return nil
 }
 
@@ -524,8 +587,8 @@ type qmpConn struct {
 }
 
 // dialQMP connects to QEMU's monitor socket and negotiates capabilities.
-func dialQMP() (*qmpConn, error) {
-	c, err := net.DialTimeout("unix", filepath.Join(runDir(), "qmp.sock"), 2*time.Second)
+func (g *Guest) dialQMP() (*qmpConn, error) {
+	c, err := net.DialTimeout("unix", filepath.Join(g.runDir(), "qmp.sock"), 2*time.Second)
 	if err != nil {
 		return nil, err
 	}
@@ -592,8 +655,8 @@ func (m *qmpConn) waitEvent(name string, timeout time.Duration) error {
 	}
 }
 
-func qmpOnce(cmd string) error {
-	m, err := dialQMP()
+func (g *Guest) qmpOnce(cmd string) error {
+	m, err := g.dialQMP()
 	if err != nil {
 		return err
 	}

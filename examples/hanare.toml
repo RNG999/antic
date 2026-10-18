@@ -1,31 +1,28 @@
 # ~/.config/hanare/hanare.toml
 
-[guest]
-# Flake with nixosConfigurations.hanare (default: ~/.config/hanare/guest).
-# Shared read-only with the guest for "hanare switch"; keep it outside any [[share]].
-flake = "~/.config/hanare/guest"
+# Guest used when no NAME / -g / $HANARE_GUEST is given.
+default = "dev"
 
-[vm]
+[guests.dev]
+# The guest OS: nixosConfigurations.<attr> in this flake. Shared read-only
+# with the guest for "hanare guest apply"; keep it outside any share.
+flake = "~/.config/hanare/guest"
+attr = "hanare"
 cpus = 2
 memory = "4G"
 disk_size = "20G"
-vsock_cid = 4242
-
-[network]
 # true: let the guest reach LAN, Tailscale (CGNAT) and link-local addresses.
-# Enforced on the host (nftables in hanare's rootless network namespace).
+# Enforced on the host (nftables in the guest's rootless network namespace).
 allow_lan = false
-
-# Host directories visible in the guest at the same path.
-[[share]]
-path = "~/Work"
-
-# [[share]]
-# path = "~/Docs/spec"
-# read_only = true
-
-[commands]
-# ~/.local/bin links that run these commands in the guest ("hanare link" syncs them).
+# ~/.local/bin links that run these commands in this guest ("hanare link sync").
 expose = []
 # Commands that always run without network (like "hanare run --offline").
 offline = []
+
+# Host directories visible in the guest at the same path.
+[[guests.dev.share]]
+path = "~/Work"
+
+# [[guests.dev.share]]
+# path = "~/Docs/spec"
+# read_only = true

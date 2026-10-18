@@ -22,8 +22,8 @@ import (
 
 // dialGuest connects to a guest vsock port through vhost-device-vsock's host
 // socket ("hybrid vsock": send "CONNECT <port>", expect "OK <port>").
-func dialGuest(port uint32) (net.Conn, error) {
-	c, err := net.DialTimeout("unix", vsockSock(), 2*time.Second)
+func (g *Guest) dialGuest(port uint32) (net.Conn, error) {
+	c, err := net.DialTimeout("unix", g.vsockSock(), 2*time.Second)
 	if err != nil {
 		return nil, err
 	}
@@ -53,8 +53,8 @@ func dialGuest(port uint32) (net.Conn, error) {
 	return c, nil
 }
 
-// dial opens an SSH connection to the guest over vsock port 22.
-func (c *Config) dial() (*ssh.Client, error) {
+// dial opens an SSH connection to the guest (vsock port 22, or 23 offline).
+func (g *Guest) dial() (*ssh.Client, error) {
 	key, err := os.ReadFile(keyPath())
 	if err != nil {
 		return nil, err
@@ -63,11 +63,11 @@ func (c *Config) dial() (*ssh.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	port := c.sshPort
+	port := g.sshPort
 	if port == 0 {
 		port = 22
 	}
-	conn, err := dialGuest(port)
+	conn, err := g.dialGuest(port)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +75,7 @@ func (c *Config) dial() (*ssh.Client, error) {
 	sc, chans, reqs, err := ssh.NewClientConn(conn, "hanare", &ssh.ClientConfig{
 		User:            guestUser(),
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: pinHostKey,
+		HostKeyCallback: g.pinHostKey,
 	})
 	if err != nil {
 		conn.Close()
@@ -87,8 +87,8 @@ func (c *Config) dial() (*ssh.Client, error) {
 
 // pinHostKey accepts only the host key hanare generated for this guest
 // (see ensureHostKey); there is no trust-on-first-use window.
-func pinHostKey(_ string, _ net.Addr, key ssh.PublicKey) error {
-	want, err := os.ReadFile(hostKeyPath() + ".pub")
+func (g *Guest) pinHostKey(_ string, _ net.Addr, key ssh.PublicKey) error {
+	want, err := os.ReadFile(g.hostKeyPath() + ".pub")
 	if err != nil {
 		return err
 	}
@@ -100,8 +100,8 @@ func pinHostKey(_ string, _ net.Addr, key ssh.PublicKey) error {
 
 // ensureHostKey creates the guest's SSH host key (passed to the guest as a
 // credential at boot) if missing, or always when regenerate is set.
-func ensureHostKey(regenerate bool) error {
-	if _, err := os.Stat(hostKeyPath()); err == nil && !regenerate {
+func (g *Guest) ensureHostKey(regenerate bool) error {
+	if _, err := os.Stat(g.hostKeyPath()); err == nil && !regenerate {
 		return nil
 	}
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -116,38 +116,38 @@ func ensureHostKey(regenerate bool) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(hostKeyPath()), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(g.hostKeyPath()), 0o700); err != nil {
 		return err
 	}
-	if err := os.WriteFile(hostKeyPath()+".pub", ssh.MarshalAuthorizedKey(sshPub), 0o644); err != nil {
+	if err := os.WriteFile(g.hostKeyPath()+".pub", ssh.MarshalAuthorizedKey(sshPub), 0o644); err != nil {
 		return err
 	}
-	return os.WriteFile(hostKeyPath(), pem.EncodeToMemory(block), 0o600)
+	return os.WriteFile(g.hostKeyPath(), pem.EncodeToMemory(block), 0o600)
 }
 
 // connect dials the guest, starting the VM first if it is not running.
-func (c *Config) connect() (*ssh.Client, error) {
-	if client, err := c.dial(); err == nil {
+func (g *Guest) connect() (*ssh.Client, error) {
+	if client, err := g.dial(); err == nil {
 		return client, nil
 	}
-	if !unitActive() {
-		fmt.Fprintln(os.Stderr, "hanare: starting VM...")
-		if err := startUnit(); err != nil {
+	if !g.unitActive() {
+		fmt.Fprintf(os.Stderr, "hanare: starting guest %s...\n", g.Name)
+		if err := g.start(); err != nil {
 			return nil, err
 		}
 	}
-	return c.waitReady(120 * time.Second)
+	return g.waitReady(120 * time.Second)
 }
 
-func (c *Config) waitReady(timeout time.Duration) (*ssh.Client, error) {
+func (g *Guest) waitReady(timeout time.Duration) (*ssh.Client, error) {
 	deadline := time.Now().Add(timeout)
 	for {
-		client, err := c.dial()
+		client, err := g.dial()
 		if err == nil {
 			return client, nil
 		}
-		if !unitActive() {
-			return nil, fmt.Errorf("VM exited (see: hanare logs, journalctl --user -u %s)", unit)
+		if !g.unitActive() {
+			return nil, fmt.Errorf("guest %s exited (see: hanare guest logs %s, journalctl --user -u %s)", g.Name, g.Name, g.unit())
 		}
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("VM not reachable over SSH: %w", err)
@@ -166,8 +166,8 @@ var forwardedSignals = map[os.Signal]ssh.Signal{
 // remote runs a shell command line in the guest and returns its exit status
 // (128+N for signal N, 255 for connection failures). A pty is used when
 // stdin and stdout are terminals, or always when forcePty is set.
-func (c *Config) remote(cmdline string, forcePty bool) int {
-	client, err := c.connect()
+func (g *Guest) remote(cmdline string, forcePty bool) int {
+	client, err := g.connect()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hanare: %v\n", err)
 		return 255

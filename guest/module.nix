@@ -205,7 +205,7 @@ in
       uid = 1000;
       # Primary GID must match the host (1000): virtiofsd only maps 1000:1000.
       group = user;
-      # Lets "hanare switch" stream the rebuild log.
+      # Lets "hanare guest apply" stream the rebuild log.
       extraGroups = [ "systemd-journal" ];
       # "*" rather than "!": without PAM, OpenSSH refuses "!"-locked accounts.
       hashedPassword = "*";
@@ -316,7 +316,7 @@ in
       };
     };
     # hanare.restrictUserNamespaces / hanare.audit: BPF programs loaded by
-    # "hanare guest ...", before user sessions so no command runs without them.
+    # "hanare vm ...", before user sessions so no command runs without them.
     systemd.services.hanare-userns = lib.mkIf cfg.restrictUserNamespaces {
       wantedBy = [ "multi-user.target" ];
       before = [ "systemd-user-sessions.service" ];
@@ -324,15 +324,15 @@ in
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
-        ExecStart = "${hanare}/bin/hanare guest restrict-userns";
-        ExecStop = "${hanare}/bin/hanare guest unrestrict-userns";
+        ExecStart = "${hanare}/bin/hanare vm restrict-userns";
+        ExecStop = "${hanare}/bin/hanare vm unrestrict-userns";
       };
     };
     systemd.services.hanare-audit = lib.mkIf cfg.audit {
       wantedBy = [ "multi-user.target" ];
       before = [ "systemd-user-sessions.service" ];
       serviceConfig = {
-        ExecStart = "${hanare}/bin/hanare guest audit -uid 1000";
+        ExecStart = "${hanare}/bin/hanare vm audit -uid 1000";
         Restart = "always";
         RestartSec = "2s";
       };
@@ -354,13 +354,18 @@ in
       timerConfig.OnBootSec = "1min";
     };
 
-    # "hanare switch": rebuild from the host's config, shared read-only at
+    # "hanare guest apply": rebuild from the host's config, shared read-only at
     # /run/hanare-config, without replacing the disk.
-    systemd.services.hanare-switch = {
-      serviceConfig.Type = "oneshot";
+    # The host passes which nixosConfigurations.<attr> this guest is built from.
+    systemd.services.hanare-apply = {
+      serviceConfig = {
+        Type = "oneshot";
+        ImportCredential = "hanare.flake_attr";
+      };
       path = [ config.nix.package pkgs.git ];
       script = ''
-        ${config.system.build.nixos-rebuild}/bin/nixos-rebuild switch --flake path:/run/hanare-config#hanare
+        attr=$(cat "$CREDENTIALS_DIRECTORY/hanare.flake_attr" 2>/dev/null || echo hanare)
+        ${config.system.build.nixos-rebuild}/bin/nixos-rebuild switch --flake "path:/run/hanare-config#$attr"
       '';
     };
 
@@ -370,7 +375,7 @@ in
         if (action.id != "org.freedesktop.systemd1.manage-units" || subject.user != "${user}")
           return polkit.Result.NOT_HANDLED;
         var unit = action.lookup("unit") || "", verb = action.lookup("verb");
-        if (unit == "hanare-switch.service" && verb == "start")
+        if (unit == "hanare-apply.service" && verb == "start")
           return polkit.Result.YES;
         if (/^hanare-mount@[^\/]+\.service$/.test(unit) && (verb == "start" || verb == "stop"))
           return polkit.Result.YES;

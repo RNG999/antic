@@ -9,7 +9,7 @@ import (
 
 // Guest flakes often pin hanare (or other inputs) to a local checkout. The
 // lock records that checkout's narHash at lock time, so later edits are
-// silently ignored until the lock is updated; and "hanare switch" builds
+// silently ignored until the lock is updated; and "hanare guest apply" builds
 // inside the guest, which cannot read paths outside the shared flake dir.
 
 type localInput struct {
@@ -55,16 +55,16 @@ func localInputs(flake string) ([]localInput, error) {
 }
 
 // checkGuestFlake refuses to build with a stale lock on a local input and,
-// for "switch", with local inputs the guest cannot read.
-func checkGuestFlake(cfg *Config, forSwitch bool) error {
-	inputs, err := localInputs(cfg.Guest.Flake)
+// for "apply", with local inputs the guest cannot read.
+func (g *Guest) checkFlake(forApply bool) error {
+	inputs, err := localInputs(g.Flake)
 	if err != nil {
 		return err
 	}
 	var stale []string
 	for _, in := range inputs {
-		if forSwitch && !within(in.path, cfg.Guest.Flake) {
-			return fmt.Errorf("input %q is the local path %s, which the guest cannot read during \"hanare switch\"; use \"hanare reinstall\", or point the input at a git URL", in.name, in.path)
+		if forApply && !within(in.path, g.Flake) {
+			return fmt.Errorf("input %q is the local path %s, which the guest cannot read during \"hanare guest apply\"; use \"hanare guest reset\", or point the input at a git URL", in.name, in.path)
 		}
 		cur, err := flakeMetadata(in.ref)
 		if err != nil {
@@ -77,7 +77,7 @@ func checkGuestFlake(cfg *Config, forSwitch bool) error {
 	}
 	if len(stale) > 0 {
 		return fmt.Errorf("%s/flake.lock pins an older state of local input(s) %s; update with:\n  nix flake update %s --flake path:%s",
-			cfg.Guest.Flake, strings.Join(stale, ", "), strings.Join(stale, " "), cfg.Guest.Flake)
+			g.Flake, strings.Join(stale, ", "), strings.Join(stale, " "), g.Flake)
 	}
 	return nil
 }

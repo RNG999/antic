@@ -2,7 +2,6 @@ package host
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,10 +17,8 @@ import (
 
 const hotplugPorts = 8
 
-func sharesStateDir() string { return filepath.Join(runDir(), "shares") }
-
-func runtimeShares() []Share {
-	files, _ := filepath.Glob(filepath.Join(sharesStateDir(), "*.json"))
+func (g *Guest) runtimeShares() []Share {
+	files, _ := filepath.Glob(filepath.Join(g.sharesStateDir(), "*.json"))
 	var out []Share
 	for _, f := range files {
 		b, err := os.ReadFile(f)
@@ -35,8 +32,6 @@ func runtimeShares() []Share {
 	}
 	return out
 }
-
-func shareUnit(tag string) string { return "hanare-share-" + tag + ".service" }
 
 // mountUnit names the guest unit that mounts tag at path.
 func mountUnit(tag, path string, ro bool) (string, error) {
@@ -52,7 +47,7 @@ func mountUnit(tag, path string, ro bool) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-func share(args []string) error {
+func (g *Guest) share(args []string) error {
 	var ro, save bool
 	var paths []string
 	for _, a := range args {
@@ -66,31 +61,27 @@ func share(args []string) error {
 		}
 	}
 	if len(paths) == 0 {
-		return listShares()
+		return g.listShares()
 	}
-	cfg, err := loadConfig()
-	if err != nil {
-		return err
-	}
-	if !unitActive() {
-		return errors.New("VM is not running (start it with \"hanare up\", or add a [[share]] to hanare.toml)")
+	if !g.unitActive() {
+		return fmt.Errorf("guest %s is not running (start it with \"hanare guest up %s\", or add a [[guests.%s.share]] to hanare.toml)", g.Name, g.Name, g.Name)
 	}
 	for _, p := range paths {
-		real, err := cfg.resolveShare(p)
+		real, err := g.resolveShare(p)
 		if err != nil {
 			return err
 		}
-		for _, s := range cfg.activeShares() {
+		for _, s := range g.activeShares() {
 			if within(real, s.Path) || within(s.Path, real) {
 				return fmt.Errorf("%s overlaps existing share %s", real, s.Path)
 			}
 		}
-		if err := hotplug(cfg, real, ro); err != nil {
+		if err := g.hotplug(real, ro); err != nil {
 			return fmt.Errorf("%s: %w", real, err)
 		}
 		fmt.Println("hanare: shared", real, map[bool]string{true: "(read-only)", false: ""}[ro])
 		if save {
-			if err := appendShare(Share{Path: real, ReadOnly: ro}); err != nil {
+			if err := g.appendShare(Share{Path: real, ReadOnly: ro}); err != nil {
 				return err
 			}
 		}
@@ -98,16 +89,16 @@ func share(args []string) error {
 	return nil
 }
 
-func hotplug(cfg *Config, path string, ro bool) error {
+func (g *Guest) hotplug(path string, ro bool) error {
 	tag := shareTag(path)
-	sock, err := startShare(path, ro, true)
+	sock, err := g.startShare(path, ro, true)
 	if err != nil {
 		return err
 	}
 
-	m, err := dialQMP()
+	m, err := g.dialQMP()
 	if err != nil {
-		stopUnit(shareUnit(tag))
+		stopUnit(g.shareUnit(tag))
 		return err
 	}
 	defer m.close()
@@ -118,7 +109,7 @@ func hotplug(cfg *Config, path string, ro bool) error {
 			"server": false,
 		}},
 	}); err != nil {
-		stopUnit(shareUnit(tag))
+		stopUnit(g.shareUnit(tag))
 		return err
 	}
 	plugged := false
@@ -131,15 +122,15 @@ func hotplug(cfg *Config, path string, ro bool) error {
 	}
 	if !plugged {
 		m.do("chardev-remove", map[string]any{"id": "fs-" + tag})
-		stopUnit(shareUnit(tag))
+		stopUnit(g.shareUnit(tag))
 		return fmt.Errorf("no free hotplug slot (max %d runtime shares): %w", hotplugPorts, err)
 	}
 
-	if err := os.MkdirAll(sharesStateDir(), 0o700); err != nil {
+	if err := os.MkdirAll(g.sharesStateDir(), 0o700); err != nil {
 		return err
 	}
 	b, _ := json.Marshal(Share{Path: path, ReadOnly: ro})
-	if err := os.WriteFile(filepath.Join(sharesStateDir(), tag+".json"), b, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(g.sharesStateDir(), tag+".json"), b, 0o600); err != nil {
 		return err
 	}
 
@@ -149,18 +140,14 @@ func hotplug(cfg *Config, path string, ro bool) error {
 	}
 	// The guest user creates the mount point; the root-side unit only mounts
 	// on directories it owns below its home.
-	if rc := cfg.remote("mkdir -p "+shellQuote(path)+" && systemctl start "+shellQuote(mu), false); rc != 0 {
-		unplug(cfg, path)
+	if rc := g.remote("mkdir -p "+shellQuote(path)+" && systemctl start "+shellQuote(mu), false); rc != 0 {
+		g.unplug(path)
 		return fmt.Errorf("guest mount failed (exit %d)", rc)
 	}
 	return nil
 }
 
-func unshare(args []string) error {
-	cfg, err := loadConfig()
-	if err != nil {
-		return err
-	}
+func (g *Guest) unshare(args []string) error {
 	for _, p := range args {
 		real, err := filepath.Abs(p)
 		if err != nil {
@@ -169,10 +156,10 @@ func unshare(args []string) error {
 		if r, err := filepath.EvalSymlinks(real); err == nil {
 			real = r
 		}
-		if _, err := os.Stat(filepath.Join(sharesStateDir(), shareTag(real)+".json")); err != nil {
+		if _, err := os.Stat(filepath.Join(g.sharesStateDir(), shareTag(real)+".json")); err != nil {
 			return fmt.Errorf("%s is not a runtime share (configured shares are changed in hanare.toml)", real)
 		}
-		if err := unplug(cfg, real); err != nil {
+		if err := g.unplug(real); err != nil {
 			return err
 		}
 		fmt.Println("hanare: unshared", real)
@@ -180,42 +167,38 @@ func unshare(args []string) error {
 	return nil
 }
 
-func unplug(cfg *Config, path string) error {
+func (g *Guest) unplug(path string) error {
 	tag := shareTag(path)
-	state := filepath.Join(sharesStateDir(), tag+".json")
+	state := filepath.Join(g.sharesStateDir(), tag+".json")
 	var s Share
 	if b, err := os.ReadFile(state); err == nil {
 		json.Unmarshal(b, &s)
 	}
 	if mu, err := mountUnit(tag, path, s.ReadOnly); err == nil {
-		cfg.remote("systemctl stop "+shellQuote(mu), false)
+		g.remote("systemctl stop "+shellQuote(mu), false)
 	}
-	if m, err := dialQMP(); err == nil {
+	if m, err := g.dialQMP(); err == nil {
 		if _, err := m.do("device_del", map[string]any{"id": "dev-" + tag}); err == nil {
 			m.waitEvent("DEVICE_DELETED", 10*time.Second)
 		}
 		m.do("chardev-remove", map[string]any{"id": "fs-" + tag})
 		m.close()
 	}
-	stopUnit(shareUnit(tag))
+	stopUnit(g.shareUnit(tag))
 	os.Remove(state)
 	return nil
 }
 
-func listShares() error {
-	cfg, err := loadConfig()
-	if err != nil {
-		return err
-	}
-	for _, s := range cfg.Shares {
-		p, err := cfg.resolveShare(s.Path)
+func (g *Guest) listShares() error {
+	for _, s := range g.Shares {
+		p, err := g.resolveShare(s.Path)
 		if err != nil {
 			fmt.Printf("%s\tconfigured\tINVALID: %v\n", s.Path, err)
 			continue
 		}
 		fmt.Printf("%s\tconfigured\t%s\n", p, mode(s.ReadOnly))
 	}
-	for _, s := range runtimeShares() {
+	for _, s := range g.runtimeShares() {
 		fmt.Printf("%s\truntime\t%s\n", s.Path, mode(s.ReadOnly))
 	}
 	return nil
@@ -233,10 +216,6 @@ func tildePath(p string) string {
 		return "~" + strings.TrimPrefix(p, home())
 	}
 	return p
-}
-
-func stopUnit(name string) {
-	exec.Command("systemctl", "--user", "stop", name).Run()
 }
 
 func virtiofsdArgs(sock, path string, ro bool) []string {

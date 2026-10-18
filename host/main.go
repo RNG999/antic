@@ -13,52 +13,135 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
-const usage = `usage: hanare <command> [args...]
+const usage = `usage: hanare [-g GUEST] <command> [args...]
+
+Guests are defined in ~/.config/hanare/hanare.toml ([guests.NAME]). NAME
+arguments, -g or $HANARE_GUEST pick one; otherwise "default" from that file.
 
   run [--offline] CMD [ARGS...]
-                      run CMD in the VM, in the current directory (starts the VM if needed);
-                      --offline (or commands.offline in hanare.toml): no network for CMD
-  shell               interactive login shell in the VM
-  up                  start the VM and wait until it accepts SSH
-  down                shut the VM down
-  status              show VM state
-  audit [-f] [-n N]   show the guest activity log (executions, connections, writes)
-  logs                print the VM console log
-  switch              apply the guest flake to the running VM (nixos-rebuild switch)
-  reinstall [-y]      build a fresh disk image from the guest flake and replace the VM disk
-  update              build this tool from ~/.local/src/hanare and install it to ~/.local/bin
+                      run CMD in the guest, in the current directory (starts it if needed);
+                      --offline (or "offline" in hanare.toml): no network for CMD
+  shell               interactive login shell in the guest
+  audit [-f] [-n N]   the guest's activity log (executions, connections, writes)
 
-  share               list shared directories
-  share [--ro] [--save] DIR...
-                      share DIR with the running VM at the same path (--save: also add to hanare.toml)
-  unshare DIR...      remove a share added with "share"
+  guest ls            list all guests and their state
+  guest ps [NAME]     sessions ("hanare run"s) running in a guest
+  guest up [NAME...]  start guests and wait until they accept SSH
+  guest down [NAME...]
+                      shut guests down
+  guest status [NAME] state, SSH and /nix verification of a guest
+  guest logs [NAME]   console log
+  guest apply [NAME]  apply changes in the guest's flake to the running guest (nixos-rebuild switch)
+  guest reset [-y] [NAME]
+                      replace the guest's disk with a fresh image built from its flake
+  guest create NAME [--from GUEST]
+                      add [guests.NAME] to hanare.toml (using GUEST's OS) and build its disk
+  guest rm [-y] NAME  delete a guest's disk and state
 
-  link                sync ~/.local/bin links with commands.expose in hanare.toml
-  link TOOL...        create ~/.local/bin/TOOL links that run TOOL in the VM
-  unlink TOOL...      remove such links
-  links               list such links
+  share ls            the guest's shared directories
+  share add [--ro] [--save] DIR...
+                      share DIR with the running guest at the same path (--save: record it in hanare.toml)
+  share rm DIR...     remove a share added with "share add"
 
-guest commands (run inside the VM by its systemd units):
-  guest restrict-userns | unrestrict-userns | audit [-uid N]
+  link ls             ~/.local/bin links that run tools in a guest
+  link sync           make the links match "expose" of all guests
+  link add TOOL...    add links (run in the guest exposing TOOL, else the default guest)
+  link rm TOOL...     remove links
+
+  update              build hanare from ~/.local/src/hanare and install it to ~/.local/bin
+
+  vm restrict-userns | unrestrict-userns | audit [-uid N]
+                      run inside the guest VM by its systemd units
 `
 
 // Main runs the hanare command line on the host and returns the exit status.
 func Main() int {
 	if name := filepath.Base(os.Args[0]); name != "hanare" {
-		return runCmd(append([]string{name}, os.Args[1:]...), false)
+		return runLinked(name, os.Args[1:])
 	}
-	if len(os.Args) < 2 {
+	args := os.Args[1:]
+	guest := ""
+	if len(args) >= 2 && (args[0] == "-g" || args[0] == "--guest") {
+		guest, args = args[1], args[2:]
+	}
+	if len(args) == 0 {
 		fmt.Fprint(os.Stderr, usage)
 		return 2
 	}
-	cmd, args := os.Args[1], os.Args[2:]
-
-	var err error
+	cmd, args := args[0], args[1:]
+	sub := ""
+	if (cmd == "guest" || cmd == "share" || cmd == "link") && len(args) > 0 {
+		sub, args = args[0], args[1:]
+	}
 	switch cmd {
-	case "run":
+	case "help", "-h", "--help":
+		fmt.Print(usage)
+		return 0
+	case "update":
+		return report(selfUpdate())
+	case "link":
+		switch sub {
+		case "ls":
+			return report(listLinks())
+		case "rm":
+			return report(unlink(args))
+		}
+	}
+
+	f, err := loadFile()
+	if err != nil {
+		return report(err)
+	}
+	yes := len(args) > 0 && (args[0] == "-y" || args[0] == "--yes")
+	if yes {
+		args = args[1:]
+	}
+	switch cmd + " " + sub {
+	case "guest ls":
+		return report(ps(f))
+	case "guest up", "guest down":
+		names := args
+		if len(names) == 0 {
+			names = []string{guest}
+		}
+		for _, n := range names {
+			g, err := f.pick(n)
+			if err == nil {
+				if sub == "up" {
+					err = g.up()
+				} else {
+					err = g.down()
+				}
+			}
+			if err != nil {
+				return report(err)
+			}
+		}
+		return 0
+	case "guest create":
+		return report(create(f, args))
+	case "link sync":
+		return report(syncLinks(f))
+	case "link add":
+		return report(addLinks(args))
+	case "guest ps", "guest status", "guest logs", "guest apply", "guest reset", "guest rm":
+		if len(args) > 0 {
+			guest = args[0]
+		}
+		if sub == "rm" && guest == "" {
+			return report(errors.New("usage: hanare guest rm [-y] NAME"))
+		}
+	}
+	g, err := f.pick(guest)
+	if err != nil {
+		return report(err)
+	}
+	switch cmd + " " + sub {
+	case "run ":
 		offline := false
 		if len(args) > 0 && args[0] == "--offline" {
 			offline, args = true, args[1:]
@@ -70,41 +153,35 @@ func Main() int {
 			fmt.Fprint(os.Stderr, usage)
 			return 2
 		}
-		return runCmd(args, offline)
-	case "audit":
-		return auditLog(args)
-	case "shell":
-		return shell()
-	case "up":
-		err = up()
-	case "down":
-		err = down()
-	case "status":
-		err = status()
-	case "logs":
-		err = logs()
-	case "switch":
-		return switchConfig()
-	case "reinstall":
-		err = reinstall(len(args) > 0 && (args[0] == "-y" || args[0] == "--yes"))
-	case "share", "shares":
-		err = share(args)
-	case "unshare":
-		err = unshare(args)
-	case "update":
-		err = selfUpdate()
-	case "link":
-		err = link(args)
-	case "unlink":
-		err = unlink(args)
-	case "links":
-		err = listLinks()
-	case "help", "-h", "--help":
-		fmt.Print(usage)
-	default:
-		fmt.Fprintf(os.Stderr, "hanare: unknown command %q\n\n%s", cmd, usage)
-		return 2
+		return g.run(args, offline)
+	case "shell ":
+		return g.shell()
+	case "audit ":
+		return g.auditLog(args)
+	case "guest ps":
+		return g.sessions()
+	case "guest status":
+		return report(g.status())
+	case "guest logs":
+		return report(g.logs())
+	case "guest apply":
+		return g.apply()
+	case "guest reset":
+		return report(g.reset(yes))
+	case "guest rm":
+		return report(g.remove(yes))
+	case "share ls":
+		return report(g.listShares())
+	case "share add":
+		return report(g.share(args))
+	case "share rm":
+		return report(g.unshare(args))
 	}
+	fmt.Fprintf(os.Stderr, "hanare: unknown command %q\n\n%s", strings.TrimSpace(cmd+" "+sub), usage)
+	return 2
+}
+
+func report(err error) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hanare: %v\n", err)
 		return 1
@@ -112,83 +189,144 @@ func Main() int {
 	return 0
 }
 
-func runCmd(argv []string, offline bool) int {
-	cfg, err := loadConfig()
+// runLinked runs a tool invoked through a ~/.local/bin link: in the guest
+// whose "expose" lists it, else in the default guest.
+func runLinked(tool string, args []string) int {
+	f, err := loadFile()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hanare: %v\n", err)
 		return 125
 	}
-	dir, err := cfg.guestDir()
+	var g *Guest
+	for _, n := range f.names() {
+		if slices.Contains(f.Guests[n].Expose, tool) {
+			g = f.Guests[n]
+			break
+		}
+	}
+	if g == nil {
+		if g, err = f.pick(""); err != nil {
+			fmt.Fprintf(os.Stderr, "hanare: %v\n", err)
+			return 125
+		}
+	}
+	return g.run(append([]string{tool}, args...), false)
+}
+
+// create adds [guests.NAME] to hanare.toml, using the OS (flake and attr) of
+// another guest, and builds its disk.
+func create(f *File, args []string) error {
+	fs := flag.NewFlagSet("create", flag.ContinueOnError)
+	from := fs.String("from", "", "guest whose OS (flake, attr) to use (default: the default guest)")
+	var name string
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		name, args = args[0], args[1:]
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if name == "" || !guestName.MatchString(name) {
+		return errors.New("usage: hanare create NAME [--from GUEST] (NAME: a-z, 0-9 and -)")
+	}
+	if f.Guests[name] != nil {
+		return fmt.Errorf("guest %s already exists", name)
+	}
+	src, err := f.pick(*from)
+	if err != nil {
+		return err
+	}
+	block := fmt.Sprintf("\n[guests.%s]\nflake = %q\nattr = %q\n", name, tildePath(src.Flake), src.Attr)
+	cf, err := os.OpenFile(configFile(), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	if _, err := cf.WriteString(block); err != nil {
+		cf.Close()
+		return err
+	}
+	if err := cf.Close(); err != nil {
+		return err
+	}
+	fmt.Printf("hanare: added [guests.%s] to %s (no shares yet)\n", name, configFile())
+	if f, err = loadFile(); err != nil {
+		return err
+	}
+	return f.Guests[name].reset(true)
+}
+
+func (g *Guest) run(argv []string, offline bool) int {
+	dir, err := g.guestDir()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hanare: %v\n", err)
 		return 125
 	}
-	for _, c := range cfg.Commands.Offline {
-		offline = offline || c == filepath.Base(argv[0])
-	}
+	offline = offline || slices.Contains(g.Offline, filepath.Base(argv[0]))
 	if offline {
-		cfg.sshPort = 23
+		g.sshPort = 23
 	}
 	quoted := make([]string, len(argv))
 	for i, a := range argv {
 		quoted[i] = shellQuote(a)
 	}
-	return cfg.remote("cd "+shellQuote(dir)+" && exec "+strings.Join(quoted, " "), false)
+	return g.remote("cd "+shellQuote(dir)+" && exec "+strings.Join(quoted, " "), false)
 }
 
-func shell() int {
-	cfg, err := loadConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "hanare: %v\n", err)
-		return 125
-	}
-	dir, err := cfg.guestDir()
+func (g *Guest) shell() int {
+	dir, err := g.guestDir()
 	if err != nil {
 		dir = "/home/" + guestUser()
 	}
-	return cfg.remote("cd "+shellQuote(dir)+` && exec "$SHELL" -l`, true)
+	return g.remote("cd "+shellQuote(dir)+` && exec "$SHELL" -l`, true)
 }
 
 // auditLog shows the guest's activity log (hanare-audit.service, one JSON
 // object per line), optionally following it.
-func auditLog(args []string) int {
+func (g *Guest) auditLog(args []string) int {
 	fs := flag.NewFlagSet("audit", flag.ExitOnError)
 	follow := fs.Bool("f", false, "follow")
 	n := fs.Int("n", 100, "number of lines")
 	fs.Parse(args)
-	cfg, err := loadConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "hanare: %v\n", err)
-		return 125
-	}
 	cmd := fmt.Sprintf("journalctl -u hanare-audit.service -o cat --no-pager -n %d", *n)
 	if *follow {
 		cmd += " -f"
 	}
-	return cfg.remote(cmd, false)
+	return g.remote(cmd, false)
 }
 
-// switchConfig rebuilds the guest from the read-only config share and
-// streams the rebuild log.
-func switchConfig() int {
-	cfg, err := loadConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "hanare: %v\n", err)
-		return 125
-	}
-	if err := checkGuestFlake(cfg, true); err != nil {
+// sessions lists the "hanare run" sessions in the guest: one sshd unit
+// instance each (see guest/module.nix), with the command it runs.
+func (g *Guest) sessions() int {
+	return g.remote(`self=$(sed -n 's|.*/||p' /proc/self/cgroup)
+{
+  printf 'SESSION\tMODE\tSTARTED\tCOMMAND\n'
+  # Instances live in per-template slices (system-hanare\x2dssh.slice, ...).
+  for d in $(find /sys/fs/cgroup/system.slice -maxdepth 2 -type d -name 'hanare-ssh*@*.service'); do
+    u=${d##*/}
+    [ "$u" = "$self" ] && continue
+    mode=online
+    case $u in hanare-ssh-offline@*) mode=offline ;; esac
+    started=$(systemctl show -p ActiveEnterTimestamp --value "$u")
+    cmd=$(for p in $(cat "$d/cgroup.procs"); do
+      tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null; echo
+    done | grep -v -e '^sshd' -e '^$' | head -1)
+    printf '%s\t%s\t%s\t%s\n' "$u" "$mode" "$started" "$cmd"
+  done
+} | column -t -s "$(printf '\t')"`, false)
+}
+
+// apply rebuilds the running guest from its flake (shared read-only at
+// /run/hanare-config) and streams the rebuild log.
+func (g *Guest) apply() int {
+	if err := g.checkFlake(true); err != nil {
 		fmt.Fprintf(os.Stderr, "hanare: %v\n", err)
 		return 1
 	}
-	return cfg.remote(`journalctl -f -n0 -o cat -u hanare-switch.service & j=$!
-systemctl start hanare-switch.service; rc=$?
+	return g.remote(`journalctl -f -n0 -o cat -u hanare-apply.service & j=$!
+systemctl start hanare-apply.service; rc=$?
 sleep 1; kill $j; exit $rc`, false)
 }
 
-func link(tools []string) error {
-	if len(tools) == 0 {
-		return syncLinks()
-	}
+func addLinks(tools []string) error {
 	for _, t := range tools {
 		if err := addLink(t); err != nil {
 			return err
@@ -197,21 +335,23 @@ func link(tools []string) error {
 	return nil
 }
 
-// syncLinks makes the hanare links in ~/.local/bin match commands.expose in hanare.toml.
-func syncLinks() error {
-	cfg, err := loadConfig()
-	if err != nil {
-		return err
-	}
-	want := map[string]bool{}
-	for _, t := range cfg.Commands.Expose {
-		want[t] = true
-		if err := addLink(t); err != nil {
-			fmt.Fprintf(os.Stderr, "hanare: %v\n", err)
+// syncLinks makes the hanare links in ~/.local/bin match "expose" of all guests.
+func syncLinks(f *File) error {
+	want := map[string]string{}
+	for _, n := range f.names() {
+		for _, t := range f.Guests[n].Expose {
+			if other, ok := want[t]; ok {
+				fmt.Fprintf(os.Stderr, "hanare: %s is exposed by both %s and %s; links run it in %s\n", t, other, n, other)
+				continue
+			}
+			want[t] = n
+			if err := addLink(t); err != nil {
+				fmt.Fprintf(os.Stderr, "hanare: %v\n", err)
+			}
 		}
 	}
 	for _, t := range currentLinks() {
-		if !want[t] {
+		if _, ok := want[t]; !ok {
 			os.Remove(filepath.Join(binDir(), t))
 			fmt.Println("removed", filepath.Join(binDir(), t))
 		}

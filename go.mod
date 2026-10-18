@@ -10,4 +10,8 @@ require (
 
 require github.com/BurntSushi/toml v1.6.0
 
-require github.com/cilium/ebpf v0.22.0
+require (
+	github.com/cilium/ebpf v0.22.0
+	github.com/coreos/go-systemd/v22 v22.7.0
+	github.com/godbus/dbus/v5 v5.2.4
+)

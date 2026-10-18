@@ -1,6 +1,6 @@
-// Package guest implements the "hanare guest" commands, which run inside the
-// VM as root, started by the systemd units in module.nix. They load hanare's
-// BPF programs (bpf/).
+// Package guest implements the "hanare vm" commands, which run inside the
+// guest VM as root, started by the systemd units in module.nix. They load
+// hanare's BPF programs (bpf/).
 package guest
 
 import (
@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-const usage = `usage: hanare guest <command>
+const usage = `usage: hanare vm <command>
 
   restrict-userns     deny creating user namespaces to everyone but root
   unrestrict-userns   remove that restriction
@@ -19,7 +19,7 @@ const usage = `usage: hanare guest <command>
                       for writing by user N (default 1000) as JSON lines
 `
 
-// Main runs "hanare guest ARGS..." and returns the exit status.
+// Main runs "hanare vm ARGS..." and returns the exit status.
 func Main(args []string) int {
 	if len(args) < 1 {
 		fmt.Fprint(os.Stderr, usage)
@@ -41,7 +41,7 @@ func Main(args []string) int {
 		return 2
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "hanare guest: %v\n", err)
+		fmt.Fprintf(os.Stderr, "hanare vm: %v\n", err)
 		return 1
 	}
 	return 0

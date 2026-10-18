@@ -1,4 +1,4 @@
-# hanare (host CLI and "hanare guest" commands, one static binary) and the
+# hanare (host commands and the in-VM "hanare vm" commands, one static binary) and the
 # static vhost-device-vsock backend it runs on the host.
 { pkgs }:
 
@@ -19,7 +19,7 @@ in
         (lib.fileset.fileFilter (f: !f.hasExt "o") ../guest)
       ];
     };
-    vendorHash = "sha256-gATsvhibGUvT5wR/JCJzf68bS1a8qPCn9EyRFWohjWU=";
+    vendorHash = "sha256-8HzxNZNWk7Co6wdpx5iJAJIJGdIp7BHQGbAXuzoxZKo=";
     nativeBuildInputs = [ pkgs.llvmPackages.clang-unwrapped ];
     env.CGO_ENABLED = 0;
     ldflags = [ "-s" "-w" ];
