@@ -16,9 +16,8 @@ runs inside each guest to handle command sessions and host agent requests.
 - **Guest filesystem:** `/` is tmpfs. `/nix` is the guest's own Nix store,
   kept on the host and mounted read-only, so nothing in the guest survives a
   reboot and even guest root cannot change installed software.
-  - The guest uses NixOS's `perlless` and `minimal` profiles with Rust
-    `nixos-init` (no Perl, bootloader, desktop/XDG assets, LVM, bcache, FUSE or
-    OpenSSH).
+  - The guest uses NixOS's `minimal` profile with Rust `nixos-init` (no
+    bootloader, desktop/XDG assets, LVM, bcache, FUSE or OpenSSH).
   - `antic guest apply` builds the guest's NixOS on the host, copies it into
     that store, and switches the running guest to it. The guest needs no
     network and evaluates nothing itself.

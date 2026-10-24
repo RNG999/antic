@@ -1,7 +1,7 @@
-# Guest side of antic: a minimal, Perl-less stateless NixOS microVM that boots
-# directly from a kernel and initrd the host built, with / on tmpfs and /nix
-# read-only from the host (virtiofs). Import this module (nixosModules.guest)
-# from your guest flake and set antic.user; see README.md.
+# Guest side of antic: a minimal, stateless NixOS guest that boots directly
+# from a kernel and initrd the host built, with / on tmpfs and /nix read-only
+# from the host (virtiofs). Import this module (nixosModules.guest) from your
+# guest flake and set antic.user; see README.md.
 { config, lib, pkgs, modulesPath, ... }:
 
 let
@@ -52,7 +52,6 @@ let
 in
 {
   imports = [
-    "${modulesPath}/profiles/perlless.nix"
     "${modulesPath}/profiles/minimal.nix"
   ];
 
@@ -133,6 +132,7 @@ in
     nix.enable = false;
     system.nixos-init.enable = true;
     system.etc.overlay.enable = true;
+    system.tools.nixos-generate-config.enable = false;
     services.userborn.enable = true;
     services.journald.storage = "volatile";
     services.lvm.enable = false;
