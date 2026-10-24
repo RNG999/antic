@@ -2,13 +2,12 @@
 // maps to a random ID when the guest is created), their directories and a
 // per-guest lock. Where things live:
 //
-//	~/.config/hanare/hanare.toml        config
-//	~/.local/state/hanare/
-//	  guests/<ID>/                      one guest: store/ (its /nix), audit/, log/, host key
+//	~/.config/antic/antic.toml          config
+//	~/.local/state/antic/
+//	  guests/<ID>/                      one guest: store/ (its /nix), log/
 //	  names/<NAME> -> ../guests/<ID>    which ID a name has
 //	  locks/<NAME>.lock                 serializes lifecycle operations
-//	  ssh/id_ed25519                    client key (all guests)
-//	$XDG_RUNTIME_DIR/hanare/<ID>/       vm/ (cloud-hypervisor), sock/<helper>/, boot.json
+//	$XDG_RUNTIME_DIR/antic/<ID>/        vm/ (cloud-hypervisor), sock/<helper>/, boot.json
 package instance
 
 import (
@@ -24,7 +23,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Dirs is the set of host directories hanare uses.
+// Dirs is the set of host directories antic uses.
 type Dirs struct {
 	Home      string
 	ConfigDir string
@@ -47,17 +46,16 @@ func Default() (Dirs, error) {
 	}
 	return Dirs{
 		Home:      home,
-		ConfigDir: filepath.Join(home, ".config/hanare"),
-		StateRoot: filepath.Join(home, ".local/state/hanare"),
-		RunRoot:   filepath.Join(run, "hanare"),
+		ConfigDir: filepath.Join(home, ".config/antic"),
+		StateRoot: filepath.Join(home, ".local/state/antic"),
+		RunRoot:   filepath.Join(run, "antic"),
 		BinDir:    filepath.Join(home, ".local/bin"),
-		Libexec:   filepath.Join(home, ".local/libexec/hanare"),
-		SrcDir:    filepath.Join(home, ".local/src/hanare"),
+		Libexec:   filepath.Join(home, ".local/libexec/antic"),
+		SrcDir:    filepath.Join(home, ".local/src/antic"),
 	}, nil
 }
 
-func (d Dirs) ConfigFile() string { return filepath.Join(d.ConfigDir, "hanare.toml") }
-func (d Dirs) ClientKey() string  { return filepath.Join(d.StateRoot, "ssh/id_ed25519") }
+func (d Dirs) ConfigFile() string { return filepath.Join(d.ConfigDir, "antic.toml") }
 func (d Dirs) guestsDir() string  { return filepath.Join(d.StateRoot, "guests") }
 func (d Dirs) namesDir() string   { return filepath.Join(d.StateRoot, "names") }
 
@@ -69,10 +67,8 @@ type Instance struct {
 
 func (i Instance) StateDir() string { return filepath.Join(i.d.guestsDir(), i.ID) }
 func (i Instance) StoreDir() string { return filepath.Join(i.StateDir(), "store") } // the guest's /nix lives in store/nix
-func (i Instance) AuditDir() string { return filepath.Join(i.StateDir(), "audit") } // one file per boot, written by the VM
 func (i Instance) LogDir() string   { return filepath.Join(i.StateDir(), "log") }
 func (i Instance) Console() string  { return filepath.Join(i.LogDir(), "console.log") }
-func (i Instance) HostKey() string  { return filepath.Join(i.StateDir(), "host_ed25519") }
 func (i Instance) RunDir() string   { return filepath.Join(i.d.RunRoot, i.ID) }
 func (i Instance) VMDir() string    { return filepath.Join(i.RunDir(), "vm") }   // cloud-hypervisor's own sockets
 func (i Instance) SockDir() string  { return filepath.Join(i.RunDir(), "sock") } // helpers' sockets, one directory each
@@ -174,7 +170,7 @@ func (d Dirs) Orphans() ([]string, error) {
 	return out, err
 }
 
-// Lock serializes lifecycle operations on guest name across hanare
+// Lock serializes lifecycle operations on guest name across antic
 // processes (AI agents run tools in parallel). Unlock by calling the
 // returned function.
 func (d Dirs) Lock(name string) (func(), error) {

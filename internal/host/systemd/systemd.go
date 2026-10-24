@@ -1,4 +1,4 @@
-// Package systemd starts and inspects hanare's transient units in the
+// Package systemd starts and inspects antic's transient units in the
 // user's systemd instance, over D-Bus.
 package systemd
 

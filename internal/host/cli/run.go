@@ -5,14 +5,13 @@ import (
 	"os"
 	"os/signal"
 	"slices"
-	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/RNG999/hanare/internal/host/guest"
-	"github.com/RNG999/hanare/internal/host/transport"
+	"github.com/RNG999/antic/internal/host/guest"
+	"github.com/RNG999/antic/internal/host/transport"
 )
 
 func (a *app) runCmd() *cobra.Command {
@@ -21,7 +20,7 @@ func (a *app) runCmd() *cobra.Command {
 		Use:   "run [flags] [--] CMD [ARG...]",
 		Short: "Run CMD in the guest, in the current directory",
 		Long: `Run CMD in the guest, in the current directory (which must be inside a
-share). The guest is started if needed. The exit status is CMD's; hanare's
+share). The guest is started if needed. The exit status is CMD's; antic's
 own errors exit with 125.
 
 --offline (or the guest's commands.offline) runs CMD without any network.`,
@@ -62,7 +61,7 @@ func (a *app) shellCmd() *cobra.Command {
 	}
 }
 
-// exec runs argv (or a login shell) in the guest and returns its status.
+// exec runs argv (or a login shell when shell is true) in the guest and returns its status.
 func (a *app) exec(ctx context.Context, g *guest.Guest, argv []string, offline, pty, shell bool) error {
 	dir, err := g.Dir(ctx)
 	if err != nil {
@@ -71,21 +70,10 @@ func (a *app) exec(ctx context.Context, g *guest.Guest, argv []string, offline, 
 		}
 		dir = "~"
 	}
-	line := "cd " + shellQuote(dir) + ` && exec "$SHELL" -l`
-	if dir == "~" {
-		line = `cd && exec "$SHELL" -l`
-	}
-	if !shell {
-		quoted := make([]string, len(argv))
-		for i, s := range argv {
-			quoted[i] = shellQuote(s)
-		}
-		line = "cd " + shellQuote(dir) + " && exec " + strings.Join(quoted, " ")
-	}
 	sigs := make(chan os.Signal, 2)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer signal.Stop(sigs)
-	cmd := transport.Cmd{Line: line, Offline: offline, Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Signals: sigs}
+	cmd := transport.Cmd{Argv: argv, Dir: dir, Offline: offline, Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Signals: sigs}
 	if pty {
 		cmd.PTY = os.Stdin
 	}
@@ -119,5 +107,3 @@ func (a *app) runLinked(ctx context.Context, tool string, args []string) error {
 	pty := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 	return a.exec(ctx, g, append([]string{tool}, args...), g.IsOffline(tool), pty, false)
 }
-
-func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }

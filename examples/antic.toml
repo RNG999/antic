@@ -1,9 +1,9 @@
-# ~/.config/hanare/hanare.toml
+# ~/.config/antic/antic.toml
 version = 1
 default_guest = "dev"
 
 [policy]
-# "hanare share add" outside these asks for confirmation.
+# "antic share add" outside these asks for confirmation.
 share_roots = ["~/Work"]
 # Never share these (in addition to the built-in list).
 deny = []
@@ -13,14 +13,14 @@ protect = []
 [guests.dev]
 description = "tools for my agent"
 # The guest OS: nixosConfigurations.<attr> in this flake. Keep it outside shares.
-flake = "~/.config/hanare/guest"
-attr = "hanare"
+flake = "~/.config/antic/guest"
+attr = "antic"
 cpus = 2
 memory = "4G"
 network = "filtered"   # none | filtered (internet only) | lan
 
 [guests.dev.commands]
-# ~/.local/bin links that run these in this guest ("hanare link sync").
+# ~/.local/bin links that run these in this guest ("antic link sync").
 link = []
 # Commands that always run without network.
 offline = []

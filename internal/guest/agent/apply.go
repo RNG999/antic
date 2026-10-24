@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/RNG999/hanare/internal/proto"
+	"github.com/RNG999/antic/internal/proto"
 )
 
 var storePath = regexp.MustCompile(`^/nix/store/[0-9a-z]{32}-[^/]+$`)
@@ -45,8 +45,8 @@ func apply(toplevel string, line func(string)) error {
 	return nil
 }
 
-// Session units: one sshd instance per "hanare run" (see nix/module.nix).
-var sessionUnit = regexp.MustCompile(`^banken-session(-offline)?@[A-Za-z0-9:_.\\-]+\.service$`)
+// Session units: one antic-agent session instance per "antic run" (see nix/module.nix).
+var sessionUnit = regexp.MustCompile(`^antic-session(-offline)?@[A-Za-z0-9:_.\-]+\.service$`)
 
 // sessions lists running session units with their command and processes.
 func sessions() ([]proto.Session, error) {
@@ -63,7 +63,7 @@ func sessions() ([]proto.Session, error) {
 		if !sessionUnit.MatchString(unit) {
 			continue
 		}
-		s := proto.Session{Unit: unit, Offline: strings.HasPrefix(unit, "banken-session-offline@")}
+		s := proto.Session{Unit: unit, Offline: strings.HasPrefix(unit, "antic-session-offline@")}
 		if fi, err := os.Stat(d); err == nil {
 			s.Started = fi.ModTime().Unix()
 		}
@@ -75,7 +75,7 @@ func sessions() ([]proto.Session, error) {
 			if s.Command != "" {
 				continue
 			}
-			if comm, _ := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid)); strings.HasPrefix(string(comm), "sshd") {
+			if comm, _ := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid)); strings.HasPrefix(string(comm), "antic-agent") {
 				continue
 			}
 			if cl, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {

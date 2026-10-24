@@ -12,7 +12,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/RNG999/hanare/internal/proto"
+	"github.com/RNG999/antic/internal/proto"
 )
 
 var shareTag = regexp.MustCompile(proto.ShareTagPattern)

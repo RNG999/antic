@@ -10,11 +10,8 @@ func JSON() ([]byte, error) {
 		"portSession":        PortSession,
 		"portSessionOffline": PortSessionOffline,
 		"portAgent":          PortAgent,
-		"credAuthorizedKeys": CredAuthorizedKeys,
-		"credHostKey":        CredHostKey,
 		"storeTag":           StoreTag,
 		"runDir":             RunDir,
-		"auditPort":          AuditPort,
 	}, "", "  ")
 	return append(b, '\n'), err
 }

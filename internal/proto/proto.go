@@ -1,7 +1,7 @@
-// Package proto is the contract between the host (hanare) and the guest
-// (banken and the NixOS module in nix/module.nix): ports, credential names,
-// paths and the agent protocol. Both sides change together; Version is
-// checked when the host connects to a guest.
+// Package proto is the contract between the host (antic) and the guest
+// (antic-agent and the NixOS module in nix/module.nix): ports, credential
+// names, paths, the session protocol and the agent protocol. Both sides
+// change together; Version is checked when the host connects to a guest.
 package proto
 
 // Version of this contract. Bump on any incompatible change; the host
@@ -10,9 +10,9 @@ const Version = 1
 
 // vsock ports in the guest.
 const (
-	PortSession        = 22 // sshd: "hanare run", "hanare shell"
-	PortSessionOffline = 23 // sshd in a unit without network
-	PortAgent          = 24 // banken agent; accepts connections from the host (CID 2) only
+	PortSession        = 22 // antic-agent session: "antic run", "antic shell"
+	PortSessionOffline = 23 // antic-agent session in a unit without network
+	PortAgent          = 24 // antic-agent root daemon; accepts connections from the host (CID 2) only
 )
 
 // HostCID is the vsock address of the host as seen from the guest.
@@ -20,17 +20,14 @@ const HostCID = 2
 
 // systemd credentials the host passes at boot (SMBIOS OEM strings).
 const (
-	CredAuthorizedKeys = "hanare.ssh.authorized_keys" // host's public key for the guest user
-	CredHostKey        = "hanare.ssh.host_key"        // guest sshd host key, generated and pinned by the host
-	CredProtocol       = "hanare.protocol"            // Version, as decimal
-	CredMounts         = "fstab.extra"                // configured shares (read by systemd-fstab-generator)
+	CredProtocol = "antic.protocol" // Version, as decimal
+	CredMounts   = "fstab.extra"    // configured shares (read by systemd-fstab-generator)
 )
 
 // Guest paths.
 const (
-	StoreTag  = "hanare-store" // virtiofs tag of the read-only /nix
-	RunDir    = "/run/hanare"  // root-owned runtime state in the guest
-	AuditPort = "/dev/ttyS0"   // serial port the host writes to an append-only file
+	StoreTag = "antic-store" // virtiofs tag of the read-only /nix
+	RunDir   = "/run/antic"  // root-owned runtime state in the guest
 )
 
 // Share tags are "s-" plus 12 hex digits (derived from the host path).
@@ -45,6 +42,32 @@ var ProtectedNames = []string{
 	"CLAUDE.local.md", "AGENTS.md", "GEMINI.md", ".cursorrules", ".envrc",
 	"mise.toml", ".mise.toml",
 }
+
+// SessionReq is the JSON header sent at the start of a session connection on
+// PortSession or PortSessionOffline, followed by framed I/O.
+type SessionReq struct {
+	Argv []string `json:"argv,omitempty"` // empty: interactive login shell
+	Dir  string   `json:"dir,omitempty"`  // working directory ("" or "~": home directory)
+	Env  []string `json:"env,omitempty"`  // extra environment variables (e.g. TERM=...)
+	PTY  bool     `json:"pty,omitempty"`
+	Rows uint16   `json:"rows,omitempty"`
+	Cols uint16   `json:"cols,omitempty"`
+}
+
+// Session stream frame types ([1-byte type][4-byte big-endian length][payload]).
+const (
+	FrameStdin      byte = 1 // host -> guest: stdin data
+	FrameCloseStdin byte = 2 // host -> guest: EOF on stdin
+	FrameResize     byte = 3 // host -> guest: 4 bytes (rows uint16, cols uint16)
+	FrameSignal     byte = 4 // host -> guest: 1 byte (signal number)
+	FramePing       byte = 5 // host -> guest: keepalive
+
+	FrameStdout byte = 1 // guest -> host: stdout (or pty) data
+	FrameStderr byte = 2 // guest -> host: stderr data
+	FrameExit   byte = 3 // guest -> host: 4 bytes (exit status)
+	FrameError  byte = 4 // guest -> host: error message if setup/exec failed
+	FramePong   byte = 5 // guest -> host: keepalive reply
+)
 
 // Agent protocol: one JSON Request per connection, answered by a stream of
 // JSON Responses (one per line); the last one has Done set.
@@ -88,14 +111,14 @@ type Response struct {
 type Hello struct {
 	Protocol int    `json:"protocol"`
 	User     string `json:"user"`  // guest login user (must equal the host user)
-	Ready    bool   `json:"ready"` // banken-ready.target reached
+	Ready    bool   `json:"ready"` // antic-ready.target reached
 }
 
 // SessionSlices are the cgroup directories holding session units (systemd
 // puts template instances in per-template slices; "-" is escaped as \x2d).
 var SessionSlices = []string{
-	"/sys/fs/cgroup/system.slice/system-banken\\x2dsession.slice",
-	"/sys/fs/cgroup/system.slice/system-banken\\x2dsession\\x2doffline.slice",
+	"/sys/fs/cgroup/system.slice/system-antic\\x2dsession.slice",
+	"/sys/fs/cgroup/system.slice/system-antic\\x2dsession\\x2doffline.slice",
 }
 
 type Session struct {

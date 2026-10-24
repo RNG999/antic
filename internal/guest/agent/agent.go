@@ -1,4 +1,4 @@
-// Package agent is banken's root agent in the guest. It listens on vsock
+// Package agent is antic-agent's root daemon in the guest. It listens on vsock
 // port proto.PortAgent and serves requests from the host only (peer CID
 // proto.HostCID): mounting hot-plugged shares, switching the system to a
 // host-built configuration, and listing or stopping sessions. The guest user
@@ -18,8 +18,8 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/RNG999/hanare/internal/guest/sd"
-	"github.com/RNG999/hanare/internal/proto"
+	"github.com/RNG999/antic/internal/guest/sd"
+	"github.com/RNG999/antic/internal/proto"
 )
 
 // Agent serves the host's requests.
@@ -96,7 +96,7 @@ func (a *Agent) handle(c *os.File) {
 func (a *Agent) dispatch(req proto.Request, send func(proto.Response)) error {
 	switch req.Op {
 	case proto.OpHello:
-		ready := exec.Command("systemctl", "is-active", "--quiet", "banken-ready.target").Run() == nil
+		ready := exec.Command("systemctl", "is-active", "--quiet", "antic-ready.target").Run() == nil
 		send(proto.Response{Hello: &proto.Hello{Protocol: proto.Version, User: a.user.Username, Ready: ready}})
 		return nil
 	case proto.OpMount:

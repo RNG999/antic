@@ -10,7 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/RNG999/hanare/internal/host/guest"
+	"github.com/RNG999/antic/internal/host/guest"
 )
 
 func (a *app) guestCmd() *cobra.Command {
@@ -71,10 +71,10 @@ func (a *app) guestCreate() *cobra.Command {
 	var from, flake, attr string
 	c := &cobra.Command{
 		Use:   "create NAME",
-		Short: "Add a guest to hanare.toml (if needed) and build it",
-		Long: `Add [guests.NAME] to hanare.toml, using the OS of another guest (--from,
+		Short: "Add a guest to antic.toml (if needed) and build it",
+		Long: `Add [guests.NAME] to antic.toml, using the OS of another guest (--from,
 default: the default guest) or --flake/--attr, and build it. A guest that is
-already in hanare.toml but not built yet is just built.`,
+already in antic.toml but not built yet is just built.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			if err := a.load(c.Context()); err != nil {
@@ -88,7 +88,7 @@ already in hanare.toml but not built yet is just built.`,
 				flake, attr = src.Flake, src.Attr
 			}
 			if attr == "" {
-				attr = "hanare"
+				attr = "antic"
 			}
 			_, err := a.mgr.Create(c.Context(), args[0], flake, attr)
 			return err
@@ -96,7 +96,7 @@ already in hanare.toml but not built yet is just built.`,
 	}
 	c.Flags().StringVar(&from, "from", "", "guest whose OS (flake, attr) to use")
 	c.Flags().StringVar(&flake, "flake", "", "flake with nixosConfigurations.<attr>")
-	c.Flags().StringVar(&attr, "attr", "", "attribute in nixosConfigurations (default hanare)")
+	c.Flags().StringVar(&attr, "attr", "", "attribute in nixosConfigurations (default antic)")
 	return c
 }
 
@@ -104,7 +104,7 @@ func (a *app) guestRm() *cobra.Command {
 	var yes, keepConfig bool
 	c := &cobra.Command{
 		Use:               "rm NAME...",
-		Short:             "Delete guests (their state, and their table in hanare.toml)",
+		Short:             "Delete guests (their state, and their table in antic.toml)",
 		Args:              cobra.MinimumNArgs(1),
 		ValidArgsFunction: a.guestArgs,
 		RunE: func(c *cobra.Command, args []string) error {
@@ -124,13 +124,13 @@ func (a *app) guestRm() *cobra.Command {
 				if err := g.Remove(c.Context(), keepConfig); err != nil {
 					return err
 				}
-				fmt.Fprintf(os.Stderr, "hanare: removed guest %s\n", n)
+				fmt.Fprintf(os.Stderr, "antic: removed guest %s\n", n)
 			}
 			return nil
 		},
 	}
 	c.Flags().BoolVarP(&yes, "yes", "y", false, "do not ask")
-	c.Flags().BoolVar(&keepConfig, "keep-config", false, "keep the guest's table in hanare.toml")
+	c.Flags().BoolVar(&keepConfig, "keep-config", false, "keep the guest's table in antic.toml")
 	return c
 }
 

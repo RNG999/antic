@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// Guest flakes often pin hanare (or other inputs) to a local checkout. The
+// Guest flakes often pin antic (or other inputs) to a local checkout. The
 // lock records that checkout's narHash at lock time, so later edits would
 // be silently ignored until the lock is updated.
 

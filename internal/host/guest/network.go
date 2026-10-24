@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/RNG999/hanare/internal/host/config"
-	"github.com/RNG999/hanare/internal/host/systemd"
+	"github.com/RNG999/antic/internal/host/config"
+	"github.com/RNG999/antic/internal/host/systemd"
 )
 
 const (
@@ -47,7 +47,7 @@ func nftRules(mode string, hostAddrs []net.IP) string {
 			v6 = append(v6, ip.String())
 		}
 	}
-	return fmt.Sprintf(`table inet hanare {
+	return fmt.Sprintf(`table inet antic {
   chain output {
     type filter hook output priority filter; policy accept;
     ip daddr %s udp dport 53 accept
@@ -101,7 +101,7 @@ func (g *Guest) startNet(ctx context.Context) (string, error) {
 	// namespace inside pasta's. passt and pasta drop privileges and apply
 	// seccomp themselves.
 	props := systemd.Confine([]string{dir}, []string{g.m.Bins.Pasta, g.m.Bins.Passt, g.m.Bins.Nft})
-	return sock, g.helper(ctx, g.netUnit(), "hanare network for "+g.Name(), props, sock, argv...)
+	return sock, g.helper(ctx, g.netUnit(), "antic network for "+g.Name(), props, sock, argv...)
 }
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }

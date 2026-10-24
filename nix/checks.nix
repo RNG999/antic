@@ -5,8 +5,8 @@ let
   p = import ./packages.nix { inherit pkgs; };
 in
 {
-  go-tests = p.hanare.overrideAttrs (old: {
-    pname = "hanare-tests";
+  go-tests = p.antic.overrideAttrs (old: {
+    pname = "antic-tests";
     doCheck = true;
     checkPhase = ''
       runHook preCheck
@@ -14,5 +14,5 @@ in
       runHook postCheck
     '';
   });
-  inherit (p) banken;
+  inherit (p) antic-agent;
 }

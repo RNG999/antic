@@ -1,16 +1,16 @@
 {
-  description = "hanare guest configuration";
+  description = "antic guest configuration";
 
   inputs = {
-    hanare.url = "github:RNG999/hanare";
-    nixpkgs.follows = "hanare/nixpkgs";
+    antic.url = "github:RNG999/antic";
+    nixpkgs.follows = "antic/nixpkgs";
   };
 
-  outputs = { hanare, nixpkgs, ... }: {
-    # "hanare guest apply" builds nixosConfigurations.<attr> (attr in hanare.toml).
-    nixosConfigurations.hanare = nixpkgs.lib.nixosSystem {
+  outputs = { antic, nixpkgs, ... }: {
+    # "antic guest apply" builds nixosConfigurations.<attr> (attr in antic.toml).
+    nixosConfigurations.antic = nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
-      modules = [ hanare.nixosModules.guest ./configuration.nix ];
+      modules = [ antic.nixosModules.guest ./configuration.nix ];
     };
   };
 }

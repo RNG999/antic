@@ -10,13 +10,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/RNG999/hanare/internal/host/chv"
-	"github.com/RNG999/hanare/internal/host/config"
-	"github.com/RNG999/hanare/internal/host/instance"
-	"github.com/RNG999/hanare/internal/host/nixbuild"
-	"github.com/RNG999/hanare/internal/host/share"
-	"github.com/RNG999/hanare/internal/host/transport"
-	"github.com/RNG999/hanare/internal/proto"
+	"github.com/RNG999/antic/internal/host/chv"
+	"github.com/RNG999/antic/internal/host/config"
+	"github.com/RNG999/antic/internal/host/instance"
+	"github.com/RNG999/antic/internal/host/nixbuild"
+	"github.com/RNG999/antic/internal/host/share"
+	"github.com/RNG999/antic/internal/host/transport"
+	"github.com/RNG999/antic/internal/proto"
 )
 
 // Apply builds the guest's system from its flake on the host, installs it
@@ -54,7 +54,7 @@ func (g *Guest) Apply(ctx context.Context) error {
 	}
 	bt, err := g.readBoot(ctx)
 	if err != nil {
-		g.m.logf("%s is ready; it boots on the next \"hanare guest start %s\"", system, g.Name())
+		g.m.logf("%s is ready; it boots on the next \"antic guest start %s\"", system, g.Name())
 		return nil
 	}
 	if bt.System == system {
@@ -73,7 +73,7 @@ func (g *Guest) Apply(ctx context.Context) error {
 		bt.System = system
 		return g.writeBoot(bt)
 	}
-	g.m.logf("the kernel changed; restart the guest to boot it (hanare guest restart %s)", g.Name())
+	g.m.logf("the kernel changed; restart the guest to boot it (antic guest restart %s)", g.Name())
 	return nil
 }
 
@@ -182,11 +182,11 @@ func (g *Guest) Dir(ctx context.Context) (string, error) {
 			return wd, nil
 		}
 	}
-	return "", fmt.Errorf("%s is not inside a directory shared with guest %s (%s); see \"hanare share add\"",
+	return "", fmt.Errorf("%s is not inside a directory shared with guest %s (%s); see \"antic share add\"",
 		wd, g.Name(), strings.Join(shares, ", "))
 }
 
-// Exec runs a command line in the guest (starting it if needed).
+// Exec runs a command or shell in the guest (starting it if needed).
 func (g *Guest) Exec(ctx context.Context, c transport.Cmd) (int, error) {
 	if err := g.requireCreated(); err != nil {
 		return 0, err
@@ -194,7 +194,7 @@ func (g *Guest) Exec(ctx context.Context, c transport.Cmd) (int, error) {
 	if err := g.EnsureRunning(ctx); err != nil {
 		return 0, err
 	}
-	return g.ssh().Exec(ctx, c)
+	return g.vsock().Exec(ctx, c)
 }
 
 // IsOffline reports whether argv[0] is configured to run offline.
@@ -419,17 +419,7 @@ func (g *Guest) Inspect(ctx context.Context) (Info, error) {
 	return i, nil
 }
 
-// AuditFiles lists the guest's audit logs, oldest first (one per boot).
-func (g *Guest) AuditFiles() ([]string, error) {
-	if !g.Created {
-		return nil, nil
-	}
-	files, err := filepath.Glob(filepath.Join(g.Inst.AuditDir(), "*.jsonl"))
-	slices.Sort(files)
-	return files, err
-}
-
-// Journal streams the running guest's journal (via banken; root's view).
+// Journal streams the running guest's journal (via antic-agent; root's view).
 func (g *Guest) Journal(ctx context.Context, units []string, lines int, line func(string)) error {
 	if _, err := g.readBoot(ctx); err != nil {
 		return err

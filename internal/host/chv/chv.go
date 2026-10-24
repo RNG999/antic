@@ -28,7 +28,7 @@ func New(path string) *Client {
 	}}
 }
 
-// VMConfig is the subset of cloud-hypervisor's VmConfig hanare uses.
+// VMConfig is the subset of cloud-hypervisor's VmConfig antic uses.
 type VMConfig struct {
 	Payload  Payload   `json:"payload"`
 	CPUs     CPUs      `json:"cpus"`
@@ -96,7 +96,7 @@ type RNG struct {
 	Src string `json:"src"`
 }
 
-// Info is the part of vm.info hanare reads.
+// Info is the part of vm.info antic reads.
 type Info struct {
 	State string `json:"state"` // Created, Running, Shutdown, Paused
 }

@@ -37,7 +37,7 @@ func (a *app) shareCmd() *cobra.Command {
 		Use:   "add DIR...",
 		Short: "Share directories with the guest (at the same path)",
 		Long: `Share directories with the running guest; with --persist, also record them
-in hanare.toml (then the guest need not be running). Directories outside
+in antic.toml (then the guest need not be running). Directories outside
 policy.share_roots need confirmation on a terminal (or --yes).`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
@@ -56,19 +56,19 @@ policy.share_roots need confirmation on a terminal (or --yes).`,
 				if err != nil {
 					return err
 				}
-				fmt.Fprintf(os.Stderr, "hanare: shared %s with %s (%s)\n", p, g.Name(), mode(ro))
+				fmt.Fprintf(os.Stderr, "antic: shared %s with %s (%s)\n", p, g.Name(), mode(ro))
 			}
 			return nil
 		},
 	}
 	add.Flags().BoolVar(&ro, "ro", false, "read-only")
-	add.Flags().BoolVar(&persist, "persist", false, "also add to hanare.toml")
+	add.Flags().BoolVar(&persist, "persist", false, "also add to antic.toml")
 	add.Flags().BoolVarP(&yes, "yes", "y", false, "do not ask about directories outside policy.share_roots")
 
 	var rmPersist bool
 	rm := &cobra.Command{
 		Use:   "rm DIR...",
-		Short: "Stop sharing directories (--persist: also remove from hanare.toml)",
+		Short: "Stop sharing directories (--persist: also remove from antic.toml)",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			g, err := a.pick(c.Context(), nil)
@@ -84,7 +84,7 @@ policy.share_roots need confirmation on a terminal (or --yes).`,
 			return nil
 		},
 	}
-	rm.Flags().BoolVar(&rmPersist, "persist", false, "also remove from hanare.toml")
+	rm.Flags().BoolVar(&rmPersist, "persist", false, "also remove from antic.toml")
 	c.AddCommand(ls, add, rm)
 	return c
 }

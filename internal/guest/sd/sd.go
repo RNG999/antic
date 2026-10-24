@@ -1,27 +1,10 @@
-// Package sd holds small helpers banken's commands share: systemd readiness
-// notification and the BPF LSM check.
+// Package sd notifies systemd (Type=notify) when a service is ready.
 package sd
 
 import (
-	"errors"
 	"net"
 	"os"
-	"strings"
 )
-
-// RequireBPFLSM fails unless "bpf" is an active LSM (lsm= boot parameter).
-func RequireBPFLSM() error {
-	b, err := os.ReadFile("/sys/kernel/security/lsm")
-	if err != nil {
-		return err
-	}
-	for _, l := range strings.Split(strings.TrimSpace(string(b)), ",") {
-		if l == "bpf" {
-			return nil
-		}
-	}
-	return errors.New("BPF LSM is not active (add bpf to lsm=)")
-}
 
 // NotifyReady tells systemd (Type=notify) that the service is ready.
 func NotifyReady() {

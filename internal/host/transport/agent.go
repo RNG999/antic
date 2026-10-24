@@ -7,12 +7,12 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/RNG999/hanare/internal/proto"
+	"github.com/RNG999/antic/internal/proto"
 )
 
-// Agent sends one request to banken's agent and passes each response to
+// Agent sends one request to antic-agent and passes each response to
 // fn until the last one. Only the host can reach the agent (it checks the
-// peer CID), so this is hanare's root channel into the guest.
+// peer CID), so this is antic's root channel into the guest.
 func (v Vsock) Agent(ctx context.Context, req proto.Request, fn func(proto.Response)) error {
 	c, err := v.Dial(ctx, proto.PortAgent)
 	if err != nil {

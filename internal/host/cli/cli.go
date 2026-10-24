@@ -1,4 +1,4 @@
-// Package cli is hanare's command line.
+// Package cli is antic's command line.
 package cli
 
 import (
@@ -16,12 +16,12 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/RNG999/hanare/internal/host/config"
-	"github.com/RNG999/hanare/internal/host/guest"
-	"github.com/RNG999/hanare/internal/host/instance"
+	"github.com/RNG999/antic/internal/host/config"
+	"github.com/RNG999/antic/internal/host/guest"
+	"github.com/RNG999/antic/internal/host/instance"
 )
 
-// Exit status for hanare's own errors (as opposed to a command's status).
+// Exit status for antic's own errors (as opposed to a command's status).
 const exitError = 125
 
 // Version is set at build time.
@@ -40,17 +40,17 @@ type app struct {
 	mgr   *guest.Manager
 }
 
-// Main runs hanare and returns its exit status.
+// Main runs antic and returns its exit status.
 func Main() int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 	defer stop()
 	a := &app{}
 	var err error
 	if a.dirs, err = instance.Default(); err != nil {
-		fmt.Fprintf(os.Stderr, "hanare: %v\n", err)
+		fmt.Fprintf(os.Stderr, "antic: %v\n", err)
 		return exitError
 	}
-	if tool := filepath.Base(os.Args[0]); tool != "hanare" {
+	if tool := filepath.Base(os.Args[0]); tool != "antic" {
 		err = a.runLinked(ctx, tool, os.Args[1:])
 	} else {
 		root := a.root()
@@ -64,20 +64,20 @@ func Main() int {
 	case errors.As(err, &code):
 		return int(code)
 	default:
-		fmt.Fprintf(os.Stderr, "hanare: %v\n", err)
+		fmt.Fprintf(os.Stderr, "antic: %v\n", err)
 		return exitError
 	}
 }
 
 func (a *app) root() *cobra.Command {
 	root := &cobra.Command{
-		Use:   "hanare",
+		Use:   "antic",
 		Short: "Run CLI tools in isolated NixOS guests",
-		Long: `hanare runs CLI tools (for example those an AI agent drives) in NixOS VMs
+		Long: `antic runs CLI tools (for example those an AI agent drives) in NixOS VMs
 ("guests"), isolated from the host. Guests are defined in
-~/.config/hanare/hanare.toml; host directories are shared at the same path.
+~/.config/antic/antic.toml; host directories are shared at the same path.
 
-The guest is chosen with -g, $HANARE_GUEST, default_guest in hanare.toml,
+The guest is chosen with -g, $ANTIC_GUEST, default_guest in antic.toml,
 or is the only one defined. Guest subcommands take it as an argument.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -85,7 +85,7 @@ or is the only one defined. Guest subcommands take it as an argument.`,
 	}
 	root.PersistentFlags().StringVarP(&a.guest, "guest", "g", "", "guest to use")
 	root.AddGroup(&cobra.Group{ID: "run", Title: "Running commands:"}, &cobra.Group{ID: "manage", Title: "Managing:"})
-	for _, c := range []*cobra.Command{a.runCmd(), a.shellCmd(), a.auditCmd()} {
+	for _, c := range []*cobra.Command{a.runCmd(), a.shellCmd()} {
 		c.GroupID = "run"
 		root.AddCommand(c)
 	}

@@ -11,12 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/RNG999/hanare/internal/host/chv"
-	"github.com/RNG999/hanare/internal/host/config"
-	"github.com/RNG999/hanare/internal/host/share"
-	"github.com/RNG999/hanare/internal/host/systemd"
-	"github.com/RNG999/hanare/internal/host/transport"
-	"github.com/RNG999/hanare/internal/proto"
+	"github.com/RNG999/antic/internal/host/chv"
+	"github.com/RNG999/antic/internal/host/config"
+	"github.com/RNG999/antic/internal/host/share"
+	"github.com/RNG999/antic/internal/host/systemd"
+	"github.com/RNG999/antic/internal/proto"
 )
 
 // Start boots the guest unless it is running, and waits until it is ready.
@@ -54,16 +53,13 @@ func (g *Guest) startLocked(ctx context.Context) error {
 		return err
 	}
 	if system == "" {
-		return fmt.Errorf("guest %s has no system yet; run \"hanare guest apply %s\"", g.Name(), g.Name())
+		return fmt.Errorf("guest %s has no system yet; run \"antic guest apply %s\"", g.Name(), g.Name())
 	}
 	// Leftovers of an earlier run (the VM is down and we hold the lock).
 	if err := g.m.Units.Stop(ctx, g.slice()); err != nil {
 		return err
 	}
 	if err := g.prepareDirs(); err != nil {
-		return err
-	}
-	if err := transportEnsureHostKey(g); err != nil {
 		return err
 	}
 	if err := g.startVM(ctx); err != nil {
@@ -87,7 +83,7 @@ func (g *Guest) startLocked(ctx context.Context) error {
 	}
 	if err == nil {
 		if err = g.waitReady(ctx); err != nil {
-			g.showBankenLog(ctx)
+			g.showAgentLog(ctx)
 		}
 	}
 	if err != nil {
@@ -97,14 +93,14 @@ func (g *Guest) startLocked(ctx context.Context) error {
 	return nil
 }
 
-// showBankenLog prints the journal of banken's units, to explain why a
+// showAgentLog prints the journal of antic-agent's units, to explain why a
 // guest did not become ready (it is torn down right after).
-func (g *Guest) showBankenLog(ctx context.Context) {
+func (g *Guest) showAgentLog(ctx context.Context) {
 	jctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	g.m.logf("journal of banken's units in %s:", g.Name())
+	g.m.logf("journal of antic-agent's units in %s:", g.Name())
 	g.vsock().Agent(jctx, proto.Request{Op: proto.OpJournal, Lines: 40,
-		Units: []string{"banken-agent.service", "banken-ssh-keys.service", "banken-restrict-userns.service", "banken-audit.service", "banken-ready.target"}},
+		Units: []string{"antic-agent.service", "antic-ready.target"}},
 		func(r proto.Response) {
 			if r.Line != "" {
 				fmt.Fprintln(g.m.Log, "  "+r.Line)
@@ -112,14 +108,10 @@ func (g *Guest) showBankenLog(ctx context.Context) {
 		})
 }
 
-func transportEnsureHostKey(g *Guest) error {
-	return transport.EnsureHostKey(g.Inst.HostKey(), false)
-}
-
 // prepareDirs recreates the runtime directories and rotates the logs.
 func (g *Guest) prepareDirs() error {
 	os.RemoveAll(g.Inst.RunDir())
-	for _, d := range []string{g.Inst.VMDir(), g.Inst.SockDir(), g.Inst.AuditDir(), g.Inst.LogDir()} {
+	for _, d := range []string{g.Inst.VMDir(), g.Inst.SockDir(), g.Inst.LogDir()} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return err
 		}
@@ -134,7 +126,7 @@ func (g *Guest) prepareDirs() error {
 func (g *Guest) startVM(ctx context.Context) error {
 	api := filepath.Join(g.Inst.VMDir(), "api.sock")
 	props := append(systemd.Confine(
-		[]string{g.Inst.VMDir(), g.Inst.AuditDir(), g.Inst.LogDir()},
+		[]string{g.Inst.VMDir(), g.Inst.LogDir()},
 		[]string{g.Inst.StoreDir(), g.Inst.SockDir(), g.m.Bins.CloudHypervisor},
 	), systemd.ProtectProcFS()...)
 	props = append(props,
@@ -145,7 +137,7 @@ func (g *Guest) startVM(ctx context.Context) error {
 		systemd.Prop("MemoryDenyWriteExecute", true),
 	)
 	if err := g.m.Units.Start(ctx, systemd.Unit{
-		Name: g.vmUnit(), Slice: g.slice(), Description: "hanare guest " + g.Name(), Props: props,
+		Name: g.vmUnit(), Slice: g.slice(), Description: "antic guest " + g.Name(), Props: props,
 		Argv: []string{g.m.Bins.CloudHypervisor, "--api-socket", "path=" + api, "--seccomp", "true"},
 	}); err != nil {
 		return err
@@ -197,7 +189,7 @@ func (g *Guest) startShare(ctx context.Context, tag, path string, ro bool, guest
 	}
 	props := append(systemd.Confine(rw, append(roPaths, g.m.Bins.Virtiofsd)),
 		systemd.Prop("NoNewPrivileges", true), systemd.UnixOnly(), systemd.Prop("PrivateNetwork", true))
-	return sock, g.helper(ctx, g.shareUnit(tag), "hanare share "+path+" ("+g.Name()+")", props, sock, args...)
+	return sock, g.helper(ctx, g.shareUnit(tag), "antic share "+path+" ("+g.Name()+")", props, sock, args...)
 }
 
 // Guest IDs our UID/GID appear as: the guest user in shares, root in the
@@ -223,14 +215,6 @@ func (g *Guest) vmConfig(ctx context.Context, system string, bt *boot) (chv.VMCo
 	if err != nil {
 		return chv.VMConfig{}, err
 	}
-	pub, err := os.ReadFile(g.m.Dirs.ClientKey() + ".pub")
-	if err != nil {
-		return chv.VMConfig{}, fmt.Errorf("SSH client key: %w", err)
-	}
-	hostKey, err := os.ReadFile(g.Inst.HostKey())
-	if err != nil {
-		return chv.VMConfig{}, err
-	}
 
 	storeSock, err := g.startShare(ctx, "store", g.Inst.StoreDir()+"/nix", true, guestRootID)
 	if err != nil {
@@ -246,7 +230,7 @@ func (g *Guest) vmConfig(ctx context.Context, system string, bt *boot) (chv.VMCo
 		Memory:  chv.Memory{Size: g.Cfg.MemoryBytes, Shared: true},
 		FS:      []chv.FS{{ID: "fs-store", Tag: proto.StoreTag, Socket: storeSock, NumQueues: 1, QueueSize: 1024}},
 		Vsock:   &chv.Vsock{ID: "vsock", CID: 3, Socket: filepath.Join(g.Inst.VMDir(), "vsock.sock")},
-		Serial:  chv.Console{Mode: "File", File: filepath.Join(g.Inst.AuditDir(), time.Now().UTC().Format("20060102T150405Z")+".jsonl")},
+		Serial:  chv.Console{Mode: "Off"},
 		Console: chv.Console{Mode: "File", File: g.Inst.Console()},
 		RNG:     &chv.RNG{Src: "/dev/urandom"},
 	}
@@ -265,12 +249,12 @@ func (g *Guest) vmConfig(ctx context.Context, system string, bt *boot) (chv.VMCo
 		}
 		cfg.FS = append(cfg.FS, chv.FS{ID: "fs-" + tag, Tag: tag, Socket: sock, NumQueues: 1, QueueSize: 1024})
 		bt.Shares = append(bt.Shares, bootShare{Share: config.Share{Path: path, ReadOnly: s.ReadOnly}, Tag: tag})
-		// Sessions require banken-ready.target, which requires every share.
+		// Sessions require antic-ready.target, which requires every share.
 		mode := "rw"
 		if s.ReadOnly {
 			mode = "ro"
 		}
-		fmt.Fprintf(&fstab, "%s %s virtiofs %s,nosuid,nodev,x-systemd.required-by=banken-ready.target,x-systemd.before=banken-ready.target 0 0\n",
+		fmt.Fprintf(&fstab, "%s %s virtiofs %s,nosuid,nodev,x-systemd.required-by=antic-ready.target,x-systemd.before=antic-ready.target 0 0\n",
 			tag, fstabEscape(path), mode)
 	}
 
@@ -287,8 +271,6 @@ func (g *Guest) vmConfig(ctx context.Context, system string, bt *boot) (chv.VMCo
 	}
 	cfg.Platform = &chv.Platform{OEMStrings: []string{
 		cred(proto.CredMounts, []byte(fstab.String())),
-		cred(proto.CredAuthorizedKeys, pub),
-		cred(proto.CredHostKey, hostKey),
 		cred(proto.CredProtocol, []byte(strconv.Itoa(proto.Version))),
 	}}
 	return cfg, nil
@@ -326,7 +308,7 @@ func (g *Guest) waitSocket(ctx context.Context, unit, sock string) error {
 	}
 }
 
-// waitReady waits until banken reports the guest ready, and checks that it
+// waitReady waits until antic-agent reports the guest ready, and checks that it
 // speaks our protocol for our user.
 func (g *Guest) waitReady(ctx context.Context) error {
 	deadline := time.Now().Add(120 * time.Second)
@@ -337,26 +319,26 @@ func (g *Guest) waitReady(ctx context.Context) error {
 			return err
 		}
 		if !st.Running() {
-			return fmt.Errorf("guest %s stopped while starting (see: hanare guest logs %s)", g.Name(), g.Name())
+			return fmt.Errorf("guest %s stopped while starting (see: antic guest logs %s)", g.Name(), g.Name())
 		}
 		hctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		h, err := g.vsock().Hello(hctx)
 		cancel()
 		switch {
 		case err == nil && h.Protocol != proto.Version:
-			return fmt.Errorf("guest %s speaks hanare protocol %d, this hanare speaks %d; update the hanare input of its flake and run \"hanare guest apply %s\", then restart it",
+			return fmt.Errorf("guest %s speaks antic protocol %d, this antic speaks %d; update the antic input of its flake and run \"antic guest apply %s\", then restart it",
 				g.Name(), h.Protocol, proto.Version, g.Name())
 		case err == nil && h.User != g.m.User:
-			return fmt.Errorf("guest %s was built for user %q, not %q; set hanare.user in its flake", g.Name(), h.User, g.m.User)
+			return fmt.Errorf("guest %s was built for user %q, not %q; set antic.user in its flake", g.Name(), h.User, g.m.User)
 		case err == nil && h.Ready:
 			return nil
 		case err == nil:
-			last = errors.New("banken-ready.target not reached")
+			last = errors.New("antic-ready.target not reached")
 		default:
 			last = err
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("guest %s did not become ready: %w (see: hanare guest logs %s)", g.Name(), last, g.Name())
+			return fmt.Errorf("guest %s did not become ready: %w (see: antic guest logs %s)", g.Name(), last, g.Name())
 		}
 		select {
 		case <-ctx.Done():

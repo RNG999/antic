@@ -29,7 +29,7 @@ type Policy struct {
 
 // NewPolicy builds the policy. Denied: every hidden entry at the top of
 // $HOME and whatever symlinks there (one level into hidden directories as
-// well) point to, $PATH directories in $HOME, and extra (hanare's own
+// well) point to, $PATH directories in $HOME, and extra (antic's own
 // directories, guest flakes, policy.deny). A guest that could write any of
 // these would get code run on the host.
 func NewPolicy(home string, extra, roots []string) Policy {

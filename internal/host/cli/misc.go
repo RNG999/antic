@@ -8,14 +8,14 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/RNG999/hanare/internal/host/config"
-	"github.com/RNG999/hanare/internal/host/guest"
-	"github.com/RNG999/hanare/internal/host/nixbuild"
-	"github.com/RNG999/hanare/internal/proto"
+	"github.com/RNG999/antic/internal/host/config"
+	"github.com/RNG999/antic/internal/host/guest"
+	"github.com/RNG999/antic/internal/host/nixbuild"
+	"github.com/RNG999/antic/internal/proto"
 )
 
 func (a *app) configCmd() *cobra.Command {
-	c := &cobra.Command{Use: "config", Short: "hanare.toml", Args: cobra.NoArgs}
+	c := &cobra.Command{Use: "config", Short: "antic.toml", Args: cobra.NoArgs}
 	c.AddCommand(&cobra.Command{
 		Use: "path", Short: "Print the config file's path", Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error { fmt.Println(a.dirs.ConfigFile()); return nil },
@@ -25,7 +25,7 @@ func (a *app) configCmd() *cobra.Command {
 			if _, err := config.Load(a.dirs.ConfigFile(), a.dirs.Home); err != nil {
 				return err
 			}
-			fmt.Fprintln(os.Stderr, "hanare: config ok")
+			fmt.Fprintln(os.Stderr, "antic: config ok")
 			return nil
 		},
 	}, &cobra.Command{
@@ -49,8 +49,8 @@ func (a *app) configCmd() *cobra.Command {
 
 func (a *app) versionCmd() *cobra.Command {
 	return &cobra.Command{
-		Use: "version", Short: "Print hanare's version and guest protocol", Args: cobra.NoArgs,
-		Run: func(*cobra.Command, []string) { fmt.Printf("hanare %s (guest protocol %d)\n", Version, proto.Version) },
+		Use: "version", Short: "Print antic's version and guest protocol", Args: cobra.NoArgs,
+		Run: func(*cobra.Command, []string) { fmt.Printf("antic %s (guest protocol %d)\n", Version, proto.Version) },
 	}
 }
 
@@ -83,8 +83,6 @@ func (a *app) doctorCmd() *cobra.Command {
 			}
 			_, err = nixbuild.New()
 			check("nix", err)
-			_, err = os.Stat(a.dirs.ClientKey())
-			check("SSH client key "+a.dirs.ClientKey(), err)
 			_, err = config.Load(a.dirs.ConfigFile(), a.dirs.Home)
 			check("config "+a.dirs.ConfigFile(), err)
 			if bad > 0 {
@@ -95,19 +93,19 @@ func (a *app) doctorCmd() *cobra.Command {
 	}
 }
 
-// upgradeCmd builds hanare and cloud-hypervisor from a checkout and installs
+// upgradeCmd builds antic and cloud-hypervisor from a checkout and installs
 // them.
 func (a *app) upgradeCmd() *cobra.Command {
 	var source string
 	c := &cobra.Command{
-		Use: "upgrade", Short: "Build hanare (and cloud-hypervisor) from a checkout and install them", Args: cobra.NoArgs,
+		Use: "upgrade", Short: "Build antic (and cloud-hypervisor) from a checkout and install them", Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
 			nix, err := nixbuild.New()
 			if err != nil {
 				return err
 			}
 			for _, t := range []struct{ attr, bin, dst string }{
-				{"hanare", "hanare", filepath.Join(a.dirs.BinDir, "hanare")},
+				{"antic", "antic", filepath.Join(a.dirs.BinDir, "antic")},
 				{"cloud-hypervisor", "cloud-hypervisor", filepath.Join(a.dirs.Libexec, "cloud-hypervisor")},
 			} {
 				out, err := nix.Build(c.Context(), source, t.attr)
@@ -117,12 +115,12 @@ func (a *app) upgradeCmd() *cobra.Command {
 				if err := install(nix.Real(out)+"/bin/"+t.bin, t.dst); err != nil {
 					return err
 				}
-				fmt.Fprintf(os.Stderr, "hanare: installed %s\n", t.dst)
+				fmt.Fprintf(os.Stderr, "antic: installed %s\n", t.dst)
 			}
 			return nil
 		},
 	}
-	c.Flags().StringVar(&source, "source", a.dirs.SrcDir, "hanare checkout to build from")
+	c.Flags().StringVar(&source, "source", a.dirs.SrcDir, "antic checkout to build from")
 	return c
 }
 

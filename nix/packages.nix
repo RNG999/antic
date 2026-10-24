@@ -1,4 +1,4 @@
-# hanare (host CLI), banken (guest agent and BPF programs) and a static
+# antic (host CLI), antic-agent (guest agent and session runner) and a static
 # cloud-hypervisor, all built from this repository's pinned nixpkgs.
 { pkgs }:
 
@@ -10,38 +10,27 @@ let
       ../go.mod
       ../go.sum
       ../cmd
-      (lib.fileset.fileFilter (f: !f.hasExt "o") ../internal)
+      ../internal
       ./proto.json
     ];
   };
   goModule = args: pkgs.buildGoModule ({
     version = "0.4.0";
     inherit src;
-    vendorHash = "sha256-VUZzKblYW6bt8QH0bH9+OHbR+2On/daOg+5RnGJg8bE=";
+    vendorHash = "sha256-NsfRxs8rzbkXYlacpudkT52zBldyzEbZYIKPOeMxmPA=";
     env.CGO_ENABLED = 0;
     ldflags = [ "-s" "-w" ];
   } // args);
 in
 {
-  hanare = goModule {
-    pname = "hanare";
-    subPackages = [ "cmd/hanare" ];
+  antic = goModule {
+    pname = "antic";
+    subPackages = [ "cmd/antic" ];
   };
 
-  banken = goModule {
-    pname = "banken";
-    subPackages = [ "cmd/banken" ];
-    nativeBuildInputs = [ pkgs.llvmPackages.clang-unwrapped ];
-    # The BPF objects are embedded into the binary.
-    preBuild = ''
-      for f in internal/guest/*/bpf/*.bpf.c; do
-        clang -O2 -g -target bpf -D__TARGET_ARCH_${pkgs.stdenv.hostPlatform.linuxArch} \
-          -I${pkgs.libbpf}/include -I${pkgs.linuxHeaders}/include \
-          -c "$f" -o "''${f%.c}.o"
-      done
-    '';
-    # The module fetch only needs go.mod/go.sum.
-    overrideModAttrs = _: { preBuild = ""; };
+  antic-agent = goModule {
+    pname = "antic-agent";
+    subPackages = [ "cmd/antic-agent" ];
   };
 
   cloud-hypervisor = pkgs.pkgsStatic.cloud-hypervisor;

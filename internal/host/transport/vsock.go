@@ -1,5 +1,5 @@
 // Package transport connects to a guest: vsock through cloud-hypervisor's
-// host socket, SSH sessions on top of it, and banken's agent.
+// host socket, framed command sessions on top of it, and antic-agent.
 package transport
 
 import (

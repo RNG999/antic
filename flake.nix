@@ -1,5 +1,5 @@
 {
-  description = "hanare: run CLI tools in isolated NixOS guests";
+  description = "antic: run CLI tools in isolated NixOS guests";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
@@ -13,11 +13,11 @@
       nixosModules.guest = ./nix/module.nix;
       nixosModules.default = ./nix/module.nix;
 
-      # hanare (host CLI), banken (used by the module) and the static
-      # cloud-hypervisor "hanare upgrade" installs.
+      # antic (host CLI), antic-agent (used by the module) and the static
+      # cloud-hypervisor "antic upgrade" installs.
       packages = forAll (pkgs:
         let p = import ./nix/packages.nix { inherit pkgs; };
-        in p // { default = p.hanare; });
+        in p // { default = p.antic; });
 
       checks = forAll (pkgs: import ./nix/checks.nix { inherit pkgs; });
     };

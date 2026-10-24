@@ -11,7 +11,7 @@ const home = "/home/alice"
 
 func write(t *testing.T, content string) string {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), "hanare.toml")
+	p := filepath.Join(t.TempDir(), "antic.toml")
 	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -23,7 +23,7 @@ default_guest = "dev"
 
 # the dev guest
 [guests.dev]
-flake = "~/.config/hanare/guest"
+flake = "~/.config/antic/guest"
 memory = "8G"
 
 [guests.dev.commands]
@@ -44,7 +44,7 @@ func TestLoadDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	g := c.Guests["dev"]
-	if g.Flake != "/home/alice/.config/hanare/guest" || g.Attr != "hanare" || g.CPUs != 2 ||
+	if g.Flake != "/home/alice/.config/antic/guest" || g.Attr != "antic" || g.CPUs != 2 ||
 		g.MemoryBytes != 8<<30 || g.Network != NetworkFiltered || g.Shares[0].Path != "/home/alice/Work" {
 		t.Fatalf("unexpected guest %+v", g)
 	}

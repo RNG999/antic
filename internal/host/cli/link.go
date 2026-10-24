@@ -10,8 +10,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Links are ~/.local/bin/TOOL symlinks to hanare; invoked through one,
-// hanare runs TOOL in the guest whose commands.link lists it. hanare.toml is
+// Links are ~/.local/bin/TOOL symlinks to antic; invoked through one,
+// antic runs TOOL in the guest whose commands.link lists it. antic.toml is
 // the only source of truth: add/rm edit it, then sync.
 
 type linkInfo struct {
@@ -100,7 +100,7 @@ func (a *app) links() []linkInfo {
 		for _, t := range a.cfg.Guests[n].Commands.Link {
 			want[t] = true
 			st := "missing"
-			if dst, err := os.Readlink(filepath.Join(a.dirs.BinDir, t)); err == nil && dst == "hanare" {
+			if dst, err := os.Readlink(filepath.Join(a.dirs.BinDir, t)); err == nil && dst == "antic" {
 				st = "ok"
 			}
 			if host := a.hostCommand(t); host != "" {
@@ -125,17 +125,17 @@ func (a *app) syncLinks() error {
 			if err := os.Remove(p); err != nil {
 				return err
 			}
-			fmt.Fprintf(os.Stderr, "hanare: removed %s\n", p)
+			fmt.Fprintf(os.Stderr, "antic: removed %s\n", p)
 		case l.Status == "missing":
 			if _, err := os.Lstat(p); err == nil {
-				return fmt.Errorf("%s exists and is not a hanare link", p)
+				return fmt.Errorf("%s exists and is not an antic link", p)
 			}
-			if err := os.Symlink("hanare", p); err != nil {
+			if err := os.Symlink("antic", p); err != nil {
 				return err
 			}
-			fmt.Fprintf(os.Stderr, "hanare: linked %s -> %s\n", l.Tool, l.Guest)
+			fmt.Fprintf(os.Stderr, "antic: linked %s -> %s\n", l.Tool, l.Guest)
 		case l.Status != "ok":
-			fmt.Fprintf(os.Stderr, "hanare: %s is %s; use \"hanare run %s\"\n", l.Tool, l.Status, l.Tool)
+			fmt.Fprintf(os.Stderr, "antic: %s is %s; use \"antic run %s\"\n", l.Tool, l.Status, l.Tool)
 		}
 	}
 	return nil
@@ -160,7 +160,7 @@ func (a *app) currentLinks() []string {
 	entries, _ := os.ReadDir(a.dirs.BinDir)
 	var out []string
 	for _, e := range entries {
-		if dst, err := os.Readlink(filepath.Join(a.dirs.BinDir, e.Name())); err == nil && dst == "hanare" {
+		if dst, err := os.Readlink(filepath.Join(a.dirs.BinDir, e.Name())); err == nil && dst == "antic" {
 			out = append(out, e.Name())
 		}
 	}

@@ -13,7 +13,7 @@ import (
 
 // Edits keep the user's formatting and comments: they change only the
 // affected tables, and the result must load cleanly before it replaces the
-// file (atomically, next to the real file if hanare.toml is a symlink).
+// file (atomically, next to the real file if antic.toml is a symlink).
 
 // AppendGuest adds a [guests.NAME] table.
 func (c *Config) AppendGuest(name, flake, attr, home string) error {
@@ -111,7 +111,7 @@ func (c *Config) edit(home string, change func([]string) ([]string, error)) erro
 		return err
 	}
 	out := []byte(strings.Join(lines, "\n") + "\n")
-	tmp, err := os.CreateTemp(filepath.Dir(real), ".hanare.toml.*")
+	tmp, err := os.CreateTemp(filepath.Dir(real), ".antic.toml.*")
 	if err != nil {
 		return err
 	}

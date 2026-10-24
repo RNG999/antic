@@ -1,28 +1,37 @@
-# Guest side of hanare: a stateless NixOS guest that boots directly from a
-# kernel and initrd the host built, with / on tmpfs and /nix read-only from
-# the host (virtiofs). Import this module (nixosModules.guest) from your guest
-# flake and set hanare.user; see README.md.
-{ config, lib, pkgs, ... }:
+# Guest side of antic: a minimal, Perl-less stateless NixOS microVM that boots
+# directly from a kernel and initrd the host built, with / on tmpfs and /nix
+# read-only from the host (virtiofs). Import this module (nixosModules.guest)
+# from your guest flake and set antic.user; see README.md.
+{ config, lib, pkgs, modulesPath, ... }:
 
 let
-  cfg = config.hanare;
+  cfg = config.antic;
   proto = lib.importJSON ./proto.json;
   user = cfg.user;
   account = config.users.users.${user};
 
-  # sshd for one vsock connection (see the banken-session sockets). Without
-  # PAM, the session's processes stay in the per-connection unit's cgroup,
-  # so the restrictions below apply to everything the session runs.
+  # One antic-agent session instance per vsock connection (see the
+  # antic-session sockets). Processes stay in the per-connection unit's
+  # cgroup with zero capabilities and strict systemd sandboxing.
   sessionService = {
-    requires = [ "banken-ready.target" ];
-    after = [ "banken-ready.target" ];
-    # "hanare guest apply" must not restart sessions, including its own.
+    requires = [ "antic-ready.target" ];
+    after = [ "antic-ready.target" ];
+    # "antic guest apply" must not restart sessions, including its own.
     restartIfChanged = false;
     stopIfChanged = false;
-    environment.LD_LIBRARY_PATH = config.system.nssModules.path;
+    path = [ "/run/current-system/sw" ];
+    environment = {
+      HOME = account.home;
+      USER = user;
+      LOGNAME = user;
+      SHELL = "/run/current-system/sw/bin/bash";
+    };
     serviceConfig = {
-      ExecStart = "-${config.services.openssh.package}/bin/sshd -i -f /etc/ssh/sshd_config";
+      User = user;
+      Group = user;
+      ExecStart = "${cfg.package}/bin/antic-agent session";
       StandardInput = "socket";
+      StandardOutput = "socket";
       StandardError = "journal";
       NoNewPrivileges = true;
       RestrictSUIDSGID = true;
@@ -36,59 +45,41 @@ let
       ProtectHostname = true;
       PrivateDevices = true;
       SystemCallArchitectures = "native";
-      # No "~@mount": sshd's privilege separation chroot()s. Mounting needs
-      # CAP_SYS_ADMIN, which the bounding set below leaves out.
-      SystemCallFilter = [ "~@module" "~@reboot" "~@swap" "~@raw-io" "~@obsolete" "~@clock" "~@cpu-emulation" ];
-      CapabilityBoundingSet = [ "CAP_SETUID" "CAP_SETGID" "CAP_CHOWN" "CAP_DAC_OVERRIDE" "CAP_SYS_CHROOT" "CAP_KILL" "CAP_AUDIT_WRITE" ];
+      SystemCallFilter = [ "~@mount" "~@module" "~@reboot" "~@swap" "~@raw-io" "~@obsolete" "~@clock" "~@cpu-emulation" ];
+      CapabilityBoundingSet = [ ];
     };
   };
 in
 {
-  options.hanare = {
+  imports = [
+    "${modulesPath}/profiles/perlless.nix"
+    "${modulesPath}/profiles/minimal.nix"
+  ];
+
+  options.antic = {
     user = lib.mkOption {
       type = lib.types.passwdEntry lib.types.str;
-      description = "Guest login user; must be the host user that runs hanare (UID/GID 1000 in the guest).";
+      description = "Guest login user; must be the host user that runs antic (UID/GID 1000 in the guest).";
     };
     package = lib.mkOption {
       type = lib.types.package;
-      default = (import ./packages.nix { inherit pkgs; }).banken;
-      defaultText = lib.literalMD "banken from this flake";
-      description = "The banken package (guest agent and BPF programs).";
-    };
-    restrictUserNamespaces = lib.mkOption {
-      type = lib.types.bool;
-      default = true;
-      description = ''
-        Deny creating user namespaces to everyone but root (BPF LSM), a common
-        first step of kernel exploits. Sessions additionally run with
-        RestrictNamespaces=.
-      '';
-    };
-    audit = lib.mkOption {
-      type = lib.types.bool;
-      default = true;
-      description = ''
-        Log the guest user's executions, connections and files opened for
-        writing (BPF) to a serial port the host appends to a file; see
-        "hanare audit".
-      '';
+      default = (import ./packages.nix { inherit pkgs; }).antic-agent;
+      defaultText = lib.literalMD "antic-agent from this flake";
+      description = "The antic-agent package (guest agent and session runner).";
     };
   };
 
   config = {
     assertions = [
-      { assertion = account.uid == 1000; message = "hanare: users.users.${user}.uid must be 1000 (virtiofsd maps only that UID)."; }
-      { assertion = user != "root"; message = "hanare: hanare.user must not be root."; }
-      {
-        assertion = !(cfg.audit || cfg.restrictUserNamespaces) || lib.elem "bpf" config.security.lsm;
-        message = "hanare: audit and restrictUserNamespaces need \"bpf\" in security.lsm.";
-      }
+      { assertion = account.uid == 1000; message = "antic: users.users.${user}.uid must be 1000 (virtiofsd maps only that UID)."; }
+      { assertion = user != "root"; message = "antic: antic.user must not be root."; }
     ];
 
     system.stateVersion = lib.mkDefault "26.05";
-    networking.hostName = lib.mkDefault "hanare";
+    networking.hostName = lib.mkDefault "antic";
 
-    # Booted directly by the host (kernel, initrd, init=); no boot loader.
+    # Booted directly by the host (kernel, initrd, init=); no boot loader,
+    # Rust stage-2 nixos-init, and no hardware/desktop/storage cruft.
     boot.loader.grub.enable = false;
     boot.initrd.systemd.enable = true;
     boot.initrd.includeDefaultModules = false;
@@ -137,17 +128,32 @@ in
       options = [ "ro" "nodev" ];
       neededForBoot = true;
     };
+
+    # Distroless / microVM minimization: strip unused subsystems and packages.
     nix.enable = false;
+    system.nixos-init.enable = true;
     system.etc.overlay.enable = true;
     services.userborn.enable = true;
     services.journald.storage = "volatile";
+    services.lvm.enable = false;
+    boot.bcache.enable = false;
+    boot.kexec.enable = false;
+    boot.enableContainers = false;
+    programs.fuse.enable = false;
+    programs.nano.enable = false;
+    fonts.fontconfig.enable = false;
+    powerManagement.enable = false;
+    console.enable = false;
     documentation.enable = false;
     environment.defaultPackages = [ ];
+    systemd.enableEmergencyMode = false;
+    systemd.services."serial-getty@ttyS0".enable = false;
     systemd.services."serial-getty@hvc0".enable = false;
     systemd.services."getty@tty1".enable = false;
+    systemd.services."autovt@".enable = false;
     security.sudo.enable = false;
     security.polkit.enable = false;
-    security.wrappers = lib.mkForce { };
+    security.enableWrappers = false;
 
     # passt (vhost-user networking): plain DHCP on the virtio NIC. Egress is
     # filtered on the host, where guest root cannot change it.
@@ -165,71 +171,27 @@ in
       uid = 1000;
       # Primary GID must match the host (1000): virtiofsd maps only 1000:1000.
       group = user;
-      # "*" rather than "!": without PAM, OpenSSH refuses "!"-locked accounts.
-      hashedPassword = "*";
+      hashedPassword = "!";
     };
     users.groups.${user}.gid = 1000;
 
-    # SSH over vsock only, with the keys the host passes as credentials.
-    services.openssh = {
-      enable = true;
-      openFirewall = false;
-      startWhenNeeded = false;
-      hostKeys = [ ];
-      authorizedKeysInHomedir = false;
-      authorizedKeysFiles = lib.mkForce [ "${proto.runDir}/authorized_keys" ];
-      extraConfig = "HostKey ${proto.runDir}/ssh_host_ed25519_key";
-      settings = {
-        UsePAM = false;
-        PermitRootLogin = "no";
-        PasswordAuthentication = false;
-        KbdInteractiveAuthentication = false;
-        AllowUsers = [ user ];
-        DisableForwarding = true;
-        PermitTunnel = "no";
-        PermitUserRC = false;
-        PermitUserEnvironment = false;
-        MaxAuthTries = 2;
-      };
-    };
-    systemd.services.sshd.enable = false;
-    systemd.services.sshd-keygen.enable = false;
-
-    systemd.services.banken-ssh-keys = {
-      requiredBy = [ "banken-ready.target" ];
-      before = [ "banken-ready.target" ];
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-        ImportCredential = [ proto.credAuthorizedKeys proto.credHostKey ];
-        RuntimeDirectory = "hanare";
-        RuntimeDirectoryPreserve = true;
-      };
-      # "restrict,pty": no forwarding of any kind, only a terminal.
-      script = ''
-        ${pkgs.gnused}/bin/sed 's/^/restrict,pty /' "$CREDENTIALS_DIRECTORY/${proto.credAuthorizedKeys}" > ${proto.runDir}/authorized_keys
-        chmod 0644 ${proto.runDir}/authorized_keys
-        install -m 0600 "$CREDENTIALS_DIRECTORY/${proto.credHostKey}" ${proto.runDir}/ssh_host_ed25519_key
-      '';
-    };
-
     # Port 22: normal sessions; port 23: offline sessions.
-    systemd.sockets.banken-session = {
+    systemd.sockets.antic-session = {
       wantedBy = [ "sockets.target" ];
       socketConfig = {
         ListenStream = "vsock::${toString proto.portSession}";
         Accept = true;
       };
     };
-    systemd.sockets.banken-session-offline = {
+    systemd.sockets.antic-session-offline = {
       wantedBy = [ "sockets.target" ];
       socketConfig = {
         ListenStream = "vsock::${toString proto.portSessionOffline}";
         Accept = true;
       };
     };
-    systemd.services."banken-session@" = sessionService;
-    systemd.services."banken-session-offline@" = lib.recursiveUpdate sessionService {
+    systemd.services."antic-session@" = sessionService;
+    systemd.services."antic-session-offline@" = lib.recursiveUpdate sessionService {
       # No network and no way around it: no IP, only AF_UNIX, and neither the
       # resolver (also via nsncd), D-Bus nor vsock; /tmp and IPC are private.
       serviceConfig = {
@@ -242,51 +204,23 @@ in
       };
     };
 
-    # Everything a session relies on: keys, configured shares (fstab.extra),
-    # the user namespace restriction and the audit log. Sessions require it,
-    # so they never start without these.
-    systemd.targets.banken-ready = {
+    # Everything a session relies on: configured shares (fstab.extra).
+    # Sessions require it, so they never start without these.
+    systemd.targets.antic-ready = {
       wantedBy = [ "multi-user.target" ];
       after = [ "local-fs.target" "remote-fs.target" ];
     };
 
-    systemd.services.banken-agent = {
-      description = "banken agent (serves the host on vsock port ${toString proto.portAgent})";
+    systemd.services.antic-agent = {
+      description = "antic-agent (serves the host on vsock port ${toString proto.portAgent})";
       wantedBy = [ "multi-user.target" ];
       restartIfChanged = false;
       path = [ config.systemd.package ];
       serviceConfig = {
         Type = "notify";
-        ExecStart = "${cfg.package}/bin/banken agent --user ${user}";
+        ExecStart = "${cfg.package}/bin/antic-agent agent --user ${user}";
         Restart = "always";
         RestartSec = "1s";
-      };
-    };
-
-    systemd.services.banken-restrict-userns = lib.mkIf cfg.restrictUserNamespaces {
-      requiredBy = [ "banken-ready.target" ];
-      before = [ "banken-ready.target" ];
-      after = [ "sys-fs-bpf.mount" ];
-      # Restarting would only re-pin; never leave a gap during "apply".
-      restartIfChanged = false;
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-        ExecStart = "${cfg.package}/bin/banken restrict-userns";
-      };
-    };
-
-    systemd.services.banken-audit = lib.mkIf cfg.audit {
-      requiredBy = [ "banken-ready.target" ];
-      before = [ "banken-ready.target" ];
-      restartIfChanged = false;
-      unitConfig.StartLimitIntervalSec = 0;
-      serviceConfig = {
-        Type = "notify";
-        ExecStart = "${cfg.package}/bin/banken audit --uid ${toString account.uid} --out ${proto.auditPort}";
-        Restart = "always";
-        RestartSec = "1s";
-        OOMScoreAdjust = -1000;
       };
     };
 

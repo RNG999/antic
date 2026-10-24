@@ -9,7 +9,7 @@ import (
 )
 
 func (a *app) sessionCmd() *cobra.Command {
-	c := &cobra.Command{Use: "session", Short: "Sessions (\"hanare run\"s) running in a guest", Args: cobra.NoArgs}
+	c := &cobra.Command{Use: "session", Short: "Sessions (\"antic run\"s) running in a guest", Args: cobra.NoArgs}
 	ls := &cobra.Command{
 		Use:     "ls",
 		Aliases: []string{"list"},

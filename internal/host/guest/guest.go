@@ -1,4 +1,4 @@
-// Package guest runs hanare guests: it composes config, instances, systemd
+// Package guest runs antic guests: it composes config, instances, systemd
 // units, cloud-hypervisor, Nix and the guest transports into the lifecycle
 // operations the CLI offers. Mutating operations hold the guest's lock.
 package guest
@@ -15,23 +15,23 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/RNG999/hanare/internal/host/chv"
-	"github.com/RNG999/hanare/internal/host/config"
-	"github.com/RNG999/hanare/internal/host/instance"
-	"github.com/RNG999/hanare/internal/host/nixbuild"
-	"github.com/RNG999/hanare/internal/host/share"
-	"github.com/RNG999/hanare/internal/host/systemd"
-	"github.com/RNG999/hanare/internal/host/transport"
-	"github.com/RNG999/hanare/internal/proto"
+	"github.com/RNG999/antic/internal/host/chv"
+	"github.com/RNG999/antic/internal/host/config"
+	"github.com/RNG999/antic/internal/host/instance"
+	"github.com/RNG999/antic/internal/host/nixbuild"
+	"github.com/RNG999/antic/internal/host/share"
+	"github.com/RNG999/antic/internal/host/systemd"
+	"github.com/RNG999/antic/internal/host/transport"
+	"github.com/RNG999/antic/internal/proto"
 )
 
-// Binaries are the host programs hanare runs.
+// Binaries are the host programs antic runs.
 type Binaries struct {
 	CloudHypervisor, Virtiofsd, Passt, Pasta, Nft string
 }
 
-// FindBinaries locates them: cloud-hypervisor from hanare's libexec
-// ("hanare upgrade" installs it), the rest from the system.
+// FindBinaries locates them: cloud-hypervisor from antic's libexec
+// ("antic upgrade" installs it), the rest from the system.
 func FindBinaries(d instance.Dirs) Binaries {
 	find := func(name string, extra ...string) string {
 		if p, err := exec.LookPath(name); err == nil {
@@ -82,7 +82,7 @@ func NewManager(ctx context.Context, d instance.Dirs, cfg *config.Config, log io
 }
 
 func (m *Manager) logf(format string, args ...any) {
-	fmt.Fprintf(m.Log, "hanare: "+format+"\n", args...)
+	fmt.Fprintf(m.Log, "antic: "+format+"\n", args...)
 }
 
 func (m *Manager) nixBuilder() (*nixbuild.Nix, error) {
@@ -134,26 +134,23 @@ func (m *Manager) All() ([]*Guest, error) {
 func (g *Guest) Name() string { return g.Cfg.Name }
 
 // Units and slice, keyed by ID.
-func (g *Guest) vmUnit() string  { return "hanare-vm@" + g.Inst.ID + ".service" }
-func (g *Guest) netUnit() string { return "hanare-net@" + g.Inst.ID + ".service" }
+func (g *Guest) vmUnit() string  { return "antic-vm@" + g.Inst.ID + ".service" }
+func (g *Guest) netUnit() string { return "antic-net@" + g.Inst.ID + ".service" }
 func (g *Guest) shareUnit(tag string) string {
-	return "hanare-share@" + g.Inst.ID + ":" + tag + ".service"
+	return "antic-share@" + g.Inst.ID + ":" + tag + ".service"
 }
-func (g *Guest) slice() string              { return "hanare-" + g.Inst.ID + ".slice" }
+func (g *Guest) slice() string              { return "antic-" + g.Inst.ID + ".slice" }
 func (g *Guest) store() nixbuild.GuestStore { return nixbuild.GuestStore(g.Inst.StoreDir()) }
 func (g *Guest) api() *chv.Client           { return chv.New(filepath.Join(g.Inst.VMDir(), "api.sock")) }
 func (g *Guest) vsock() transport.Vsock {
 	return transport.Vsock{Socket: filepath.Join(g.Inst.VMDir(), "vsock.sock")}
 }
 func (g *Guest) sockDir(helper string) string { return filepath.Join(g.Inst.SockDir(), helper) }
-func (g *Guest) ssh() transport.SSH {
-	return transport.SSH{Vsock: g.vsock(), User: g.m.User, ClientKey: g.m.Dirs.ClientKey(), HostKey: g.Inst.HostKey()}
-}
 
 // requireCreated fails for a guest without a build.
 func (g *Guest) requireCreated() error {
 	if !g.Created {
-		return fmt.Errorf("guest %s has not been built yet; run \"hanare guest create %s\"", g.Name(), g.Name())
+		return fmt.Errorf("guest %s has not been built yet; run \"antic guest create %s\"", g.Name(), g.Name())
 	}
 	return nil
 }
@@ -222,7 +219,7 @@ func (g *Guest) writeBoot(bt *boot) error {
 	return os.Rename(tmp, g.Inst.BootFile())
 }
 
-// policy is the share policy, protecting hanare's own directories and every
+// policy is the share policy, protecting antic's own directories and every
 // guest's flake.
 func (m *Manager) policy() share.Policy {
 	extra := []string{m.Dirs.ConfigDir, m.Dirs.StateRoot, m.Dirs.Libexec, m.Dirs.SrcDir}

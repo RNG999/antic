@@ -1,11 +1,8 @@
 {
-  "auditPort": "/dev/ttyS0",
-  "credAuthorizedKeys": "hanare.ssh.authorized_keys",
-  "credHostKey": "hanare.ssh.host_key",
   "portAgent": 24,
   "portSession": 22,
   "portSessionOffline": 23,
-  "runDir": "/run/hanare",
-  "storeTag": "hanare-store",
+  "runDir": "/run/antic",
+  "storeTag": "antic-store",
   "version": 1
 }

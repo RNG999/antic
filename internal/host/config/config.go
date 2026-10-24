@@ -1,4 +1,4 @@
-// Package config loads and edits ~/.config/hanare/hanare.toml (schema
+// Package config loads and edits ~/.config/antic/antic.toml (schema
 // version 1): the guests that can be started and the sharing policy.
 // Loading is strict: unknown keys, bad sizes and invalid paths are errors.
 package config
@@ -17,10 +17,10 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// Version is the schema version this hanare reads.
+// Version is the schema version this antic reads.
 const Version = 1
 
-// Config is hanare.toml.
+// Config is antic.toml.
 type Config struct {
 	Version      int               `toml:"version"`
 	DefaultGuest string            `toml:"default_guest"`
@@ -107,9 +107,9 @@ func Load(path, home string) (*Config, error) {
 	}
 	if c.Version != Version {
 		if c.Version == 0 {
-			errs = append(errs, fmt.Errorf("missing \"version = %d\" (this looks like an older hanare.toml; see examples/hanare.toml)", Version))
+			errs = append(errs, fmt.Errorf("missing \"version = %d\" (this looks like an older antic.toml; see examples/antic.toml)", Version))
 		} else {
-			errs = append(errs, fmt.Errorf("version %d is not supported (this hanare reads version %d)", c.Version, Version))
+			errs = append(errs, fmt.Errorf("version %d is not supported (this antic reads version %d)", c.Version, Version))
 		}
 	}
 	errs = append(errs, c.normalize(home)...)
@@ -155,7 +155,7 @@ func (c *Config) normalize(home string) []error {
 			}
 		}
 		if g.Attr == "" {
-			g.Attr = "hanare"
+			g.Attr = "antic"
 		}
 		if g.CPUs == 0 {
 			g.CPUs = 2
@@ -180,7 +180,7 @@ func (c *Config) normalize(home string) []error {
 			errs = append(errs, fmt.Errorf("%s.network must be \"none\", \"filtered\" or \"lan\"", where))
 		}
 		for _, t := range append(slices.Clone(g.Commands.Link), g.Commands.Offline...) {
-			if !toolRE.MatchString(t) || t == "hanare" {
+			if !toolRE.MatchString(t) || t == "antic" {
 				errs = append(errs, fmt.Errorf("%s.commands: invalid command name %q", where, t))
 			}
 		}
@@ -231,11 +231,11 @@ func (c *Config) Names() []string {
 	return names
 }
 
-// Pick selects a guest: name if given, else $HANARE_GUEST, else
+// Pick selects a guest: name if given, else $ANTIC_GUEST, else
 // default_guest, else the only guest defined.
 func (c *Config) Pick(name string) (*Guest, error) {
 	if name == "" {
-		name = os.Getenv("HANARE_GUEST")
+		name = os.Getenv("ANTIC_GUEST")
 	}
 	if name == "" {
 		name = c.DefaultGuest
