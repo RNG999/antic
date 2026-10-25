@@ -240,3 +240,106 @@ func TestParseSize(t *testing.T) {
 		}
 	}
 }
+
+func TestPortProtocols(t *testing.T) {
+	tomlData := `
+[spec]
+cpus = 2
+memory = "4G"
+
+[network]
+mode = "internet"
+
+[[network.ports]]
+host = 53
+guest = 53
+proto = "tcp,udp"
+description = "DNS server"
+
+[[network.ports]]
+host = 8080
+guest = 80
+proto = "tcp"
+
+[[network.ports]]
+host = 8080
+guest = 80
+proto = "udp"
+`
+	dir := t.TempDir()
+	writeGuest(t, dir, "proto", tomlData)
+
+	c, err := Load(dir, home)
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	g, err := c.Get("proto")
+	if err != nil {
+		t.Fatalf("get failed: %v", err)
+	}
+	if len(g.Ports) != 3 {
+		t.Fatalf("expected 3 ports, got %d", len(g.Ports))
+	}
+	if !g.Ports[0].TCP() || !g.Ports[0].UDP() || g.Ports[0].ProtoStr() != "tcp,udp" {
+		t.Errorf("port 0 should be tcp,udp: %+v", g.Ports[0])
+	}
+	if !g.Ports[1].TCP() || g.Ports[1].UDP() || g.Ports[1].ProtoStr() != "tcp" {
+		t.Errorf("port 1 should be tcp: %+v", g.Ports[1])
+	}
+	if g.Ports[2].TCP() || !g.Ports[2].UDP() || g.Ports[2].ProtoStr() != "udp" {
+		t.Errorf("port 2 should be udp: %+v", g.Ports[2])
+	}
+
+	conflictToml := `
+[spec]
+cpus = 2
+memory = "4G"
+
+[network]
+mode = "internet"
+
+[[network.ports]]
+host = 8080
+guest = 80
+proto = "tcp"
+
+[[network.ports]]
+host = 8080
+guest = 8080
+proto = "tcp,udp"
+`
+	dir2 := t.TempDir()
+	writeGuest(t, dir2, "conflict", conflictToml)
+	c2, err := Load(dir2, home)
+	if err == nil {
+		_, err = c2.Get("conflict")
+	}
+	if err == nil || !strings.Contains(err.Error(), "duplicate host port 8080") {
+		t.Fatalf("expected duplicate host port error, got: %v", err)
+	}
+}
+
+func TestParsePort(t *testing.T) {
+	cases := []struct {
+		raw       string
+		wantHost  int
+		wantGuest int
+		wantProto string
+	}{
+		{"80", 80, 80, ""},
+		{"8080:80", 8080, 80, ""},
+		{"53/udp", 53, 53, "udp"},
+		{"53:53/tcp,udp", 53, 53, "tcp,udp"},
+		{"443:443/tcp", 443, 443, "tcp"},
+	}
+	for _, tc := range cases {
+		p, err := ParsePort(tc.raw)
+		if err != nil {
+			t.Errorf("ParsePort(%q): unexpected err: %v", tc.raw, err)
+			continue
+		}
+		if p.Host != tc.wantHost || p.Guest != tc.wantGuest || p.Proto != tc.wantProto {
+			t.Errorf("ParsePort(%q) = %+v, want Host=%d, Guest=%d, Proto=%q", tc.raw, p, tc.wantHost, tc.wantGuest, tc.wantProto)
+		}
+	}
+}

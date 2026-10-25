@@ -63,6 +63,9 @@ func (c *Config) CreateGuest(name string, g Guest, home string) error {
 		lines = append(lines, "", "[[network.ports]]",
 			fmt.Sprintf("host = %d", p.Host),
 			fmt.Sprintf("guest = %d", p.Guest))
+		if p.Proto != "" && p.Proto != "tcp" {
+			lines = append(lines, "proto = "+tomlString(p.Proto))
+		}
 		if p.Description != "" {
 			lines = append(lines, "description = "+tomlString(p.Description))
 		}
@@ -160,12 +163,14 @@ func (c *Config) RemoveShare(guest, path, home string) error {
 	})
 }
 
-// AddPort appends a [[network.ports]] entry unless host port is already configured.
+// AddPort appends a [[network.ports]] entry unless host port is already configured for the same protocol.
 func (c *Config) AddPort(guest string, p Port, home string) error {
 	if g := c.Guests[guest]; g != nil {
 		for _, have := range g.Ports {
 			if have.Host == p.Host {
-				return fmt.Errorf("host port %d is already forwarded on %s", p.Host, guest)
+				if (p.TCP() && have.TCP()) || (p.UDP() && have.UDP()) {
+					return fmt.Errorf("host port %d is already forwarded on %s", p.Host, guest)
+				}
 			}
 		}
 	}
@@ -173,6 +178,9 @@ func (c *Config) AddPort(guest string, p Port, home string) error {
 		lines = append(lines, "", "[[network.ports]]",
 			fmt.Sprintf("host = %d", p.Host),
 			fmt.Sprintf("guest = %d", p.Guest))
+		if p.Proto != "" && p.Proto != "tcp" {
+			lines = append(lines, "proto = "+tomlString(p.Proto))
+		}
 		if p.Description != "" {
 			lines = append(lines, "description = "+tomlString(p.Description))
 		}

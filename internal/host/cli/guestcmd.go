@@ -467,7 +467,7 @@ func (a *app) guestShow() *cobra.Command {
 					if p.Description != "" {
 						desc = fmt.Sprintf(" (%s)", p.Description)
 					}
-					fmt.Fprintf(w, "Port:\t127.0.0.1:%d -> %d%s\n", p.Host, p.Guest, desc)
+					fmt.Fprintf(w, "Port:\t127.0.0.1:%d -> %d/%s%s\n", p.Host, p.Guest, p.ProtoStr(), desc)
 				}
 				for _, s := range i.Shares {
 					fmt.Fprintf(w, "Share:\t%s (%s%s)\n", s.Path, mode(s.ReadOnly), map[bool]string{true: ", mounted"}[s.Mounted])

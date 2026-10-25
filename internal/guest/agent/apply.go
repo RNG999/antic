@@ -2,12 +2,14 @@ package agent
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/RNG999/antic/internal/proto"
 )
@@ -25,7 +27,9 @@ func apply(toplevel string, line func(string)) error {
 	if _, err := os.Stat(stc); err != nil {
 		return fmt.Errorf("%s is not a NixOS system: %w", toplevel, err)
 	}
-	cmd := exec.Command(stc, "switch")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, stc, "switch")
 	cmd.Env = append(os.Environ(), "NIXOS_INSTALL_BOOTLOADER=0")
 	out, err := cmd.StdoutPipe()
 	if err != nil {

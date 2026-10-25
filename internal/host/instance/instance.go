@@ -11,6 +11,7 @@
 package instance
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -19,7 +20,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -169,43 +172,137 @@ func (d Dirs) Orphans() ([]string, error) {
 	return out, err
 }
 
+const (
+	DefaultLockTimeout     = 60 * time.Second
+	DefaultNixBuildTimeout = 20 * time.Minute
+)
+
+func defaultTimeout(fallback time.Duration) time.Duration {
+	if s := os.Getenv("ANTIC_LOCK_TIMEOUT"); s != "" {
+		if d, err := time.ParseDuration(s); err == nil && d > 0 {
+			return d
+		}
+	}
+	return fallback
+}
+
 // Lock serializes lifecycle operations on guest name across antic
 // processes (AI agents run tools in parallel). Unlock by calling the
-// returned function.
+// returned function. Times out after DefaultLockTimeout.
 func (d Dirs) Lock(name string) (func(), error) {
-	return d.LockWithReason(name, fmt.Sprintf("guest %q", name))
+	return d.LockWithTimeout(name, fmt.Sprintf("guest %q", name), defaultTimeout(DefaultLockTimeout))
 }
 
 // LockNixBuild serializes Nix builds across antic processes so that
 // concurrent builds don't collide on the Nix eval-cache or store lock.
+// Times out after DefaultNixBuildTimeout.
 func (d Dirs) LockNixBuild() (func(), error) {
-	return d.LockWithReason("nixbuild", "Nix build")
+	return d.LockWithTimeout("nixbuild", "Nix build", defaultTimeout(DefaultNixBuildTimeout))
 }
 
 // LockWithReason takes an exclusive lock under StateRoot/locks/.
 // If the lock is held by another process, it notifies the user on stderr
-// and waits until the lock is acquired.
+// and waits until the lock is acquired or DefaultLockTimeout expires.
 func (d Dirs) LockWithReason(name, description string) (func(), error) {
+	return d.LockWithTimeout(name, description, defaultTimeout(DefaultLockTimeout))
+}
+
+// LockWithTimeout takes an exclusive lock under StateRoot/locks/, waiting up to timeout.
+func (d Dirs) LockWithTimeout(name, description string, timeout time.Duration) (func(), error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return d.LockWithContext(ctx, name, description, timeout)
+}
+
+// LockWithContext takes an exclusive lock under StateRoot/locks/.
+// If the lock is held by another process, it notifies the user on stderr
+// and polls until acquired or ctx is cancelled / timeout expires.
+func (d Dirs) LockWithContext(ctx context.Context, name, description string, timeout time.Duration) (func(), error) {
 	dir := filepath.Join(d.StateRoot, "locks")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(filepath.Join(dir, name+".lock"), os.O_RDWR|os.O_CREATE|unix.O_NOFOLLOW, 0o600)
+	lockPath := filepath.Join(dir, name+".lock")
+	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE|unix.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, err
 	}
+
 	// Try non-blocking first to detect contention and inform the user.
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
-			fmt.Fprintf(os.Stderr, "antic: waiting for lock on %s (held by another process)...\n", description)
-			if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err == nil {
+		writeLockPID(f)
+		return lockCleanup(f), nil
+	} else if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+		f.Close()
+		return nil, err
+	}
+
+	holder := readLockPID(lockPath)
+	holderMsg := "another process"
+	if holder != "" {
+		holderMsg = holder
+	}
+	fmt.Fprintf(os.Stderr, "antic: waiting for lock on %s (held by %s)...\n", description, holderMsg)
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	start := time.Now()
+
+	for {
+		select {
+		case <-ctx.Done():
+			f.Close()
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				if h := readLockPID(lockPath); h != "" {
+					holderMsg = h
+				}
+				elapsed := time.Since(start).Round(time.Millisecond)
+				if elapsed >= time.Second {
+					elapsed = elapsed.Round(time.Second)
+				}
+				return nil, fmt.Errorf("timed out waiting for lock on %s after %v (held by %s)", description, elapsed, holderMsg)
+			}
+			return nil, fmt.Errorf("interrupted waiting for lock on %s (held by %s): %w", description, holderMsg, ctx.Err())
+		case <-ticker.C:
+			if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err == nil {
+				writeLockPID(f)
+				return lockCleanup(f), nil
+			} else if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
 				f.Close()
 				return nil, err
 			}
-		} else {
-			f.Close()
-			return nil, err
 		}
 	}
-	return func() { f.Close() }, nil
+}
+
+func writeLockPID(f *os.File) {
+	_ = f.Truncate(0)
+	_, _ = f.Seek(0, 0)
+	_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
+	_ = f.Sync()
+}
+
+func lockCleanup(f *os.File) func() {
+	return func() {
+		_ = f.Truncate(0)
+		_ = f.Sync()
+		_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+		f.Close()
+	}
+}
+
+func readLockPID(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	s := strings.TrimSpace(string(b))
+	if s == "" {
+		return ""
+	}
+	pid, err := strconv.Atoi(s)
+	if err == nil && pid > 0 {
+		return fmt.Sprintf("PID %d", pid)
+	}
+	return s
 }

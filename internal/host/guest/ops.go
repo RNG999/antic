@@ -80,6 +80,7 @@ func (g *Guest) Apply(ctx context.Context) error {
 	if bt.System == system {
 		return nil
 	}
+	oldSystem := bt.System
 	g.m.logf("switching the running guest...")
 	err = g.vsock().Agent(ctx, proto.Request{Op: proto.OpApply, Toplevel: system}, func(r proto.Response) {
 		if r.Line != "" {
@@ -87,11 +88,33 @@ func (g *Guest) Apply(ctx context.Context) error {
 		}
 	})
 	if err != nil {
+		if oldSystem != "" && oldSystem != system {
+			g.m.logf("switch failed (%v); rolling back to %s...", err, oldSystem)
+			rbCtx, rbCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer rbCancel()
+			rbErr := g.vsock().Agent(rbCtx, proto.Request{Op: proto.OpApply, Toplevel: oldSystem}, func(r proto.Response) {
+				if r.Line != "" {
+					fmt.Fprintln(g.m.Log, r.Line)
+				}
+			})
+			if rbErr != nil {
+				return fmt.Errorf("switch failed: %w (rollback to %s also failed: %v)", err, oldSystem, rbErr)
+			}
+			g.m.logf("successfully rolled back to %s", oldSystem)
+			return fmt.Errorf("switch to configuration failed (rolled back to %s): %w", oldSystem, err)
+		}
 		return err
 	}
 	if same(g.store(), bt.System, system, "kernel", "initrd", "kernel-params") {
 		bt.System = system
-		return g.writeBoot(bt)
+		if err := g.writeBoot(bt); err != nil {
+			if oldSystem != "" && oldSystem != system {
+				g.m.logf("recording boot configuration failed (%v); rolling back to %s...", err, oldSystem)
+				_ = g.vsock().Agent(context.Background(), proto.Request{Op: proto.OpApply, Toplevel: oldSystem}, nil)
+			}
+			return fmt.Errorf("failed to record boot configuration: %w", err)
+		}
+		return nil
 	}
 	g.m.logf("the kernel changed; restart the guest to boot it (antic guest restart %s)", g.Name())
 	return nil

@@ -1,9 +1,12 @@
 package instance
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func testDirs(t *testing.T) Dirs {
@@ -117,4 +120,41 @@ func TestLockNixBuild(t *testing.T) {
 
 	unlock1()
 	<-acquired
+}
+
+func TestLockTimeout(t *testing.T) {
+	d := testDirs(t)
+	unlock1, err := d.Lock("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock1()
+
+	_, err = d.LockWithTimeout("dev", "test dev", 120*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if !strings.Contains(err.Error(), "timed out waiting for lock") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+
+func TestLockContextCancel(t *testing.T) {
+	d := testDirs(t)
+	unlock1, err := d.Lock("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock1()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel)
+
+	_, err = d.LockWithContext(ctx, "dev", "test dev", 10*time.Second)
+	if err == nil {
+		t.Fatal("expected context canceled error, got nil")
+	}
+	if !strings.Contains(err.Error(), "interrupted waiting for lock") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
 }

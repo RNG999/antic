@@ -107,7 +107,12 @@ func nftRules(g *config.Guest, hostNets []*net.IPNet) string {
 	w("    ct state established,related accept")
 	w("    icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } ip6 hoplimit 255 accept")
 	for _, p := range g.Ports {
-		w(`    oifname "lo" ip saddr 127.0.0.1 ip daddr 127.0.0.1 tcp dport %d accept`, p.Host)
+		if p.TCP() {
+			w(`    oifname "lo" ip saddr 127.0.0.1 ip daddr 127.0.0.1 tcp dport %d accept`, p.Host)
+		}
+		if p.UDP() {
+			w(`    oifname "lo" ip saddr 127.0.0.1 ip daddr 127.0.0.1 udp dport %d accept`, p.Host)
+		}
 	}
 	if filter {
 		// passt -> DNS filter, and only the filter's marked sockets upstream.
@@ -199,20 +204,45 @@ func (g *Guest) startNet(ctx context.Context) (string, error) {
 		helper = append(helper, "--upstream", nsDNS)
 		dnsHost = egress.Listen.Addr().String()
 	}
+	hasTCP := false
+	hasUDP := false
+	for _, p := range ports {
+		if p.TCP() {
+			hasTCP = true
+		}
+		if p.UDP() {
+			hasUDP = true
+		}
+	}
+
 	passt := []string{g.m.Bins.Passt, "--vhost-user", "--socket", sock, "--foreground", "--quiet", "--one-off",
-		"--no-map-gw", "--map-host-loopback", "none", "-u", "none",
+		"--no-map-gw", "--map-host-loopback", "none",
 		"--dns", guestDNS, "--dns-forward", guestDNS, "--dns-host", dnsHost}
 	pasta := []string{g.m.Bins.Pasta, "--config-net", "--quiet",
-		"--no-map-gw", "--map-host-loopback", "none", "-u", "none", "-T", "none", "-U", "none",
+		"--no-map-gw", "--map-host-loopback", "none", "-T", "none", "-U", "none",
 		"--dns-forward", nsDNS}
 
-	if len(ports) == 0 {
+	if !hasTCP {
 		pasta = append(pasta, "-t", "none")
 		passt = append(passt, "-t", "none")
 	} else {
 		for _, p := range ports {
-			pasta = append(pasta, "-t", fmt.Sprintf("127.0.0.1/%d:%d", p.Host, p.Host))
-			passt = append(passt, "-t", fmt.Sprintf("127.0.0.1/%d:%d", p.Host, p.Guest))
+			if p.TCP() {
+				pasta = append(pasta, "-t", fmt.Sprintf("127.0.0.1/%d:%d", p.Host, p.Host))
+				passt = append(passt, "-t", fmt.Sprintf("127.0.0.1/%d:%d", p.Host, p.Guest))
+			}
+		}
+	}
+
+	if !hasUDP {
+		pasta = append(pasta, "-u", "none")
+		passt = append(passt, "-u", "none")
+	} else {
+		for _, p := range ports {
+			if p.UDP() {
+				pasta = append(pasta, "-u", fmt.Sprintf("127.0.0.1/%d:%d", p.Host, p.Host))
+				passt = append(passt, "-u", fmt.Sprintf("127.0.0.1/%d:%d", p.Host, p.Guest))
+			}
 		}
 	}
 

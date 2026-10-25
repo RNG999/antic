@@ -104,6 +104,8 @@ mode = "internet"   # none | internet | lan
 [[network.ports]]
 host = 8080
 guest = 80
+proto = "tcp"          # "tcp" (default) | "udp" | "tcp,udp"
+description = "Web app"
 
 [[shares]]
 source = "~/Work"

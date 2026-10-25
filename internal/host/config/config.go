@@ -47,11 +47,40 @@ type NetworkConfig struct {
 	Ports []Port   `toml:"ports" json:"ports,omitempty"`
 }
 
-// Port is one host-to-guest TCP port mapping (127.0.0.1:Host -> Guest).
+// Port is one host-to-guest port mapping (127.0.0.1:Host -> Guest).
 type Port struct {
 	Host        int    `toml:"host" json:"host"`                                     // 1..65535
 	Guest       int    `toml:"guest" json:"guest"`                                   // 1..65535 (defaults to Host if omitted)
+	Proto       string `toml:"proto,omitempty" json:"proto,omitempty"`               // "tcp", "udp", or "tcp,udp" (defaults to "tcp")
 	Description string `toml:"description,omitempty" json:"description,omitempty"` // optional explanation
+}
+
+func (p Port) TCP() bool {
+	switch strings.ToLower(p.Proto) {
+	case "", "tcp", "tcp,udp", "udp,tcp":
+		return true
+	default:
+		return false
+	}
+}
+
+func (p Port) UDP() bool {
+	switch strings.ToLower(p.Proto) {
+	case "udp", "tcp,udp", "udp,tcp":
+		return true
+	default:
+		return false
+	}
+}
+
+func (p Port) ProtoStr() string {
+	if p.TCP() && p.UDP() {
+		return "tcp,udp"
+	}
+	if p.UDP() {
+		return "udp"
+	}
+	return "tcp"
 }
 
 // Share is a host directory visible in the guest at the same path (or a remote share).
@@ -337,21 +366,45 @@ func (g *Guest) normalize(home string) []error {
 			errs = append(errs, fmt.Errorf("env: variable %q contains null byte", k))
 		}
 	}
-	seenPorts := map[int]bool{}
+	seenTCP := map[int]bool{}
+	seenUDP := map[int]bool{}
 	for i := range g.Ports {
 		if g.Ports[i].Guest == 0 {
 			g.Ports[i].Guest = g.Ports[i].Host
+		}
+		proto := strings.ToLower(g.Ports[i].Proto)
+		if proto == "" {
+			proto = "tcp"
+		}
+		switch proto {
+		case "tcp", "udp", "tcp,udp", "udp,tcp":
+			if proto == "udp,tcp" {
+				proto = "tcp,udp"
+			}
+			g.Ports[i].Proto = proto
+		default:
+			errs = append(errs, fmt.Errorf("network.ports[%d]: invalid proto %q (use \"tcp\", \"udp\", or \"tcp,udp\")", i, g.Ports[i].Proto))
+			continue
 		}
 		hp, gp := g.Ports[i].Host, g.Ports[i].Guest
 		if hp < 1 || hp > 65535 || gp < 1 || gp > 65535 {
 			errs = append(errs, fmt.Errorf("network.ports[%d]: port numbers must be between 1 and 65535", i))
 			continue
 		}
-		if seenPorts[hp] {
-			errs = append(errs, fmt.Errorf("network.ports[%d]: duplicate host port %d", i, hp))
-			continue
+		if g.Ports[i].TCP() {
+			if seenTCP[hp] {
+				errs = append(errs, fmt.Errorf("network.ports[%d]: duplicate host port %d (tcp)", i, hp))
+				continue
+			}
+			seenTCP[hp] = true
 		}
-		seenPorts[hp] = true
+		if g.Ports[i].UDP() {
+			if seenUDP[hp] {
+				errs = append(errs, fmt.Errorf("network.ports[%d]: duplicate host port %d (udp)", i, hp))
+				continue
+			}
+			seenUDP[hp] = true
+		}
 	}
 	for i := range g.Shares {
 		if g.Shares[i].Source == "" {
@@ -404,11 +457,24 @@ func (g *Guest) normalize(home string) []error {
 	return errs
 }
 
-// ParsePort parses a CLI port mapping string: "PORT" or "HOST_PORT:GUEST_PORT".
+// ParsePort parses a CLI port mapping string: "PORT", "PORT/proto", "HOST_PORT:GUEST_PORT", or "HOST:GUEST/proto".
 func ParsePort(raw string) (Port, error) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
 		return Port{}, errors.New("empty port specification")
+	}
+	var proto string
+	if before, after, ok := strings.Cut(s, "/"); ok {
+		s = before
+		proto = strings.ToLower(after)
+		switch proto {
+		case "tcp", "udp", "tcp,udp", "udp,tcp":
+			if proto == "udp,tcp" {
+				proto = "tcp,udp"
+			}
+		default:
+			return Port{}, fmt.Errorf("invalid proto %q in %q (use tcp, udp, or tcp,udp)", proto, raw)
+		}
 	}
 	hostStr, guestStr, hasColon := strings.Cut(s, ":")
 	if !hasColon {
@@ -419,7 +485,7 @@ func ParsePort(raw string) (Port, error) {
 	if err1 != nil || err2 != nil || hp < 1 || hp > 65535 || gp < 1 || gp > 65535 {
 		return Port{}, fmt.Errorf("invalid port %q (use PORT or HOST_PORT:GUEST_PORT, 1..65535)", raw)
 	}
-	return Port{Host: hp, Guest: gp}, nil
+	return Port{Host: hp, Guest: gp, Proto: proto}, nil
 }
 
 // absPath expands "~" and requires an absolute path without control
