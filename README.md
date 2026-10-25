@@ -98,9 +98,8 @@ antic guest logs [NAME] [-f] [--journal [-u UNIT] [-n N]]
 ### Cache, Claude Code Skill & Host Maintenance
 
 ```sh
-antic cache ls [--json] [-q]                          # List cached guest OS builds
-antic cache rm [KEY...] [--all] [--gc]                # Remove cached builds (and optionally run Nix GC)
-antic cache gc                                        # Prune orphaned state and run 'nix store gc'
+antic cache ls [--json]                               # List cached guest builds
+antic cache rm [GUEST...] [--all]                     # Remove unused (or specified) caches and run Nix GC
 
 antic skill install [-p]                              # Install SKILL.md (~/.claude/skills/antic or ./.claude/skills/antic)
 antic skill rm [-p]

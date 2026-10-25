@@ -21,6 +21,7 @@ import (
 // CacheEntry describes one cached guest system build under ~/.local/state/antic/cache/<key>.
 type CacheEntry struct {
 	Key      string    `json:"key"`
+	Guests   []string  `json:"guests,omitempty"`
 	OS       string    `json:"os"`
 	Packages []string  `json:"packages,omitempty"`
 	Flake    string    `json:"flake,omitempty"`

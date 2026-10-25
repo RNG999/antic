@@ -33,7 +33,7 @@ func UsageText() string {
 	buf.WriteString("antic guest forward [NAME] PORT... | unforward [NAME] PORT...\n")
 	buf.WriteString("antic guest stats [NAME] [-w] [--json]\n\n")
 
-	buf.WriteString("antic cache ls [--json] [-q] | rm [KEY...] [--all] [--gc] | gc\n")
+	buf.WriteString("antic cache ls [--json] | rm [GUEST...] [--all]\n")
 	buf.WriteString("antic skill install [-p] | rm [-p] | path [-p]\n")
 	buf.WriteString("antic doctor | update [--source DIR] | version | completion SHELL\n")
 
