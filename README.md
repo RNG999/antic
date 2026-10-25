@@ -59,7 +59,7 @@ runs inside each guest to handle command sessions and host agent requests.
       without those;
     - run directly as the guest user with empty `CapabilityBoundingSet`,
       `NoNewPrivileges`, `RestrictNamespaces` and a syscall filter;
-    - with `--offline` (or `commands.offline`) also have no network: a
+    - with `--offline` also have no network: a
       private network namespace, only `AF_UNIX`, and no access to the
       resolver, nsncd, D-Bus or vsock.
 - **antic-agent daemon:** a root agent on vsock port 24 that accepts only the
@@ -162,33 +162,34 @@ EDITOR = "nvim"
 ## Usage
 
 ```
-antic run NAME [--offline] [-w DIR] [-t|-T] [--] CMD...   run CMD in the guest
-antic shell NAME
+antic run [NAME] [--offline] [-w DIR] [-t|-T] [--] CMD...   run CMD in the guest
+antic shell [NAME]
 
 antic guest ls [--json] [-q]
 antic guest create NAME [-p PKG...] [--cpus N] [--memory SIZE] [--network MODE] [--port PORT...]
-antic guest set NAME [--cpus N] [--memory SIZE] [--network MODE]
-antic guest edit NAME
+antic guest set [NAME] [--cpus N] [--memory SIZE] [--network MODE]
+antic guest edit [NAME]
 antic guest rm NAME... [-y]
-antic guest start|stop|restart NAME...
+antic guest start|restart [NAME...]
+antic guest stop [NAME...] | --all
 antic guest show [NAME] [--path] [--config] [--json]
-antic guest logs NAME [-f] [--journal [-u UNIT] [-n N]]
-antic guest ps NAME [--json]
-antic guest kill NAME SESSION...
-antic guest apply NAME
+antic guest logs [NAME] [-f] [--journal [-u UNIT] [-n N]]
+antic guest ps [NAME] [--json]
+antic guest kill [NAME] SESSION...
+antic guest apply [NAME]
 
-antic guest install NAME PKG... | uninstall NAME PKG...
-antic guest mount NAME [--ro] DIR... | unmount NAME DIR...
-antic guest forward NAME PORT... [-p tcp|udp|tcp,udp] [-d DESC] | unforward NAME PORT...
+antic guest install [NAME] PKG... | uninstall [NAME] PKG...
+antic guest mount [NAME] [--ro] DIR... | unmount [NAME] DIR...
+antic guest forward [NAME] PORT... [-p tcp|udp|tcp,udp] [-d DESC] | unforward [NAME] PORT...
 antic skill install [-p] | rm [-p] | path [-p]
 antic doctor | update [--source DIR] | version | completion SHELL
 ```
 
-Every guest-targeted command requires an explicit `NAME` argument (omitting it is a syntax error). `run` exits with the command's status; antic's own errors exit with 125.
+When exactly one guest is defined, the `[NAME]` argument can be omitted from guest commands (antic targets that single guest automatically). When multiple guests exist, `NAME` is required. `run` exits with the command's status; antic's own errors exit with 125.
 
-Add tools with `antic guest install NAME PKG...` (or edit `packages = [...]` in
-`~/.config/antic/guests/<name>.toml` and run `antic guest apply NAME`). A changed
-kernel needs `antic guest restart NAME`.
+Add tools with `antic guest install [NAME] PKG...` (or edit `packages = [...]` in
+`~/.config/antic/guests/<name>.toml` and run `antic guest apply [NAME]`). A changed
+kernel needs `antic guest restart [NAME]`.
 
 `apply` refuses to build if the guest flake's lock pins an older state of a
 local-path input, or if a local input lies inside a share.
@@ -208,8 +209,6 @@ local-path input, or if a local input lies inside a share.
   same addresses become reachable too, and data can be sent to anything the
   allowed services accept (e.g. a gist on github.com). Allow only what is
   needed.
-- **Links in `~/.local/bin`** lose to host commands earlier in `PATH`;
-  `antic link ls` reports those as shadowed.
 
 [cloud-hypervisor]: https://www.cloudhypervisor.org/
 [virtiofsd]: https://gitlab.com/virtio-fs/virtiofsd
