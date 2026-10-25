@@ -29,7 +29,6 @@ type GuestStats struct {
 	CPUPercent  float64 `json:"cpu_percent"`
 	MemoryUsed  int64   `json:"memory_used"`
 	MemoryLimit string  `json:"memory_limit"`
-	PIDs        int     `json:"pids"`
 	Sessions    int     `json:"sessions"`
 }
 
@@ -37,7 +36,6 @@ type sample struct {
 	time     time.Time
 	cpuUsec  int64
 	memBytes int64
-	pids     int
 	sessions int
 	state    string
 	uptime   string
@@ -78,10 +76,6 @@ func readGuestSample(ctx context.Context, g *guest.Guest) sample {
 	if b, err := os.ReadFile(filepath.Join(cg, "memory.current")); err == nil {
 		s.memBytes, _ = strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
 	}
-	// Read tasks / pids count
-	if b, err := os.ReadFile(filepath.Join(cg, "pids.current")); err == nil {
-		s.pids, _ = strconv.Atoi(strings.TrimSpace(string(b)))
-	}
 	// Read running command sessions count
 	if ss, err := g.Sessions(ctx); err == nil {
 		s.sessions = len(ss)
@@ -97,7 +91,6 @@ func computeStats(name string, prev, curr sample) GuestStats {
 		CPUs:        curr.cpus,
 		MemoryUsed:  curr.memBytes,
 		MemoryLimit: curr.memLimit,
-		PIDs:        curr.pids,
 		Sessions:    curr.sessions,
 	}
 	if curr.state == "running" && prev.state == "running" {
@@ -132,22 +125,20 @@ func formatBytes(b int64) string {
 
 func printStatsTable(w io.Writer, stats []GuestStats) {
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tSTATE\tCPUS\tCPU%\tMEM USAGE / LIMIT\tPIDS\tSESSIONS")
+	fmt.Fprintln(tw, "NAME\tSTATE\tCPUS\tCPU%\tMEM USAGE / LIMIT\tSESSIONS")
 	for _, s := range stats {
 		cpuStr := "-"
-		pidsStr := "-"
 		sessStr := "-"
 		if s.State == "running" {
 			cpuStr = fmt.Sprintf("%.1f%%", s.CPUPercent)
-			pidsStr = strconv.Itoa(s.PIDs)
 			sessStr = strconv.Itoa(s.Sessions)
 		}
 		memStr := formatMem(s.MemoryUsed, s.MemoryLimit)
 		if s.State != "running" {
 			memStr = "-"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
-			s.Name, s.State, s.CPUs, cpuStr, memStr, pidsStr, sessStr)
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n",
+			s.Name, s.State, s.CPUs, cpuStr, memStr, sessStr)
 	}
 	tw.Flush()
 }
