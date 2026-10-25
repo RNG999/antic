@@ -9,97 +9,142 @@ import (
 
 const home = "/home/alice"
 
-func write(t *testing.T, content string) string {
+func writeGuest(t *testing.T, dir, name, content string) string {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), "antic.toml")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, name+".toml")
 	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return p
 }
 
-const valid = `version = 1
-default_guest = "dev"
-
-# the dev guest
-[guests.dev]
-flake = "~/.config/antic/guest"
+const validDev = `# the dev guest
+description = "tools for my agent"
+packages = ["git", "ripgrep"]
+cpus = 4
 memory = "8G"
 
-[guests.dev.commands]
-link = ["tlc"]
-
-[[guests.dev.share]]
+[[shares]]
 path = "~/Work"
 
-[guests.lab]
-flake = "/srv/guest"
-attr = "lab"
+[[shares]]
+path = "~/Docs/spec"
+readonly = true
+
+[[ports]]
+host = 3000
+
+[[ports]]
+host = 8080
+guest = 80
+`
+
+const validLab = `flake = "/srv/guest#lab"
 network = "none"
 `
 
 func TestLoadDefaults(t *testing.T) {
-	c, err := Load(write(t, valid), home)
+	dir := t.TempDir()
+	writeGuest(t, dir, "dev", validDev)
+	writeGuest(t, dir, "lab", validLab)
+
+	c, err := Load(dir, home)
 	if err != nil {
 		t.Fatal(err)
 	}
 	g := c.Guests["dev"]
-	if g.Flake != "/home/alice/.config/antic/guest" || g.Attr != "antic" || g.CPUs != 2 ||
-		g.MemoryBytes != 8<<30 || g.Network != NetworkFiltered || g.Shares[0].Path != "/home/alice/Work" {
+	if len(g.Packages) != 2 || g.Packages[0] != "git" || g.CPUs != 4 ||
+		g.MemoryBytes != 8<<30 || g.Network != NetworkInternet || len(g.Ports) != 2 ||
+		g.Ports[0].Host != 3000 || g.Ports[0].Guest != 3000 ||
+		g.Ports[1].Host != 8080 || g.Ports[1].Guest != 80 ||
+		g.Shares[0].Path != "/home/alice/Work" || g.Shares[0].ReadOnly ||
+		g.Shares[1].Path != "/home/alice/Docs/spec" || !g.Shares[1].ReadOnly {
 		t.Fatalf("unexpected guest %+v", g)
 	}
-	if p, _ := c.Pick(""); p.Name != "dev" {
-		t.Fatalf("Pick() = %s", p.Name)
+	lab := c.Guests["lab"]
+	if lab.FlakePath != "/srv/guest" || lab.FlakeAttr != "lab" {
+		t.Fatalf("unexpected lab flake %+v", lab)
+	}
+	if _, err := c.Get(""); err == nil {
+		t.Fatalf("Get(\"\") succeeded, want syntax error")
+	}
+	if p, err := c.Get("dev"); err != nil || p.Name != "dev" {
+		t.Fatalf("Get(\"dev\") = %v, %v", p, err)
 	}
 }
 
 func TestLoadRejects(t *testing.T) {
 	for name, tc := range map[string]struct{ content, want string }{
-		"unknown key": {strings.Replace(valid, `path = "~/Work"`, "path = \"~/Work\"\nreadonly = true", 1), `did you mean "read_only"`},
-		"no version":  {strings.Replace(valid, "version = 1\n", "", 1), "missing \"version = 1\""},
-		"bad memory":  {strings.Replace(valid, `"8G"`, `"8GiB"`, 1), "memory"},
-		"relative":    {strings.Replace(valid, `"/srv/guest"`, `"guest"`, 1), "must be absolute"},
-		"network":     {strings.Replace(valid, `"none"`, `"off"`, 1), "network must be"},
-		"overlap":     {valid + "\n[[guests.dev.share]]\npath = \"~/Work/sub\"\n", "overlap"},
-		"dup link":    {valid + "\n[guests.lab.commands]\nlink = [\"tlc\"]\n", "already linked"},
-		"default":     {strings.Replace(valid, `"dev"`+"\n", `"nope"`+"\n", 1), "default_guest"},
+		"unknown key": {strings.Replace(validDev, `path = "~/Work"`, "path = \"~/Work\"\nread_only = true", 1), `did you mean "readonly"`},
+		"bad memory":  {strings.Replace(validDev, `"8G"`, `"8GiB"`, 1), "memory"},
+		"bad port":    {strings.Replace(validDev, `host = 3000`, `host = 70000`, 1), "ports"},
+		"dup port":    {strings.Replace(validDev, `host = 3000`, `host = 8080`, 1), "duplicate host port"},
+		"relative":    {strings.Replace(validLab, `"/srv/guest#lab"`, `"guest#lab"`, 1), "must be absolute"},
+		"network":     {strings.Replace(validLab, `"none"`, `"off"`, 1), "network must be"},
+		"overlap":     {validDev + "\n[[shares]]\npath = \"~/Work/sub\"\n", "overlap"},
+		"allow none":  {validLab + "allow = [\"github.com\"]\n", "allow cannot be used"},
+		"allow lo":    {"allow = [\"127.0.0.1\"]\n", "never reach"},
+		"allow all":   {"allow = [\"0.0.0.0/0\"]\n", "never reach"},
+		"allow all6":  {"allow = [\"::/0\"]\n", "never reach"},
+		"allow meta":  {"allow = [\"169.254.169.254\"]\n", "never reach"},
+		"allow tld":   {"allow = [\"com\"]\n", "at least two labels"},
+		"allow bad":   {"allow = [\"git hub.com\"]\n", "invalid domain"},
+		"allow cidr":  {"allow = [\"10.0.0.0/33\"]\n", "invalid CIDR"},
+		"allow empty": {"allow = [\"\"]\n", "empty"},
 	} {
-		if _, err := Load(write(t, tc.content), home); err == nil || !strings.Contains(err.Error(), tc.want) {
+		dir := t.TempDir()
+		writeGuest(t, dir, "dev", tc.content)
+		if _, err := Load(dir, home); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: got %v, want error containing %q", name, err, tc.want)
 		}
 	}
 }
 
 func TestEdits(t *testing.T) {
-	p := write(t, valid)
-	c, err := Load(p, home)
+	dir := t.TempDir()
+	devPath := writeGuest(t, dir, "dev", validDev)
+	writeGuest(t, dir, "lab", validLab)
+
+	c, err := Load(dir, home)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cpus := 6
+	mem := "16G"
 	steps := []func(*Config) error{
-		func(c *Config) error { return c.AppendGuest("new", "/home/alice/g", "x", home) },
+		func(c *Config) error {
+			return c.CreateGuest("new", Guest{Packages: []string{"git"}}, home)
+		},
 		func(c *Config) error { return c.AddShare("new", Share{Path: "/home/alice/a b", ReadOnly: true}, home) },
-		func(c *Config) error { return c.SetLinks("dev", []string{"z3", "tlc"}, home) },
-		func(c *Config) error { return c.SetLinks("new", []string{"cvc5"}, home) },
+		func(c *Config) error { return c.SetPackages("dev", []string{"git", "jq"}, home) },
+		func(c *Config) error { return c.AddPort("new", Port{Host: 5173, Guest: 5173}, home) },
+		func(c *Config) error { return c.RemovePort("dev", 3000, home) },
+		func(c *Config) error {
+			return c.SetResources("new", ResourceUpdates{CPUs: &cpus, Memory: &mem}, home)
+		},
 		func(c *Config) error { return c.RemoveShare("dev", "/home/alice/Work", home) },
-		func(c *Config) error { return c.RemoveGuest("lab", home) },
+		func(c *Config) error { return c.RemoveGuest("lab") },
 	}
 	for i, step := range steps {
 		if err := step(c); err != nil {
 			t.Fatalf("step %d: %v", i, err)
 		}
-		if c, err = Load(p, home); err != nil {
+		if c, err = Load(dir, home); err != nil {
 			t.Fatalf("step %d: reload: %v", i, err)
 		}
 	}
-	if c.Guests["lab"] != nil || len(c.Guests["dev"].Shares) != 0 ||
-		strings.Join(c.Guests["dev"].Commands.Link, ",") != "z3,tlc" ||
+	if c.Guests["lab"] != nil || len(c.Guests["dev"].Shares) != 1 || len(c.Guests["dev"].Ports) != 1 ||
+		strings.Join(c.Guests["dev"].Packages, ",") != "git,jq" ||
 		c.Guests["new"].Shares[0].Path != "/home/alice/a b" || !c.Guests["new"].Shares[0].ReadOnly ||
-		c.Guests["new"].Commands.Link[0] != "cvc5" {
-		b, _ := os.ReadFile(p)
+		c.Guests["new"].CPUs != 6 || c.Guests["new"].Memory != "16G" ||
+		len(c.Guests["new"].Ports) != 1 {
+		b, _ := os.ReadFile(devPath)
 		t.Fatalf("unexpected result:\n%s", b)
 	}
-	if b, _ := os.ReadFile(p); !strings.Contains(string(b), "# the dev guest") {
+	if b, _ := os.ReadFile(devPath); !strings.Contains(string(b), "# the dev guest") {
 		t.Fatalf("comment lost:\n%s", b)
 	}
 }

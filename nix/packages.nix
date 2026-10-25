@@ -4,19 +4,33 @@
 
 let
   inherit (pkgs) lib;
-  src = lib.fileset.toSource {
+  hostSrc = lib.fileset.toSource {
     root = ../.;
     fileset = lib.fileset.unions [
+      ../flake.lock
+      ../embed.go
       ../go.mod
       ../go.sum
       ../cmd
       ../internal
+      ./module.nix
+      ./packages.nix
+      ./proto.json
+    ];
+  };
+  agentSrc = lib.fileset.toSource {
+    root = ../.;
+    fileset = lib.fileset.unions [
+      ../go.mod
+      ../go.sum
+      ../cmd/antic-agent
+      ../internal/guest
+      ../internal/proto
       ./proto.json
     ];
   };
   goModule = args: pkgs.buildGoModule ({
     version = "0.4.0";
-    inherit src;
     vendorHash = "sha256-NsfRxs8rzbkXYlacpudkT52zBldyzEbZYIKPOeMxmPA=";
     env.CGO_ENABLED = 0;
     ldflags = [ "-s" "-w" ];
@@ -25,11 +39,13 @@ in
 {
   antic = goModule {
     pname = "antic";
+    src = hostSrc;
     subPackages = [ "cmd/antic" ];
   };
 
   antic-agent = goModule {
     pname = "antic-agent";
+    src = agentSrc;
     subPackages = [ "cmd/antic-agent" ];
   };
 

@@ -2,31 +2,47 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/signal"
-	"slices"
 	"syscall"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/RNG999/antic/internal/host/config"
 	"github.com/RNG999/antic/internal/host/guest"
 	"github.com/RNG999/antic/internal/host/transport"
 )
 
 func (a *app) runCmd() *cobra.Command {
 	var offline, tty, noTTY bool
+	var workdir string
 	c := &cobra.Command{
-		Use:   "run [flags] [--] CMD [ARG...]",
-		Short: "Run CMD in the guest, in the current directory",
-		Long: `Run CMD in the guest, in the current directory (which must be inside a
-share). The guest is started if needed. The exit status is CMD's; antic's
-own errors exit with 125.
+		Use:   "run NAME [flags] [--] CMD [ARG...]",
+		Short: "Run CMD in guest NAME",
+		Long: `Run CMD in guest NAME (in the current directory if shared, otherwise in the
+guest user's home directory). The guest is started if needed. The exit status
+is CMD's; antic's own errors exit with 125.
 
---offline (or the guest's commands.offline) runs CMD without any network.`,
-		Args: cobra.MinimumNArgs(1),
+--offline runs CMD without any network.`,
+		Args: cobra.MinimumNArgs(2),
+		// NAME, then the guest's commands are unknown here: default completion.
+		ValidArgsFunction: a.guestThen(func(*config.Guest, []string) ([]string, cobra.ShellCompDirective) {
+			return nil, cobra.ShellCompDirectiveDefault
+		}),
 		RunE: func(c *cobra.Command, args []string) error {
-			g, err := a.pick(c.Context(), nil)
+			// Flag parsing stops at NAME (so CMD's own flags are left alone);
+			// parse antic's flags between NAME and CMD here, up to "--" or
+			// the first non-flag.
+			if err := c.Flags().Parse(args[1:]); err != nil {
+				return err
+			}
+			cmdArgs := c.Flags().Args()
+			if len(cmdArgs) == 0 {
+				return errors.New("syntax error: CMD is required (usage: antic run NAME [flags] [--] CMD [ARG...])")
+			}
+			g, err := a.get(c.Context(), args[0])
 			if err != nil {
 				return err
 			}
@@ -36,39 +52,42 @@ own errors exit with 125.
 			} else if noTTY {
 				pty = false
 			}
-			return a.exec(c.Context(), g, args, offline || g.IsOffline(args[0]), pty, false)
+			return a.execIn(c.Context(), g, workdir, cmdArgs, offline, pty)
 		},
 	}
 	c.Flags().SetInterspersed(false)
 	c.Flags().BoolVar(&offline, "offline", false, "run without network")
 	c.Flags().BoolVarP(&tty, "tty", "t", false, "always allocate a terminal")
 	c.Flags().BoolVarP(&noTTY, "no-tty", "T", false, "never allocate a terminal")
+	c.Flags().StringVarP(&workdir, "workdir", "w", "", "working directory inside the guest")
 	return c
 }
 
 func (a *app) shellCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "shell",
-		Short: "Interactive shell in the guest",
-		Args:  cobra.NoArgs,
-		RunE: func(c *cobra.Command, _ []string) error {
-			g, err := a.pick(c.Context(), nil)
+		Use:               "shell NAME",
+		Short:             "Interactive shell in guest NAME",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: a.guestArgs,
+		RunE: func(c *cobra.Command, args []string) error {
+			g, err := a.get(c.Context(), args[0])
 			if err != nil {
 				return err
 			}
-			return a.exec(c.Context(), g, nil, false, true, true)
+			return a.execIn(c.Context(), g, "", nil, false, true)
 		},
 	}
 }
 
-// exec runs argv (or a login shell when shell is true) in the guest and returns its status.
-func (a *app) exec(ctx context.Context, g *guest.Guest, argv []string, offline, pty, shell bool) error {
-	dir, err := g.Dir(ctx)
-	if err != nil {
-		if !shell {
-			return err
+// execIn runs argv (or a login shell when argv is empty) in the guest and returns its status.
+func (a *app) execIn(ctx context.Context, g *guest.Guest, workdir string, argv []string, offline, pty bool) error {
+	dir := workdir
+	if dir == "" {
+		if d, err := g.Dir(ctx); err == nil {
+			dir = d
+		} else {
+			dir = "~"
 		}
-		dir = "~"
 	}
 	sigs := make(chan os.Signal, 2)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
@@ -85,25 +104,4 @@ func (a *app) exec(ctx context.Context, g *guest.Guest, argv []string, offline, 
 		return exitCode(code)
 	}
 	return nil
-}
-
-// runLinked runs a tool invoked through a ~/.local/bin link, in the guest
-// whose commands.link lists it (or the default guest).
-func (a *app) runLinked(ctx context.Context, tool string, args []string) error {
-	if err := a.load(ctx); err != nil {
-		return err
-	}
-	name := ""
-	for _, n := range a.cfg.Names() {
-		if slices.Contains(a.cfg.Guests[n].Commands.Link, tool) {
-			name = n
-			break
-		}
-	}
-	g, err := a.mgr.Get(name)
-	if err != nil {
-		return err
-	}
-	pty := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
-	return a.exec(ctx, g, append([]string{tool}, args...), g.IsOffline(tool), pty, false)
 }

@@ -10,7 +10,7 @@ in
     doCheck = true;
     checkPhase = ''
       runHook preCheck
-      go test ./internal/proto ./internal/host/config ./internal/host/instance ./internal/host/share
+      go test ./internal/proto ./internal/host/config ./internal/host/instance ./internal/host/share ./internal/host/cli ./internal/host/guest ./internal/host/dnsfilter
       runHook postCheck
     '';
   });

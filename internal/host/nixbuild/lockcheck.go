@@ -57,9 +57,9 @@ func localInputs(flake string) ([]localInput, error) {
 	return out, nil
 }
 
-// CheckLocks refuses a flake whose lock pins an older state of a local
-// input, and local inputs inside one of avoid (e.g. shared directories,
-// which a guest can write).
+// CheckLocks refuses local inputs inside one of avoid (e.g. shared
+// directories, which a guest can write), and automatically updates the
+// flake's lock if it pins an older state of a local input.
 func CheckLocks(flake string, avoid []string) error {
 	inputs, err := localInputs(flake)
 	if err != nil {
@@ -82,8 +82,11 @@ func CheckLocks(flake string, avoid []string) error {
 		}
 	}
 	if len(stale) > 0 {
-		return fmt.Errorf("%s/flake.lock pins an older state of local input(s) %s; update with:\n  nix flake update %s --flake path:%s",
-			flake, strings.Join(stale, ", "), strings.Join(stale, " "), flake)
+		args := append([]string{"flake", "update"}, stale...)
+		args = append(args, "--flake", "path:"+flake)
+		if out, err := exec.Command("nix", args...).CombinedOutput(); err != nil {
+			return fmt.Errorf("nix %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		}
 	}
 	return nil
 }

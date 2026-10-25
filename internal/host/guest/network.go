@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/RNG999/antic/internal/host/config"
+	"github.com/RNG999/antic/internal/host/dnsfilter"
 	"github.com/RNG999/antic/internal/host/systemd"
 )
 
@@ -21,62 +22,132 @@ const (
 	nsDNS = "192.0.2.54"
 )
 
-// Destinations no guest may reach: the namespace's loopback, the host's own
-// addresses, and special-purpose ranges. "filtered" adds private/LAN, CGNAT
-// (Tailscale), link-local (cloud metadata), benchmark/fake-IP and NAT64
-// ranges, i.e. everything but the internet.
+// Destinations no guest may reach: the namespace's loopback, link-local
+// (including cloud metadata 169.254.169.254 and host fe80:: addresses),
+// IPv4-mapped IPv6, multicast, and the host's own addresses.
+// "internet" mode also blocks private/LAN ranges, CGNAT (Tailscale), NAT64,
+// and any on-link subnet (including delegated global IPv6 /64 LAN prefixes).
 var (
-	alwaysBlocked4 = []string{"0.0.0.0/8", "127.0.0.0/8", "224.0.0.0/4", "240.0.0.0/4"}
-	alwaysBlocked6 = []string{"::/128", "::1/128", "ff00::/8"}
-	lanBlocked4    = []string{"10.0.0.0/8", "100.64.0.0/10", "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.168.0.0/16", "198.18.0.0/15"}
-	lanBlocked6    = []string{"fc00::/7", "fe80::/10", "fec0::/10", "64:ff9b::/96", "64:ff9b:1::/48"}
+	alwaysBlocked4 = []string{"0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4", "240.0.0.0/4"}
+	alwaysBlocked6 = []string{"::/128", "::1/128", "::ffff:0:0/96", "fe80::/10", "ff00::/8"}
+	lanBlocked4    = []string{"10.0.0.0/8", "100.64.0.0/10", "172.16.0.0/12", "192.0.0.0/24", "192.168.0.0/16", "198.18.0.0/15"}
+	lanBlocked6    = []string{"fc00::/7", "fec0::/10", "64:ff9b::/96", "64:ff9b:1::/48"}
 )
 
+// filtered reports whether the guest has an allow list (default deny, DNS
+// through dnsfilter).
+func filtered(g *config.Guest) bool { return len(g.Allow) > 0 }
+
 // nftRules renders the egress filter for the guest's network namespace.
-func nftRules(mode string, hostAddrs []net.IP) string {
+//
+// Order matters: always-blocked destinations and host addresses are
+// rejected first, then the static allow list is accepted (so it may name LAN
+// hosts in "internet" mode), then LAN ranges are rejected in "internet" mode
+// (so DNS answers pointing into the LAN never open it), then addresses the
+// DNS filter learned are accepted, and with an allow list everything else is
+// rejected.
+func nftRules(g *config.Guest, hostNets []*net.IPNet) string {
+	allow := filtered(g)
+	internet := g.Network == config.NetworkInternet
 	v4 := append([]string{}, alwaysBlocked4...)
 	v6 := append([]string{}, alwaysBlocked6...)
-	if mode == config.NetworkFiltered {
-		v4 = append(v4, lanBlocked4...)
-		v6 = append(v6, lanBlocked6...)
+	var lan4, lan6 []string
+	if internet {
+		lan4 = append(lan4, lanBlocked4...)
+		lan6 = append(lan6, lanBlocked6...)
 	}
-	for _, ip := range hostAddrs {
-		if ip.To4() != nil {
-			v4 = append(v4, ip.String())
-		} else {
-			v6 = append(v6, ip.String())
+	for _, n := range hostNets {
+		ones, bits := n.Mask.Size()
+		if ip4 := n.IP.To4(); ip4 != nil {
+			v4 = append(v4, ip4.String())
+			if internet && ones > 0 && ones < bits {
+				lan4 = append(lan4, (&net.IPNet{IP: ip4.Mask(n.Mask), Mask: n.Mask}).String())
+			}
+		} else if ip6 := n.IP.To16(); ip6 != nil {
+			v6 = append(v6, ip6.String())
+			if internet && ones > 0 && ones < bits {
+				lan6 = append(lan6, (&net.IPNet{IP: ip6.Mask(n.Mask), Mask: n.Mask}).String())
+			}
 		}
 	}
-	return fmt.Sprintf(`table inet antic {
-  chain output {
-    type filter hook output priority filter; policy accept;
-    ip daddr %s udp dport 53 accept
-    ip daddr %s tcp dport 53 accept
-    ip daddr %s reject
-    ip daddr { %s } reject
-    ip6 daddr { %s } reject
-  }
-}
-`, nsDNS, nsDNS, nsDNS, strings.Join(v4, ", "), strings.Join(v6, ", "))
+	var static4, static6 []string
+	for _, p := range g.AllowNets {
+		if p.Addr().Is4() {
+			static4 = append(static4, p.String())
+		} else {
+			static6 = append(static6, p.String())
+		}
+	}
+
+	var b strings.Builder
+	w := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
+	set := func(family string, items []string) string { return family + " daddr { " + strings.Join(items, ", ") + " }" }
+
+	w("table inet antic {")
+	if allow {
+		w("  set %s { type ipv4_addr; flags timeout; size 65536; }", dnsfilter.Set4)
+		w("  set %s { type ipv6_addr; flags timeout; size 65536; }", dnsfilter.Set6)
+	}
+	w("  chain output {")
+	w("    type filter hook output priority filter; policy accept;")
+	w("    ct state established,related accept")
+	w("    icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } ip6 hoplimit 255 accept")
+	for _, p := range g.Ports {
+		w(`    oifname "lo" ip saddr 127.0.0.1 ip daddr 127.0.0.1 tcp dport %d accept`, p.Host)
+	}
+	if allow {
+		// passt -> DNS filter, and only the filter's marked sockets upstream.
+		l := dnsfilter.Listen
+		w(`    oifname "lo" ip saddr 127.0.0.1 ip daddr %s udp dport %d accept`, l.Addr(), l.Port())
+		w(`    oifname "lo" ip saddr 127.0.0.1 ip daddr %s tcp dport %d accept`, l.Addr(), l.Port())
+		w("    meta mark %#x ip daddr %s udp dport 53 accept", dnsfilter.Mark, nsDNS)
+		w("    meta mark %#x ip daddr %s tcp dport 53 accept", dnsfilter.Mark, nsDNS)
+	} else {
+		w("    ip daddr %s udp dport 53 accept", nsDNS)
+		w("    ip daddr %s tcp dport 53 accept", nsDNS)
+	}
+	w("    ip daddr %s reject", nsDNS)
+	w("    %s reject", set("ip", v4))
+	w("    %s reject", set("ip6", v6))
+	if len(static4) > 0 {
+		w("    %s accept", set("ip", static4))
+	}
+	if len(static6) > 0 {
+		w("    %s accept", set("ip6", static6))
+	}
+	if len(lan4) > 0 {
+		w("    %s reject", set("ip", lan4))
+	}
+	if len(lan6) > 0 {
+		w("    %s reject", set("ip6", lan6))
+	}
+	if allow {
+		w("    ip daddr @%s accept", dnsfilter.Set4)
+		w("    ip6 daddr @%s accept", dnsfilter.Set6)
+		w("    reject")
+	}
+	w("  }")
+	w("}")
+	return b.String()
 }
 
-// hostAddresses returns the host's own unicast addresses (reachable from
-// the namespace through pasta's routing otherwise).
-func hostAddresses() []net.IP {
+// hostNetworks returns the host's own unicast interface addresses and masks.
+func hostNetworks() []*net.IPNet {
 	addrs, _ := net.InterfaceAddrs()
-	var out []net.IP
+	var out []*net.IPNet
 	for _, a := range addrs {
 		if n, ok := a.(*net.IPNet); ok && !n.IP.IsLoopback() && !n.IP.IsLinkLocalUnicast() {
-			out = append(out, n.IP)
+			out = append(out, n)
 		}
 	}
 	return out
 }
 
 // startNet runs passt (vhost-user) inside a rootless network namespace from
-// pasta, after nftables there installs the egress filter. The filter lives
-// outside the guest, so guest root cannot change it. Neither maps the
-// host's loopback, and pasta forwards no ports.
+// pasta. antic itself is the namespace's first process: it installs the
+// egress filter, runs the DNS filter for guests with an allow list, and then
+// runs passt. The filter lives outside the guest, so guest root cannot change
+// it.
 func (g *Guest) startNet(ctx context.Context) (string, error) {
 	dir := g.sockDir("net")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -84,23 +155,42 @@ func (g *Guest) startNet(ctx context.Context) (string, error) {
 	}
 	sock := filepath.Join(dir, "passt.sock")
 	rules := filepath.Join(dir, "egress.nft")
-	if err := os.WriteFile(rules, []byte(nftRules(g.Cfg.Network, hostAddresses())), 0o600); err != nil {
+	ports := g.Cfg.Ports
+	if err := os.WriteFile(rules, []byte(nftRules(g.Cfg, hostNetworks())), 0o600); err != nil {
 		return "", err
 	}
-	passt := []string{g.m.Bins.Passt, "--vhost-user", "--socket", sock, "--foreground", "--quiet", "--one-off",
-		"--no-map-gw", "--dns", guestDNS, "--dns-forward", guestDNS, "--dns-host", nsDNS}
-	quoted := make([]string, len(passt))
-	for i, a := range passt {
-		quoted[i] = shellQuote(a)
+	dnsHost := nsDNS
+	helper := []string{g.m.Bins.Self, dnsfilter.HelperCmd, "--nft", g.m.Bins.Nft, "--rules", rules}
+	if filtered(g.Cfg) {
+		domains := filepath.Join(dir, "allow-domains")
+		if err := os.WriteFile(domains, []byte(strings.Join(g.Cfg.AllowDomains, "\n")+"\n"), 0o600); err != nil {
+			return "", err
+		}
+		helper = append(helper, "--dns-domains", domains, "--upstream", nsDNS)
+		dnsHost = dnsfilter.Listen.Addr().String()
 	}
-	argv := []string{g.m.Bins.Pasta, "--config-net", "--quiet",
-		"--no-map-gw", "--map-host-loopback", "none", "-t", "none", "-u", "none", "-T", "none", "-U", "none",
-		"--dns-forward", nsDNS, "--",
-		"/bin/sh", "-c", shellQuote(g.m.Bins.Nft) + " -f " + shellQuote(rules) + " && exec " + strings.Join(quoted, " ")}
+	passt := []string{g.m.Bins.Passt, "--vhost-user", "--socket", sock, "--foreground", "--quiet", "--one-off",
+		"--no-map-gw", "--map-host-loopback", "none", "-u", "none",
+		"--dns", guestDNS, "--dns-forward", guestDNS, "--dns-host", dnsHost}
+	pasta := []string{g.m.Bins.Pasta, "--config-net", "--quiet",
+		"--no-map-gw", "--map-host-loopback", "none", "-u", "none", "-T", "none", "-U", "none",
+		"--dns-forward", nsDNS}
+
+	if len(ports) == 0 {
+		pasta = append(pasta, "-t", "none")
+		passt = append(passt, "-t", "none")
+	} else {
+		for _, p := range ports {
+			pasta = append(pasta, "-t", fmt.Sprintf("127.0.0.1/%d:%d", p.Host, p.Host))
+			passt = append(passt, "-t", fmt.Sprintf("127.0.0.1/%d:%d", p.Host, p.Guest))
+		}
+	}
+
+	argv := append(append(append(pasta, "--"), helper...), append([]string{"--"}, passt...)...)
 	// No NoNewPrivileges: it stops passt from setting up its own user
 	// namespace inside pasta's. passt and pasta drop privileges and apply
 	// seccomp themselves.
-	props := systemd.Confine([]string{dir}, []string{g.m.Bins.Pasta, g.m.Bins.Passt, g.m.Bins.Nft})
+	props := systemd.Confine([]string{dir}, []string{g.m.Bins.Pasta, g.m.Bins.Passt, g.m.Bins.Nft, g.m.Bins.Self})
 	return sock, g.helper(ctx, g.netUnit(), "antic network for "+g.Name(), props, sock, argv...)
 }
 

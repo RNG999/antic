@@ -2,7 +2,7 @@
 // maps to a random ID when the guest is created), their directories and a
 // per-guest lock. Where things live:
 //
-//	~/.config/antic/antic.toml          config
+//	~/.config/antic/guests/<name>.toml  config per guest
 //	~/.local/state/antic/
 //	  guests/<ID>/                      one guest: store/ (its /nix), log/
 //	  names/<NAME> -> ../guests/<ID>    which ID a name has
@@ -31,7 +31,6 @@ type Dirs struct {
 	RunRoot   string
 	BinDir    string
 	Libexec   string
-	SrcDir    string
 }
 
 // Default returns the directories for the current user.
@@ -51,13 +50,12 @@ func Default() (Dirs, error) {
 		RunRoot:   filepath.Join(run, "antic"),
 		BinDir:    filepath.Join(home, ".local/bin"),
 		Libexec:   filepath.Join(home, ".local/libexec/antic"),
-		SrcDir:    filepath.Join(home, ".local/src/antic"),
 	}, nil
 }
 
-func (d Dirs) ConfigFile() string { return filepath.Join(d.ConfigDir, "antic.toml") }
-func (d Dirs) guestsDir() string  { return filepath.Join(d.StateRoot, "guests") }
-func (d Dirs) namesDir() string   { return filepath.Join(d.StateRoot, "names") }
+func (d Dirs) GuestsConfigDir() string { return filepath.Join(d.ConfigDir, "guests") }
+func (d Dirs) guestsDir() string       { return filepath.Join(d.StateRoot, "guests") }
+func (d Dirs) namesDir() string        { return filepath.Join(d.StateRoot, "names") }
 
 // Instance is a guest's identity and its directories.
 type Instance struct {

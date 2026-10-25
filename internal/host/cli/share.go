@@ -7,52 +7,50 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
+
+	"github.com/RNG999/antic/internal/host/config"
 )
 
 func (a *app) shareCmd() *cobra.Command {
 	c := &cobra.Command{Use: "share", Short: "Directories shared with a guest", Args: cobra.NoArgs}
 	ls := &cobra.Command{
-		Use:     "ls",
-		Aliases: []string{"list"},
-		Short:   "List shares",
-		Args:    cobra.NoArgs,
-		RunE: func(c *cobra.Command, _ []string) error {
-			g, err := a.pick(c.Context(), nil)
+		Use:               "ls NAME",
+		Aliases:           []string{"list"},
+		Short:             "List shared directories of guest NAME",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: a.guestArgs,
+		RunE: func(c *cobra.Command, args []string) error {
+			g, err := a.get(c.Context(), args[0])
 			if err != nil {
 				return err
 			}
 			ss := g.Shares(c.Context())
 			return a.out(ss, func(w io.Writer) {
-				fmt.Fprintln(w, "PATH\tMODE\tSOURCE\tMOUNTED")
+				fmt.Fprintln(w, "PATH\tMODE\tMOUNTED")
 				for _, s := range ss {
-					fmt.Fprintf(w, "%s\t%s\t%s\t%v\n", s.Path, mode(s.ReadOnly), s.Source, s.Mounted)
+					fmt.Fprintf(w, "%s\t%s\t%v\n", s.Path, mode(s.ReadOnly), s.Mounted)
 				}
 			})
 		},
 	}
 	a.jsonFlag(ls)
 
-	var ro, persist, yes bool
+	var ro bool
 	add := &cobra.Command{
-		Use:   "add DIR...",
-		Short: "Share directories with the guest (at the same path)",
-		Long: `Share directories with the running guest; with --persist, also record them
-in antic.toml (then the guest need not be running). Directories outside
-policy.share_roots need confirmation on a terminal (or --yes).`,
-		Args: cobra.MinimumNArgs(1),
+		Use:   "add NAME DIR...",
+		Short: "Share directories with guest NAME",
+		Args:  cobra.MinimumNArgs(2),
+		ValidArgsFunction: a.guestThen(func(*config.Guest, []string) ([]string, cobra.ShellCompDirective) {
+			return nil, cobra.ShellCompDirectiveFilterDirs
+		}),
 		RunE: func(c *cobra.Command, args []string) error {
-			g, err := a.pick(c.Context(), nil)
+			g, err := a.get(c.Context(), args[0])
 			if err != nil {
 				return err
 			}
-			for _, d := range args {
+			for _, d := range args[1:] {
 				abs, _ := filepath.Abs(d)
-				if !a.mgr.InShareRoots(abs) && !yes {
-					if err := confirm(fmt.Sprintf("%s is outside policy.share_roots; share it with %s?", abs, g.Name())); err != nil {
-						return err
-					}
-				}
-				p, err := g.AddShare(c.Context(), abs, ro, persist)
+				p, err := g.AddShare(c.Context(), abs, ro)
 				if err != nil {
 					return err
 				}
@@ -62,29 +60,32 @@ policy.share_roots need confirmation on a terminal (or --yes).`,
 		},
 	}
 	add.Flags().BoolVar(&ro, "ro", false, "read-only")
-	add.Flags().BoolVar(&persist, "persist", false, "also add to antic.toml")
-	add.Flags().BoolVarP(&yes, "yes", "y", false, "do not ask about directories outside policy.share_roots")
 
-	var rmPersist bool
 	rm := &cobra.Command{
-		Use:   "rm DIR...",
-		Short: "Stop sharing directories (--persist: also remove from antic.toml)",
-		Args:  cobra.MinimumNArgs(1),
+		Use:   "rm NAME DIR...",
+		Short: "Stop sharing directories with guest NAME",
+		Args:  cobra.MinimumNArgs(2),
+		ValidArgsFunction: a.guestThen(func(g *config.Guest, rest []string) ([]string, cobra.ShellCompDirective) {
+			var paths []string
+			for _, s := range g.Shares {
+				paths = append(paths, s.Path)
+			}
+			return without(paths, rest), cobra.ShellCompDirectiveNoFileComp
+		}),
 		RunE: func(c *cobra.Command, args []string) error {
-			g, err := a.pick(c.Context(), nil)
+			g, err := a.get(c.Context(), args[0])
 			if err != nil {
 				return err
 			}
-			for _, d := range args {
+			for _, d := range args[1:] {
 				abs, _ := filepath.Abs(d)
-				if err := g.RemoveShare(c.Context(), abs, rmPersist); err != nil {
+				if err := g.RemoveShare(c.Context(), abs); err != nil {
 					return err
 				}
 			}
 			return nil
 		},
 	}
-	rm.Flags().BoolVar(&rmPersist, "persist", false, "also remove from antic.toml")
 	c.AddCommand(ls, add, rm)
 	return c
 }

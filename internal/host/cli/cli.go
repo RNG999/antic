@@ -9,7 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
+	"slices"
 	"syscall"
 	"text/tabwriter"
 
@@ -33,15 +33,17 @@ type exitCode int
 func (e exitCode) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
 
 type app struct {
-	guest string // -g
-	json  bool   // --json
-	dirs  instance.Dirs
-	cfg   *config.Config
-	mgr   *guest.Manager
+	json bool // --json
+	dirs instance.Dirs
+	cfg  *config.Config
+	mgr  *guest.Manager
 }
 
 // Main runs antic and returns its exit status.
 func Main() int {
+	if len(os.Args) > 1 && os.Args[1] == NetnsCmd {
+		return netnsMain(os.Args[2:])
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 	defer stop()
 	a := &app{}
@@ -50,13 +52,9 @@ func Main() int {
 		fmt.Fprintf(os.Stderr, "antic: %v\n", err)
 		return exitError
 	}
-	if tool := filepath.Base(os.Args[0]); tool != "antic" {
-		err = a.runLinked(ctx, tool, os.Args[1:])
-	} else {
-		root := a.root()
-		root.SetArgs(os.Args[1:])
-		err = root.ExecuteContext(ctx)
-	}
+	root := a.root()
+	root.SetArgs(os.Args[1:])
+	err = root.ExecuteContext(ctx)
 	var code exitCode
 	switch {
 	case err == nil:
@@ -75,25 +73,21 @@ func (a *app) root() *cobra.Command {
 		Short: "Run CLI tools in isolated NixOS guests",
 		Long: `antic runs CLI tools (for example those an AI agent drives) in NixOS VMs
 ("guests"), isolated from the host. Guests are defined in
-~/.config/antic/antic.toml; host directories are shared at the same path.
-
-The guest is chosen with -g, $ANTIC_GUEST, default_guest in antic.toml,
-or is the only one defined. Guest subcommands take it as an argument.`,
+~/.config/antic/guests/<name>.toml; host directories are shared at the same path.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Version:       Version,
 	}
-	root.PersistentFlags().StringVarP(&a.guest, "guest", "g", "", "guest to use")
 	root.AddGroup(&cobra.Group{ID: "run", Title: "Running commands:"}, &cobra.Group{ID: "manage", Title: "Managing:"})
 	for _, c := range []*cobra.Command{a.runCmd(), a.shellCmd()} {
 		c.GroupID = "run"
 		root.AddCommand(c)
 	}
-	for _, c := range []*cobra.Command{a.guestCmd(), a.sessionCmd(), a.shareCmd(), a.linkCmd(), a.configCmd()} {
+	for _, c := range []*cobra.Command{a.guestCmd(), a.pkgCmd(), a.shareCmd(), a.portCmd(), a.configCmd()} {
 		c.GroupID = "manage"
 		root.AddCommand(c)
 	}
-	root.AddCommand(a.doctorCmd(), a.upgradeCmd(), a.versionCmd())
+	root.AddCommand(a.doctorCmd(), a.skillCmd(), a.updateCmd(), a.versionCmd())
 	return root
 }
 
@@ -102,7 +96,7 @@ func (a *app) load(ctx context.Context) error {
 	if a.mgr != nil {
 		return nil
 	}
-	cfg, err := config.Load(a.dirs.ConfigFile(), a.dirs.Home)
+	cfg, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
 	if err != nil {
 		return err
 	}
@@ -114,14 +108,10 @@ func (a *app) load(ctx context.Context) error {
 	return nil
 }
 
-// pick returns the guest named by an argument, -g, or the default.
-func (a *app) pick(ctx context.Context, args []string) (*guest.Guest, error) {
+// get returns the guest named by name.
+func (a *app) get(ctx context.Context, name string) (*guest.Guest, error) {
 	if err := a.load(ctx); err != nil {
 		return nil, err
-	}
-	name := a.guest
-	if len(args) > 0 {
-		name = args[0]
 	}
 	return a.mgr.Get(name)
 }
@@ -156,11 +146,69 @@ func confirm(prompt string) error {
 	return nil
 }
 
-// guestArgs completes guest names.
+// guestArgs completes guest names for the first argument.
 func (a *app) guestArgs(c *cobra.Command, args []string, _ string) ([]string, cobra.ShellCompDirective) {
-	cfg, err := config.Load(a.dirs.ConfigFile(), a.dirs.Home)
+	if len(args) > 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	cfg, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
 	return cfg.Names(), cobra.ShellCompDirectiveNoFileComp
+}
+
+// guestsArgs completes guest names for every argument (commands taking
+// NAME...), leaving out names already given.
+func (a *app) guestsArgs(c *cobra.Command, args []string, _ string) ([]string, cobra.ShellCompDirective) {
+	cfg, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	var out []string
+	for _, n := range cfg.Names() {
+		if !slices.Contains(args, n) {
+			out = append(out, n)
+		}
+	}
+	return out, cobra.ShellCompDirectiveNoFileComp
+}
+
+// guestThen completes guest names for the first argument and calls fn with
+// that guest's config for the arguments after it.
+func (a *app) guestThen(fn func(g *config.Guest, rest []string) ([]string, cobra.ShellCompDirective)) cobra.CompletionFunc {
+	return func(c *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return a.guestArgs(c, args, toComplete)
+		}
+		cfg, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
+		if err != nil {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		g, ok := cfg.Guests[args[0]]
+		if !ok {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		return fn(g, args[1:])
+	}
+}
+
+// without returns items not in given.
+func without(items, given []string) []string {
+	var out []string
+	for _, s := range items {
+		if !slices.Contains(given, s) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// networkModes completes --network.
+func networkModes(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+	return []string{
+		config.NetworkInternet + "\tinternet only (no LAN, host or link-local)",
+		config.NetworkLAN + "\tinternet and LAN (no host or link-local)",
+		config.NetworkNone + "\tno network device",
+	}, cobra.ShellCompDirectiveNoFileComp
 }

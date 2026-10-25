@@ -23,6 +23,14 @@ type Nix struct {
 func New() (*Nix, error) {
 	bin, err := exec.LookPath("nix")
 	if err != nil {
+		if home, herr := os.UserHomeDir(); herr == nil {
+			cand := filepath.Join(home, ".local/bin/nix")
+			if _, serr := os.Stat(cand); serr == nil {
+				bin, err = cand, nil
+			}
+		}
+	}
+	if err != nil {
 		return nil, fmt.Errorf("nix not found: %w", err)
 	}
 	n := &Nix{bin: bin}
@@ -46,8 +54,16 @@ func (n *Nix) Real(storePath string) string { return filepath.Join(n.root, store
 
 // Build builds flake#attr and returns its store path.
 func (n *Nix) Build(ctx context.Context, flake, attr string) (string, error) {
+	ref := flake
+	args := []string{"build", "--no-link", "--print-out-paths"}
+	if filepath.IsAbs(flake) {
+		ref = "path:" + flake
+	} else {
+		args = append(args, "--refresh")
+	}
 	// "^out": only the main output (packages may also have man/doc outputs).
-	out, err := n.output(ctx, "build", "--no-link", "--print-out-paths", "path:"+flake+"#"+attr+"^out")
+	args = append(args, ref+"#"+attr+"^out")
+	out, err := n.output(ctx, args...)
 	if err != nil {
 		return "", fmt.Errorf("nix build %s#%s: %w", flake, attr, err)
 	}

@@ -1,11 +1,12 @@
-// Package config loads and edits ~/.config/antic/antic.toml (schema
-// version 1): the guests that can be started and the sharing policy.
-// Loading is strict: unknown keys, bad sizes and invalid paths are errors.
+// Package config loads and edits guest configuration files in
+// ~/.config/antic/guests/<name>.toml. Loading is strict: unknown keys,
+// bad sizes and invalid paths are errors.
 package config
 
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,191 +18,308 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// Version is the schema version this antic reads.
-const Version = 1
-
-// Config is antic.toml.
+// Config holds all loaded guest configurations from ~/.config/antic/guests.
 type Config struct {
-	Version      int               `toml:"version"`
-	DefaultGuest string            `toml:"default_guest"`
-	Policy       Policy            `toml:"policy"`
-	Guests       map[string]*Guest `toml:"guests"`
+	Guests map[string]*Guest
 
-	path string
-}
-
-// Policy limits what may be shared.
-type Policy struct {
-	// Runtime "share add" outside these directories asks for confirmation
-	// on a terminal and is refused otherwise. Empty: no restriction.
-	ShareRoots []string `toml:"share_roots"`
-	// Paths that are never shared, in addition to the built-in list.
-	Deny []string `toml:"deny"`
-	// Names exported read-only inside shares, in addition to the built-in
-	// list (proto.ProtectedNames).
-	Protect []string `toml:"protect"`
+	dir string
 }
 
 // Network modes.
 const (
 	NetworkNone     = "none"     // no network device at all
-	NetworkFiltered = "filtered" // internet only: no LAN, CGNAT, link-local or host addresses
+	NetworkInternet = "internet" // internet only: no LAN, CGNAT, link-local or host addresses
 	NetworkLAN      = "lan"      // internet and LAN (still no host loopback)
 )
 
-// Guest is one [guests.NAME] table.
-type Guest struct {
-	Name string `toml:"-"`
-
-	Description string `toml:"description"`
-	// Flake with nixosConfigurations.<Attr>: the guest's OS.
-	Flake string `toml:"flake"`
-	Attr  string `toml:"attr"`
-
-	CPUs    int    `toml:"cpus"`
-	Memory  string `toml:"memory"`
-	Network string `toml:"network"`
-
-	Commands Commands `toml:"commands"`
-	Shares   []Share  `toml:"share"`
-
-	MemoryBytes int64 `toml:"-"`
-}
-
-// Commands configures tools exposed on the host.
-type Commands struct {
-	// ~/.local/bin links that run these commands in this guest.
-	Link []string `toml:"link"`
-	// Commands that always run without network.
-	Offline []string `toml:"offline"`
+// Port is one host-to-guest TCP port mapping (127.0.0.1:Host -> Guest).
+type Port struct {
+	Host  int `toml:"host" json:"host"`   // 1..65535
+	Guest int `toml:"guest" json:"guest"` // 1..65535 (defaults to Host if omitted)
 }
 
 // Share is a host directory visible in the guest at the same path.
 type Share struct {
 	Path     string `toml:"path" json:"path"`
-	ReadOnly bool   `toml:"read_only" json:"read_only,omitempty"`
+	ReadOnly bool   `toml:"readonly" json:"readonly,omitempty"`
+}
+
+// Guest is one ~/.config/antic/guests/<name>.toml file.
+type Guest struct {
+	Name string `toml:"-"`
+	Path string `toml:"-"`
+
+	Description string   `toml:"description"`
+	Packages    []string `toml:"packages"`
+	// Optional custom flake ("/path/to/flake" or "/path/to/flake#attr").
+	// When empty, antic builds its built-in guest configuration with Packages.
+	Flake string `toml:"flake"`
+
+	CPUs    int     `toml:"cpus"`
+	Memory  string  `toml:"memory"`
+	Network string  `toml:"network"`
+	// Optional egress allow list: domains (a domain also allows its
+	// subdomains), IP addresses and CIDRs. When set, the guest can reach
+	// only these, and DNS answers only names under the listed domains.
+	Allow  []string `toml:"allow"`
+	Shares []Share  `toml:"shares"`
+	Ports  []Port   `toml:"ports"`
+
+	FlakePath    string         `toml:"-"`
+	FlakeAttr    string         `toml:"-"`
+	MemoryBytes  int64          `toml:"-"`
+	AllowDomains []string       `toml:"-"` // lowercase, no trailing dot
+	AllowNets    []netip.Prefix `toml:"-"` // masked
+}
+
+// neverAllowed are destinations an allow entry may not overlap: loopback,
+// unspecified, link-local (including cloud metadata), multicast, reserved
+// and IPv4-mapped IPv6. The egress filter always blocks them.
+var neverAllowed = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("::/128"),
+	netip.MustParsePrefix("::1/128"),
+	netip.MustParsePrefix("::ffff:0:0/96"),
+	netip.MustParsePrefix("fe80::/10"),
+	netip.MustParsePrefix("ff00::/8"),
+}
+
+var domainLabelRE = regexp.MustCompile(`^[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?$`)
+
+// parseAllow classifies one allow entry as a prefix or a domain.
+func parseAllow(raw string) (netip.Prefix, string, error) {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	if s == "" {
+		return netip.Prefix{}, "", errors.New("empty entry")
+	}
+	var p netip.Prefix
+	if strings.Contains(s, "/") {
+		var err error
+		if p, err = netip.ParsePrefix(s); err != nil {
+			return p, "", fmt.Errorf("%q: invalid CIDR", raw)
+		}
+	} else if a, err := netip.ParseAddr(s); err == nil {
+		p = netip.PrefixFrom(a, a.BitLen())
+	}
+	if p.IsValid() {
+		if p.Addr().Zone() != "" {
+			return netip.Prefix{}, "", fmt.Errorf("%q: zones are not allowed", raw)
+		}
+		p = p.Masked()
+		for _, n := range neverAllowed {
+			if p.Overlaps(n) {
+				return netip.Prefix{}, "", fmt.Errorf("%q overlaps %s, which guests can never reach", raw, n)
+			}
+		}
+		return p, "", nil
+	}
+	d := strings.TrimSuffix(strings.TrimPrefix(s, "*."), ".")
+	labels := strings.Split(d, ".")
+	if len(d) > 253 || len(labels) < 2 {
+		return netip.Prefix{}, "", fmt.Errorf("%q: not an IP, CIDR or domain (a domain needs at least two labels)", raw)
+	}
+	for _, l := range labels {
+		if !domainLabelRE.MatchString(l) {
+			return netip.Prefix{}, "", fmt.Errorf("%q: invalid domain", raw)
+		}
+	}
+	return netip.Prefix{}, d, nil
 }
 
 var (
 	nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
-	toolRE = regexp.MustCompile(`^[A-Za-z0-9._+-]+$`)
+	pkgRE  = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.+-]*$`)
 )
 
 // ValidName reports whether s can name a guest.
 func ValidName(s string) bool { return nameRE.MatchString(s) }
 
-// Load reads and validates the config at path. home is the user's home
-// directory, used to expand "~".
-func Load(path, home string) (*Config, error) {
-	var c Config
-	md, err := toml.DecodeFile(path, &c)
+// ValidPackage reports whether s is a valid nixpkgs attribute name.
+func ValidPackage(s string) bool { return pkgRE.MatchString(s) }
+
+// Load reads and validates all *.toml guest files in dir. If dir does not
+// exist yet, an empty Config is returned without error.
+func Load(dir, home string) (*Config, error) {
+	c := &Config{
+		Guests: map[string]*Guest{},
+		dir:    dir,
+	}
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return c, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", dir, err)
+	}
+	var errs []error
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".toml") || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		name := strings.TrimSuffix(e.Name(), ".toml")
+		path := filepath.Join(dir, e.Name())
+		g, err := LoadGuest(path, name, home)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		c.Guests[name] = g
+	}
+	if len(errs) > 0 {
+		return nil, joinIndented(errs)
+	}
+	return c, nil
+}
+
+// LoadGuest reads and validates a single guest's TOML file.
+func LoadGuest(path, name, home string) (*Guest, error) {
+	var g Guest
+	md, err := toml.DecodeFile(path, &g)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	c.path = path
+	g.Name = name
+	g.Path = path
 	var errs []error
+	if !ValidName(name) {
+		errs = append(errs, fmt.Errorf("invalid guest name %q (a-z, 0-9 and -, up to 32 characters)", name))
+	}
 	if und := md.Undecoded(); len(und) > 0 {
 		for _, k := range und {
 			errs = append(errs, fmt.Errorf("unknown key %q%s", k.String(), suggest(k)))
 		}
 	}
-	if c.Version != Version {
-		if c.Version == 0 {
-			errs = append(errs, fmt.Errorf("missing \"version = %d\" (this looks like an older antic.toml; see examples/antic.toml)", Version))
-		} else {
-			errs = append(errs, fmt.Errorf("version %d is not supported (this antic reads version %d)", c.Version, Version))
-		}
-	}
-	errs = append(errs, c.normalize(home)...)
+	errs = append(errs, g.normalize(home)...)
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("%s:\n  %w", path, joinIndented(errs))
 	}
-	return &c, nil
+	return &g, nil
 }
 
-// Path is the file the config was loaded from.
-func (c *Config) Path() string { return c.path }
+// Dir is the directory guest TOML files live in.
+func (c *Config) Dir() string { return c.dir }
 
-// normalize fills in defaults and validates; it returns every problem.
-func (c *Config) normalize(home string) []error {
+// GuestPath returns the path to guest name's TOML file.
+func (c *Config) GuestPath(name string) string {
+	return filepath.Join(c.dir, name+".toml")
+}
+
+func (g *Guest) normalize(home string) []error {
 	var errs []error
-	if len(c.Guests) == 0 {
-		errs = append(errs, errors.New("no guests defined (add a [guests.NAME] table)"))
-	}
-	if c.DefaultGuest != "" && c.Guests[c.DefaultGuest] == nil {
-		errs = append(errs, fmt.Errorf("default_guest %q is not defined", c.DefaultGuest))
-	}
-	for i, p := range c.Policy.ShareRoots {
-		c.Policy.ShareRoots[i], errs = absPath(p, home, "policy.share_roots", errs)
-	}
-	for i, p := range c.Policy.Deny {
-		c.Policy.Deny[i], errs = absPath(p, home, "policy.deny", errs)
-	}
-	linked := map[string]string{}
-	for _, name := range c.Names() {
-		g := c.Guests[name]
-		g.Name = name
-		where := "guests." + name
-		if !ValidName(name) {
-			errs = append(errs, fmt.Errorf("%s: invalid guest name (a-z, 0-9 and -, up to 32 characters)", where))
+	if g.Flake != "" {
+		rawPath, attr, hasAttr := strings.Cut(g.Flake, "#")
+		if !hasAttr || attr == "" {
+			attr = "antic"
 		}
-		if g.Flake == "" {
-			errs = append(errs, fmt.Errorf("%s.flake is required", where))
-		} else {
-			g.Flake, errs = absPath(g.Flake, home, where+".flake", errs)
-			// Nix refuses symlinked flake directories (e.g. into dotfiles).
-			if real, err := filepath.EvalSymlinks(g.Flake); err == nil {
-				g.Flake = real
+		var p string
+		p, errs = absPath(rawPath, home, "flake", errs)
+		if real, err := filepath.EvalSymlinks(p); err == nil {
+			p = real
+		}
+		g.FlakePath = p
+		g.FlakeAttr = attr
+		if len(g.Packages) > 0 {
+			errs = append(errs, errors.New("cannot set both packages and flake"))
+		}
+	}
+	for _, p := range g.Packages {
+		if !pkgRE.MatchString(p) {
+			errs = append(errs, fmt.Errorf("packages: invalid package attribute %q", p))
+		}
+	}
+	if g.CPUs == 0 {
+		g.CPUs = 2
+	}
+	if g.CPUs < 1 || g.CPUs > 256 {
+		errs = append(errs, errors.New("cpus must be between 1 and 256"))
+	}
+	if g.Memory == "" {
+		g.Memory = "4G"
+	}
+	if n, err := ParseSize(g.Memory); err != nil {
+		errs = append(errs, fmt.Errorf("memory: %w", err))
+	} else if n < 256<<20 {
+		errs = append(errs, errors.New("memory must be at least 256M"))
+	} else {
+		g.MemoryBytes = n
+	}
+	if g.Network == "" {
+		g.Network = NetworkInternet
+	}
+	if !slices.Contains([]string{NetworkNone, NetworkInternet, NetworkLAN}, g.Network) {
+		errs = append(errs, errors.New("network must be \"none\", \"internet\" or \"lan\""))
+	}
+	if g.Network == NetworkNone && len(g.Ports) > 0 {
+		errs = append(errs, errors.New("ports cannot be used when network is \"none\""))
+	}
+	if g.Network == NetworkNone && len(g.Allow) > 0 {
+		errs = append(errs, errors.New("allow cannot be used when network is \"none\""))
+	}
+	g.AllowDomains, g.AllowNets = nil, nil
+	for i, raw := range g.Allow {
+		p, d, err := parseAllow(raw)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("allow[%d]: %w", i, err))
+		case d != "":
+			if !slices.Contains(g.AllowDomains, d) {
+				g.AllowDomains = append(g.AllowDomains, d)
+			}
+		default:
+			if !slices.Contains(g.AllowNets, p) {
+				g.AllowNets = append(g.AllowNets, p)
 			}
 		}
-		if g.Attr == "" {
-			g.Attr = "antic"
+	}
+	seenPorts := map[int]bool{}
+	for i := range g.Ports {
+		if g.Ports[i].Guest == 0 {
+			g.Ports[i].Guest = g.Ports[i].Host
 		}
-		if g.CPUs == 0 {
-			g.CPUs = 2
+		hp, gp := g.Ports[i].Host, g.Ports[i].Guest
+		if hp < 1 || hp > 65535 || gp < 1 || gp > 65535 {
+			errs = append(errs, fmt.Errorf("ports[%d]: port numbers must be between 1 and 65535", i))
+			continue
 		}
-		if g.CPUs < 1 || g.CPUs > 256 {
-			errs = append(errs, fmt.Errorf("%s.cpus must be between 1 and 256", where))
+		if seenPorts[hp] {
+			errs = append(errs, fmt.Errorf("ports[%d]: duplicate host port %d", i, hp))
+			continue
 		}
-		if g.Memory == "" {
-			g.Memory = "4G"
-		}
-		if n, err := ParseSize(g.Memory); err != nil {
-			errs = append(errs, fmt.Errorf("%s.memory: %w", where, err))
-		} else if n < 256<<20 {
-			errs = append(errs, fmt.Errorf("%s.memory must be at least 256M", where))
-		} else {
-			g.MemoryBytes = n
-		}
-		if g.Network == "" {
-			g.Network = NetworkFiltered
-		}
-		if !slices.Contains([]string{NetworkNone, NetworkFiltered, NetworkLAN}, g.Network) {
-			errs = append(errs, fmt.Errorf("%s.network must be \"none\", \"filtered\" or \"lan\"", where))
-		}
-		for _, t := range append(slices.Clone(g.Commands.Link), g.Commands.Offline...) {
-			if !toolRE.MatchString(t) || t == "antic" {
-				errs = append(errs, fmt.Errorf("%s.commands: invalid command name %q", where, t))
-			}
-		}
-		for _, t := range g.Commands.Link {
-			if other, ok := linked[t]; ok {
-				errs = append(errs, fmt.Errorf("%s.commands.link: %q is already linked to guest %s", where, t, other))
-			}
-			linked[t] = name
-		}
-		for i := range g.Shares {
-			g.Shares[i].Path, errs = absPath(g.Shares[i].Path, home, fmt.Sprintf("%s.share[%d].path", where, i), errs)
-		}
-		for i, a := range g.Shares {
-			for _, b := range g.Shares[i+1:] {
-				if within(a.Path, b.Path) || within(b.Path, a.Path) {
-					errs = append(errs, fmt.Errorf("%s: shares %s and %s overlap", where, a.Path, b.Path))
-				}
+		seenPorts[hp] = true
+	}
+	for i := range g.Shares {
+		g.Shares[i].Path, errs = absPath(g.Shares[i].Path, home, fmt.Sprintf("shares[%d].path", i), errs)
+	}
+	for i, a := range g.Shares {
+		for _, b := range g.Shares[i+1:] {
+			if within(a.Path, b.Path) || within(b.Path, a.Path) {
+				errs = append(errs, fmt.Errorf("shares %s and %s overlap", a.Path, b.Path))
 			}
 		}
 	}
 	return errs
+}
+
+// ParsePort parses a CLI port mapping string: "PORT" or "HOST_PORT:GUEST_PORT".
+func ParsePort(raw string) (Port, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return Port{}, errors.New("empty port specification")
+	}
+	hostStr, guestStr, hasColon := strings.Cut(s, ":")
+	if !hasColon {
+		guestStr = hostStr
+	}
+	hp, err1 := strconv.Atoi(hostStr)
+	gp, err2 := strconv.Atoi(guestStr)
+	if err1 != nil || err2 != nil || hp < 1 || hp > 65535 || gp < 1 || gp > 65535 {
+		return Port{}, fmt.Errorf("invalid port %q (use PORT or HOST_PORT:GUEST_PORT, 1..65535)", raw)
+	}
+	return Port{Host: hp, Guest: gp}, nil
 }
 
 // absPath expands "~" and requires an absolute path without control
@@ -231,25 +349,17 @@ func (c *Config) Names() []string {
 	return names
 }
 
-// Pick selects a guest: name if given, else $ANTIC_GUEST, else
-// default_guest, else the only guest defined.
-func (c *Config) Pick(name string) (*Guest, error) {
+// Get returns the named guest configuration. An empty name is an error.
+func (c *Config) Get(name string) (*Guest, error) {
 	if name == "" {
-		name = os.Getenv("ANTIC_GUEST")
+		return nil, errors.New("syntax error: guest name is required")
 	}
-	if name == "" {
-		name = c.DefaultGuest
-	}
-	if name == "" && len(c.Guests) == 1 {
-		name = c.Names()[0]
-	}
-	if name == "" {
-		return nil, fmt.Errorf("several guests are defined (%s); choose one with -g NAME or set default_guest",
-			strings.Join(c.Names(), ", "))
+	if len(c.Guests) == 0 {
+		return nil, fmt.Errorf("no guests defined in %s (run \"antic guest create %s\")", c.dir, name)
 	}
 	g := c.Guests[name]
 	if g == nil {
-		return nil, fmt.Errorf("no guest %q in %s (defined: %s)", name, c.path, strings.Join(c.Names(), ", "))
+		return nil, fmt.Errorf("no guest %q in %s (defined: %s)", name, c.dir, strings.Join(c.Names(), ", "))
 	}
 	return g, nil
 }
@@ -283,9 +393,10 @@ func ParseSize(s string) (int64, error) {
 }
 
 var knownKeys = []string{
-	"version", "default_guest", "policy", "share_roots", "deny", "protect", "guests",
-	"description", "flake", "attr", "cpus", "memory", "network", "commands", "link", "offline",
-	"share", "path", "read_only",
+	"description", "packages", "flake",
+	"cpus", "memory", "network", "allow",
+	"shares", "path", "readonly",
+	"ports", "host", "guest",
 }
 
 // suggest proposes the closest known key for a misspelled one.

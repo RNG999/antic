@@ -303,7 +303,7 @@ func (g *Guest) waitSocket(ctx context.Context, unit, sock string) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(50 * time.Millisecond):
+		case <-time.After(25 * time.Millisecond):
 		}
 	}
 }
@@ -343,7 +343,7 @@ func (g *Guest) waitReady(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(300 * time.Millisecond):
+		case <-time.After(100 * time.Millisecond):
 		}
 	}
 }

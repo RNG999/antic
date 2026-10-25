@@ -156,12 +156,13 @@ in
     security.enableWrappers = false;
 
     # passt (vhost-user networking): plain DHCP on the virtio NIC. Egress is
-    # filtered on the host, where guest root cannot change it.
+    # filtered on the host, where guest root cannot change it, and inbound
+    # connections are restricted by pasta/passt on the host to explicitly
+    # configured [[ports]].
     networking.useNetworkd = true;
     networking.useDHCP = true;
     systemd.network.wait-online.enable = false;
-    networking.nftables.enable = true;
-    networking.firewall.enable = true;
+    networking.firewall.enable = false;
 
     users.mutableUsers = false;
     users.allowNoPasswordLogin = true;
@@ -213,7 +214,9 @@ in
 
     systemd.services.antic-agent = {
       description = "antic-agent (serves the host on vsock port ${toString proto.portAgent})";
-      wantedBy = [ "multi-user.target" ];
+      wantedBy = [ "sysinit.target" ];
+      after = [ "local-fs.target" "systemd-tmpfiles-setup.service" ];
+      unitConfig.DefaultDependencies = false;
       restartIfChanged = false;
       path = [ config.systemd.package ];
       serviceConfig = {

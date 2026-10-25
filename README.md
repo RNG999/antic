@@ -33,10 +33,19 @@ runs inside each guest to handle command sessions and host agent requests.
     mounted by `antic-agent`.
 - **Network:** [passt] (vhost-user) inside a rootless network namespace from
   pasta.
-  - nftables there implements `network = "filtered"`: internet only, no
-    LAN, CGNAT/Tailscale, link-local, host addresses or loopback.
-  - `"lan"` still blocks the host and loopback; `"none"` gives the guest no
-    network device at all.
+  - nftables there implements `network = "internet"`: internet only, no
+    LAN (including the host's on-link subnets, IPv4 and IPv6), CGNAT/Tailscale,
+    link-local/metadata, host addresses or loopback.
+  - `"lan"` still blocks the host, link-local and loopback; `"none"` gives the
+    guest no network device at all.
+  - `allow = [...]` (domains, IPs, CIDRs) turns the filter into default deny.
+    antic runs a small DNS filter in the namespace: it answers only A/AAAA
+    queries for allowed domains (and their subdomains), refuses everything
+    else, and adds the answer's addresses to an nftables set *before* the
+    guest sees them. Connecting by IP without asking DNS is rejected; only the
+    filter's marked sockets can reach the upstream resolver. In `"internet"`
+    mode, DNS answers pointing into the LAN stay blocked (static IP/CIDR
+    entries may name LAN hosts).
   - The filter is outside the guest, so guest root cannot change it.
 - **Access:** direct vsock sessions via `antic-agent session` (no `sshd`, SSH
   keys, passwords, PAM, sudo or setuid wrappers). The host end is
@@ -79,18 +88,18 @@ internal/host/     config, instance (IDs, directories, locks), systemd, chv
 internal/guest/    agent and session
 nix/module.nix     the guest NixOS module (nixosModules.guest)
 nix/packages.nix   antic, antic-agent, static cloud-hypervisor
-examples/          antic.toml and a guest flake to start from
+examples/          dev.toml and a guest flake to start from
 ```
 
 ## Host layout
 
 ```
-~/.config/antic/antic.toml          guests, policy
+~/.config/antic/guests/<NAME>.toml  one config file per guest
 ~/.local/state/antic/
   guests/<ID>/store/nix             a guest's Nix store (its /nix)
   guests/<ID>/log/console.log       console
   names/<NAME> -> ../guests/<ID>    name to ID (IDs are never reused)
-~/.local/libexec/antic/             cloud-hypervisor ("antic upgrade")
+~/.local/libexec/antic/             cloud-hypervisor ("antic update")
 $XDG_RUNTIME_DIR/antic/<ID>/        sockets, boot record
 ```
 
@@ -109,45 +118,49 @@ share hidden directories of `$HOME` (and what symlinks there point to),
 ## Setup
 
 ```sh
-git clone https://github.com/RNG999/antic ~/.local/src/antic
-mkdir -p ~/.config/antic ~/.local/state/antic
-cp ~/.local/src/antic/examples/antic.toml ~/.config/antic/
-cp -r ~/.local/src/antic/examples/guest ~/.config/antic/guest   # set antic.user
-nix run path:$HOME/.local/src/antic -- upgrade   # installs antic and cloud-hypervisor
+mkdir -p ~/.config/antic/guests ~/.local/state/antic ~/Work
+nix run github:RNG999/antic -- update   # installs antic and cloud-hypervisor
 antic doctor
-antic guest create dev
-antic run uname -a
+antic guest create dev -p git
+antic run dev -- uname -a
 ```
 
 ## Usage
 
 ```
-antic run [--offline] [-t|-T] [--] CMD...   run CMD in the guest, in the current directory
-antic shell
+antic run NAME [--offline] [-w DIR] [-t|-T] [--] CMD...   run CMD in the guest
+antic shell NAME
 
 antic guest ls [--json] [-q]
-antic guest create NAME [--from GUEST | --flake F --attr A]
-antic guest rm NAME... [-y] [--keep-config]
-antic guest start|restart [NAME...]
-antic guest stop NAME... | --all
-antic guest inspect [NAME] [--json]
-antic guest logs [NAME] [-f] [--journal [-u UNIT] [-n N]]
-antic guest apply [NAME]
-antic guest prune [-y]
+antic guest create NAME [-p PKG...] [--cpus N] [--memory SIZE] [--network MODE] [--port PORT...]
+antic guest set NAME [--cpus N] [--memory SIZE] [--network MODE]
+antic guest rm NAME... [-y]
+antic guest run NAME [--offline] [-w DIR] [-t|-T] [--] CMD...
+antic guest shell NAME
+antic guest start|stop|restart NAME...
+antic guest inspect NAME [--json]
+antic guest logs NAME [-f] [--journal [-u UNIT] [-n N]]
+antic guest ps NAME [--json]
+antic guest kill NAME SESSION...
+antic guest apply NAME
 
-antic session ls [--json] | kill SESSION...
-antic share ls [--json] | add [--ro] [--persist] [-y] DIR... | rm [--persist] DIR...
-antic link ls [--json] | sync | add TOOL... | rm TOOL...
-antic config path | check | edit
-antic doctor | upgrade [--source DIR] | version | completion SHELL
+antic guest pkg ls NAME [--json] | add NAME PKG... | rm NAME PKG...
+antic guest share ls NAME [--json] | add NAME [--ro] DIR... | rm NAME DIR...
+antic guest port ls NAME [--json] | add NAME PORT... | rm NAME PORT...
+
+antic pkg ls NAME [--json] | add NAME PKG... | rm NAME PKG...
+antic share ls NAME [--json] | add NAME [--ro] DIR... | rm NAME DIR...
+antic port ls NAME [--json] | add NAME PORT... | rm NAME PORT...
+antic config path [NAME] | check | edit NAME
+antic skill install [-p] | rm [-p] | path [-p]
+antic doctor | update [--source DIR] | version | completion SHELL
 ```
 
-The guest is chosen by an argument (guest subcommands), `-g NAME`,
-`$ANTIC_GUEST`, `default_guest`, or is the only one defined. `run` exits
-with the command's status; antic's own errors exit with 125.
+Every guest-targeted command requires an explicit `NAME` argument (omitting it is a syntax error). `run` exits with the command's status; antic's own errors exit with 125.
 
-Add tools to `environment.systemPackages` in your guest flake, then run
-`antic guest apply`. A changed kernel needs `antic guest restart`.
+Add tools with `antic guest pkg add NAME PKG...` (or edit `packages = [...]` in
+`~/.config/antic/guests/<name>.toml` and run `antic guest apply NAME`). A changed
+kernel needs `antic guest restart NAME`.
 
 `apply` refuses to build if the guest flake's lock pins an older state of a
 local-path input, or if a local input lies inside a share.
@@ -159,9 +172,14 @@ local-path input, or if a local input lies inside a share.
   `.git`/`.claude`/`.envrc`, build scripts, binaries. Review changes, keep
   host tools from auto-trusting workspaces, and use read-only shares where
   the guest only needs to read.
-- **Network egress is open in `filtered` mode** (internet only); shares
-  can be exfiltrated. Use `--offline`, `commands.offline` or
-  `network = "none"` for tools that need no network.
+- **Network egress is open in `internet` mode**; shares can be exfiltrated.
+  Use `allow = [...]`, `--offline` or `network = "none"` for tools that need
+  little or no network.
+- **`allow` is enforced by IP address.** An allowed domain's addresses are
+  often shared CDN addresses (Cloudflare, Fastly, ...), so other sites on the
+  same addresses become reachable too, and data can be sent to anything the
+  allowed services accept (e.g. a gist on github.com). Allow only what is
+  needed.
 - **Links in `~/.local/bin`** lose to host commands earlier in `PATH`;
   `antic link ls` reports those as shadowed.
 

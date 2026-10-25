@@ -7,7 +7,7 @@
   };
 
   outputs = { antic, nixpkgs, ... }: {
-    # "antic guest apply" builds nixosConfigurations.<attr> (attr in antic.toml).
+    # "antic guest apply" builds nixosConfigurations.<attr> (attr in <name>.toml).
     nixosConfigurations.antic = nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
       modules = [ antic.nixosModules.guest ./configuration.nix ];

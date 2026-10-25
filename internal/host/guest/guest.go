@@ -25,13 +25,14 @@ import (
 	"github.com/RNG999/antic/internal/proto"
 )
 
-// Binaries are the host programs antic runs.
+// Binaries are the host programs antic runs. Self is antic itself (it runs
+// as the first process of each guest's network namespace).
 type Binaries struct {
-	CloudHypervisor, Virtiofsd, Passt, Pasta, Nft string
+	CloudHypervisor, Virtiofsd, Passt, Pasta, Nft, Self string
 }
 
 // FindBinaries locates them: cloud-hypervisor from antic's libexec
-// ("antic upgrade" installs it), the rest from the system.
+// ("antic update" installs it), the rest from the system.
 func FindBinaries(d instance.Dirs) Binaries {
 	find := func(name string, extra ...string) string {
 		if p, err := exec.LookPath(name); err == nil {
@@ -44,12 +45,21 @@ func FindBinaries(d instance.Dirs) Binaries {
 		}
 		return name
 	}
+	self, err := os.Executable()
+	if err == nil {
+		if real, err := filepath.EvalSymlinks(self); err == nil {
+			self = real
+		}
+	} else {
+		self = "antic"
+	}
 	return Binaries{
 		CloudHypervisor: filepath.Join(d.Libexec, "cloud-hypervisor"),
 		Virtiofsd:       find("virtiofsd", "/usr/lib/virtiofsd", "/usr/libexec/virtiofsd"),
 		Passt:           find("passt"),
 		Pasta:           find("pasta"),
 		Nft:             find("nft", "/usr/sbin/nft"),
+		Self:            self,
 	}
 }
 
@@ -105,9 +115,9 @@ type Guest struct {
 	Created bool
 }
 
-// Get returns the guest name (see config.Pick for the default).
+// Get returns the named guest.
 func (m *Manager) Get(name string) (*Guest, error) {
-	c, err := m.Config.Pick(name)
+	c, err := m.Config.Get(name)
 	if err != nil {
 		return nil, err
 	}
@@ -222,28 +232,21 @@ func (g *Guest) writeBoot(bt *boot) error {
 // policy is the share policy, protecting antic's own directories and every
 // guest's flake.
 func (m *Manager) policy() share.Policy {
-	extra := []string{m.Dirs.ConfigDir, m.Dirs.StateRoot, m.Dirs.Libexec, m.Dirs.SrcDir}
-	if real, err := filepath.EvalSymlinks(m.Config.Path()); err == nil {
-		extra = append(extra, filepath.Dir(real))
+	extra := []string{m.Dirs.ConfigDir, m.Dirs.StateRoot, m.Dirs.Libexec}
+	if real, err := filepath.EvalSymlinks(m.Config.Dir()); err == nil {
+		extra = append(extra, real)
 	}
 	for _, c := range m.Config.Guests {
-		extra = append(extra, c.Flake)
+		if c.FlakePath != "" {
+			extra = append(extra, c.FlakePath)
+		}
 	}
-	extra = append(extra, m.Config.Policy.Deny...)
-	return share.NewPolicy(m.Dirs.Home, extra, m.Config.Policy.ShareRoots)
-}
-
-// InShareRoots reports whether path is inside policy.share_roots.
-func (m *Manager) InShareRoots(path string) bool {
-	if real, err := filepath.EvalSymlinks(path); err == nil {
-		path = real
-	}
-	return m.policy().InRoots(path)
+	return share.NewPolicy(m.Dirs.Home, extra, nil)
 }
 
 // protectedNames are the names exported read-only inside shares.
 func (m *Manager) protectedNames() []string {
-	return append(append([]string{}, proto.ProtectedNames...), m.Config.Policy.Protect...)
+	return append([]string{}, proto.ProtectedNames...)
 }
 
 var errNotRunning = errors.New("not running")

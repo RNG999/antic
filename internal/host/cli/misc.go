@@ -15,36 +15,71 @@ import (
 )
 
 func (a *app) configCmd() *cobra.Command {
-	c := &cobra.Command{Use: "config", Short: "antic.toml", Args: cobra.NoArgs}
+	c := &cobra.Command{Use: "config", Short: "Guest configuration files (~/.config/antic/guests/*.toml)", Args: cobra.NoArgs}
 	c.AddCommand(&cobra.Command{
-		Use: "path", Short: "Print the config file's path", Args: cobra.NoArgs,
-		RunE: func(*cobra.Command, []string) error { fmt.Println(a.dirs.ConfigFile()); return nil },
+		Use:               "path [NAME]",
+		Short:             "Print a guest's config file path (or the guests directory)",
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: a.guestArgs,
+		RunE: func(c *cobra.Command, args []string) error {
+			cfg, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
+			if err != nil {
+				return err
+			}
+			if len(args) == 1 {
+				g, err := cfg.Get(args[0])
+				if err != nil {
+					return err
+				}
+				fmt.Println(g.Path)
+				return nil
+			}
+			fmt.Println(a.dirs.GuestsConfigDir())
+			return nil
+		},
 	}, &cobra.Command{
-		Use: "check", Short: "Check the config file", Args: cobra.NoArgs,
+		Use:   "check",
+		Short: "Check all guest config files",
+		Args:  cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
-			if _, err := config.Load(a.dirs.ConfigFile(), a.dirs.Home); err != nil {
+			if _, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home); err != nil {
 				return err
 			}
 			fmt.Fprintln(os.Stderr, "antic: config ok")
 			return nil
 		},
-	}, &cobra.Command{
-		Use: "edit", Short: "Edit the config file with $EDITOR, then check it", Args: cobra.NoArgs,
-		RunE: func(*cobra.Command, []string) error {
+	}, a.editGuestCmd("edit NAME"))
+	return c
+}
+
+func (a *app) editGuestCmd(use string) *cobra.Command {
+	return &cobra.Command{
+		Use:               use,
+		Short:             "Edit a guest's config file with $EDITOR, then check it",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: a.guestArgs,
+		RunE: func(c *cobra.Command, args []string) error {
+			cfg, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
+			if err != nil {
+				return err
+			}
+			g, err := cfg.Get(args[0])
+			if err != nil {
+				return err
+			}
 			editor := os.Getenv("EDITOR")
 			if editor == "" {
 				editor = "vi"
 			}
-			cmd := exec.Command(editor, a.dirs.ConfigFile())
+			cmd := exec.Command(editor, g.Path)
 			cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 			if err := cmd.Run(); err != nil {
 				return err
 			}
-			_, err := config.Load(a.dirs.ConfigFile(), a.dirs.Home)
+			_, err = config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
 			return err
 		},
-	})
-	return c
+	}
 }
 
 func (a *app) versionCmd() *cobra.Command {
@@ -83,8 +118,8 @@ func (a *app) doctorCmd() *cobra.Command {
 			}
 			_, err = nixbuild.New()
 			check("nix", err)
-			_, err = config.Load(a.dirs.ConfigFile(), a.dirs.Home)
-			check("config "+a.dirs.ConfigFile(), err)
+			_, err = config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
+			check("config "+a.dirs.GuestsConfigDir(), err)
 			if bad > 0 {
 				return fmt.Errorf("%d check(s) failed", bad)
 			}
@@ -93,13 +128,21 @@ func (a *app) doctorCmd() *cobra.Command {
 	}
 }
 
-// upgradeCmd builds antic and cloud-hypervisor from a checkout and installs
-// them.
-func (a *app) upgradeCmd() *cobra.Command {
+// updateCmd builds antic and cloud-hypervisor from GitHub (or --source) and
+// installs them.
+func (a *app) updateCmd() *cobra.Command {
 	var source string
 	c := &cobra.Command{
-		Use: "upgrade", Short: "Build antic (and cloud-hypervisor) from a checkout and install them", Args: cobra.NoArgs,
+		Use:   "update",
+		Short: "Build antic (and cloud-hypervisor) and install them",
+		Args:  cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
+			src := source
+			if abs, err := filepath.Abs(src); err == nil {
+				if _, serr := os.Stat(abs); serr == nil {
+					src = abs
+				}
+			}
 			nix, err := nixbuild.New()
 			if err != nil {
 				return err
@@ -108,7 +151,7 @@ func (a *app) upgradeCmd() *cobra.Command {
 				{"antic", "antic", filepath.Join(a.dirs.BinDir, "antic")},
 				{"cloud-hypervisor", "cloud-hypervisor", filepath.Join(a.dirs.Libexec, "cloud-hypervisor")},
 			} {
-				out, err := nix.Build(c.Context(), source, t.attr)
+				out, err := nix.Build(c.Context(), src, t.attr)
 				if err != nil {
 					return err
 				}
@@ -120,7 +163,7 @@ func (a *app) upgradeCmd() *cobra.Command {
 			return nil
 		},
 	}
-	c.Flags().StringVar(&source, "source", a.dirs.SrcDir, "antic checkout to build from")
+	c.Flags().StringVar(&source, "source", "github:RNG999/antic", "flake URI or local checkout path to build from")
 	return c
 }
 

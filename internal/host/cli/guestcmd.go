@@ -5,19 +5,89 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/RNG999/antic/internal/host/config"
 	"github.com/RNG999/antic/internal/host/guest"
 )
 
 func (a *app) guestCmd() *cobra.Command {
-	c := &cobra.Command{Use: "guest", Short: "Manage guests", Args: cobra.NoArgs}
-	c.AddCommand(a.guestLs(), a.guestCreate(), a.guestRm(), a.guestStart(), a.guestStop(), a.guestRestart(),
-		a.guestInspect(), a.guestLogs(), a.guestApply(), a.guestPrune())
+	c := &cobra.Command{Use: "guest", Short: "Manage guests and guest resources", Args: cobra.NoArgs}
+	c.AddCommand(
+		a.guestLs(),
+		a.guestCreate(),
+		a.guestRm(),
+		a.guestStart(),
+		a.guestStop(),
+		a.guestRestart(),
+		a.guestSet(),
+		a.editGuestCmd("edit NAME"),
+		a.guestApply(),
+		a.runCmd(),
+		a.shellCmd(),
+		a.guestPs(),
+		a.guestKill(),
+		a.guestInspect(),
+		a.guestLogs(),
+		a.pkgCmd(),
+		a.shareCmd(),
+		a.portCmd(),
+	)
 	return c
+}
+
+func (a *app) guestPs() *cobra.Command {
+	c := &cobra.Command{
+		Use:               "ps NAME",
+		Short:             "List running command sessions in a guest",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: a.guestArgs,
+		RunE: func(c *cobra.Command, args []string) error {
+			g, err := a.get(c.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			ss, err := g.Sessions(c.Context())
+			if err != nil {
+				return err
+			}
+			return a.out(ss, func(w io.Writer) {
+				fmt.Fprintln(w, "SESSION\tNETWORK\tSTARTED\tCOMMAND")
+				for _, s := range ss {
+					net := "online"
+					if s.Offline {
+						net = "offline"
+					}
+					fmt.Fprintf(w, "%s\t%s\t%s ago\t%s\n", s.Unit, net, age(time.Since(time.Unix(s.Started, 0))), s.Command)
+				}
+			})
+		},
+	}
+	a.jsonFlag(c)
+	return c
+}
+
+func (a *app) guestKill() *cobra.Command {
+	return &cobra.Command{
+		Use:               "kill NAME SESSION...",
+		Short:             "Stop running command sessions in a guest",
+		Args:              cobra.MinimumNArgs(2),
+		ValidArgsFunction: a.guestArgs,
+		RunE: func(c *cobra.Command, args []string) error {
+			g, err := a.get(c.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			for _, s := range args[1:] {
+				if err := g.Kill(c.Context(), s); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
 }
 
 func (a *app) guestLs() *cobra.Command {
@@ -50,14 +120,10 @@ func (a *app) guestLs() *cobra.Command {
 				return nil
 			}
 			return a.out(infos, func(w io.Writer) {
-				fmt.Fprintln(w, "NAME\tID\tSTATE\tOS\tCPUS\tMEMORY\tNETWORK\tSHARES\tDEFAULT")
+				fmt.Fprintln(w, "NAME\tSTATE\tCPUS\tMEMORY\tNETWORK")
 				for _, i := range infos {
-					def := ""
-					if i.Default {
-						def = "*"
-					}
-					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\t%d\t%s\n",
-						i.Name, orDash(i.ID), state(i), tilde(i.OS, a.dirs.Home), i.CPUs, i.Memory, i.Network, len(i.Shares), def)
+					fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\n",
+						i.Name, state(i), i.CPUs, i.Memory, i.Network)
 				}
 			})
 		},
@@ -68,45 +134,119 @@ func (a *app) guestLs() *cobra.Command {
 }
 
 func (a *app) guestCreate() *cobra.Command {
-	var from, flake, attr string
+	var pkgs, portSpecs []string
+	var cpus int
+	var memory, network string
 	c := &cobra.Command{
-		Use:   "create NAME",
-		Short: "Add a guest to antic.toml (if needed) and build it",
-		Long: `Add [guests.NAME] to antic.toml, using the OS of another guest (--from,
-default: the default guest) or --flake/--attr, and build it. A guest that is
-already in antic.toml but not built yet is just built.`,
-		Args: cobra.ExactArgs(1),
+		Use:               "create NAME",
+		Short:             "Create, build, and start a guest",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: cobra.NoFileCompletions, // a new name
 		RunE: func(c *cobra.Command, args []string) error {
 			if err := a.load(c.Context()); err != nil {
 				return err
 			}
-			if flake == "" && a.cfg.Guests[args[0]] == nil {
-				src, err := a.cfg.Pick(from)
+			name := args[0]
+			var ports []config.Port
+			for _, ps := range portSpecs {
+				pt, err := config.ParsePort(ps)
 				if err != nil {
 					return err
 				}
-				flake, attr = src.Flake, src.Attr
+				ports = append(ports, pt)
 			}
-			if attr == "" {
-				attr = "antic"
+			if len(pkgs) == 0 && a.cfg.Guests[name] == nil {
+				pkgs = []string{"git"}
 			}
-			_, err := a.mgr.Create(c.Context(), args[0], flake, attr)
+			spec := config.Guest{
+				Packages: pkgs,
+				CPUs:     cpus,
+				Memory:   memory,
+				Network:  network,
+				Ports:    ports,
+			}
+			_, err := a.mgr.Create(c.Context(), name, spec)
 			return err
 		},
 	}
-	c.Flags().StringVar(&from, "from", "", "guest whose OS (flake, attr) to use")
-	c.Flags().StringVar(&flake, "flake", "", "flake with nixosConfigurations.<attr>")
-	c.Flags().StringVar(&attr, "attr", "", "attribute in nixosConfigurations (default antic)")
+	c.Flags().StringSliceVarP(&pkgs, "pkg", "p", nil, "nixpkgs packages to install in the guest")
+	c.Flags().IntVar(&cpus, "cpus", 0, "number of vCPUs (default 2)")
+	c.Flags().StringVar(&memory, "memory", "", "memory size (default 4G)")
+	c.Flags().StringVar(&network, "network", "", "network mode: internet, lan, or none")
+	c.Flags().StringSliceVar(&portSpecs, "port", nil, "host-to-guest TCP port forwards (e.g. 3000 or 8080:80)")
+	c.RegisterFlagCompletionFunc("network", networkModes)
+	for _, f := range []string{"pkg", "cpus", "memory", "port"} {
+		c.RegisterFlagCompletionFunc(f, cobra.NoFileCompletions)
+	}
+	return c
+}
+
+func (a *app) guestSet() *cobra.Command {
+	var cpus int
+	var memory, network string
+	c := &cobra.Command{
+		Use:               "set NAME",
+		Short:             "Update a guest's CPUs, memory, or network mode",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: a.guestArgs,
+		RunE: func(c *cobra.Command, args []string) error {
+			g, err := a.get(c.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			var u config.ResourceUpdates
+			changed := false
+			if c.Flags().Changed("cpus") {
+				u.CPUs = &cpus
+				changed = true
+			}
+			if c.Flags().Changed("memory") {
+				u.Memory = &memory
+				changed = true
+			}
+			if c.Flags().Changed("network") {
+				u.Network = &network
+				changed = true
+			}
+			if !changed {
+				return errors.New("specify at least one of --cpus, --memory, or --network")
+			}
+			name := g.Name()
+			if err := a.cfg.SetResources(name, u, a.dirs.Home); err != nil {
+				return err
+			}
+			a.mgr, a.cfg = nil, nil
+			g, err = a.get(c.Context(), name)
+			if err != nil {
+				return err
+			}
+			if up, err := g.Running(c.Context()); err == nil && up {
+				fmt.Fprintf(os.Stderr, "antic: restarting %s to apply updated settings...\n", name)
+				if err := g.Stop(c.Context()); err != nil {
+					return err
+				}
+				return g.Start(c.Context())
+			}
+			return nil
+		},
+	}
+	c.Flags().IntVar(&cpus, "cpus", 0, "number of vCPUs")
+	c.Flags().StringVar(&memory, "memory", "", "memory size (e.g. 4G or 8G)")
+	c.Flags().StringVar(&network, "network", "", "network mode: internet, lan, or none")
+	c.RegisterFlagCompletionFunc("network", networkModes)
+	for _, f := range []string{"cpus", "memory"} {
+		c.RegisterFlagCompletionFunc(f, cobra.NoFileCompletions)
+	}
 	return c
 }
 
 func (a *app) guestRm() *cobra.Command {
-	var yes, keepConfig bool
+	var yes bool
 	c := &cobra.Command{
 		Use:               "rm NAME...",
-		Short:             "Delete guests (their state, and their table in antic.toml)",
+		Short:             "Delete guests (their state and their config file)",
 		Args:              cobra.MinimumNArgs(1),
-		ValidArgsFunction: a.guestArgs,
+		ValidArgsFunction: a.guestsArgs,
 		RunE: func(c *cobra.Command, args []string) error {
 			if err := a.load(c.Context()); err != nil {
 				return err
@@ -121,7 +261,7 @@ func (a *app) guestRm() *cobra.Command {
 						return err
 					}
 				}
-				if err := g.Remove(c.Context(), keepConfig); err != nil {
+				if err := g.Remove(c.Context()); err != nil {
 					return err
 				}
 				fmt.Fprintf(os.Stderr, "antic: removed guest %s\n", n)
@@ -130,12 +270,10 @@ func (a *app) guestRm() *cobra.Command {
 		},
 	}
 	c.Flags().BoolVarP(&yes, "yes", "y", false, "do not ask")
-	c.Flags().BoolVar(&keepConfig, "keep-config", false, "keep the guest's table in antic.toml")
 	return c
 }
 
-// eachGuest runs fn for the named guests (default: the default guest), or
-// every guest with all.
+// eachGuest runs fn for the named guests, or every guest with all.
 func (a *app) eachGuest(c *cobra.Command, args []string, all bool, fn func(*guest.Guest) error) error {
 	if err := a.load(c.Context()); err != nil {
 		return err
@@ -148,7 +286,7 @@ func (a *app) eachGuest(c *cobra.Command, args []string, all bool, fn func(*gues
 		}
 	} else {
 		if len(args) == 0 {
-			args = []string{a.guest}
+			return errors.New("syntax error: guest name is required")
 		}
 		for _, n := range args {
 			g, err := a.mgr.Get(n)
@@ -169,9 +307,10 @@ func (a *app) eachGuest(c *cobra.Command, args []string, all bool, fn func(*gues
 
 func (a *app) guestStart() *cobra.Command {
 	return &cobra.Command{
-		Use:               "start [NAME...]",
+		Use:               "start NAME...",
 		Short:             "Start guests and wait until they are ready",
-		ValidArgsFunction: a.guestArgs,
+		Args:              cobra.MinimumNArgs(1),
+		ValidArgsFunction: a.guestsArgs,
 		RunE: func(c *cobra.Command, args []string) error {
 			return a.eachGuest(c, args, false, func(g *guest.Guest) error { return g.Start(c.Context()) })
 		},
@@ -183,10 +322,10 @@ func (a *app) guestStop() *cobra.Command {
 	c := &cobra.Command{
 		Use:               "stop NAME... | --all",
 		Short:             "Shut guests down",
-		ValidArgsFunction: a.guestArgs,
+		ValidArgsFunction: a.guestsArgs,
 		RunE: func(c *cobra.Command, args []string) error {
 			if len(args) == 0 && !all {
-				return errors.New("name the guests to stop, or use --all")
+				return errors.New("syntax error: guest name is required (or use --all)")
 			}
 			return a.eachGuest(c, args, all, func(g *guest.Guest) error { return g.Stop(c.Context()) })
 		},
@@ -197,9 +336,10 @@ func (a *app) guestStop() *cobra.Command {
 
 func (a *app) guestRestart() *cobra.Command {
 	return &cobra.Command{
-		Use:               "restart [NAME...]",
+		Use:               "restart NAME...",
 		Short:             "Restart guests",
-		ValidArgsFunction: a.guestArgs,
+		Args:              cobra.MinimumNArgs(1),
+		ValidArgsFunction: a.guestsArgs,
 		RunE: func(c *cobra.Command, args []string) error {
 			return a.eachGuest(c, args, false, func(g *guest.Guest) error {
 				if err := g.Stop(c.Context()); err != nil {
@@ -213,12 +353,12 @@ func (a *app) guestRestart() *cobra.Command {
 
 func (a *app) guestInspect() *cobra.Command {
 	c := &cobra.Command{
-		Use:               "inspect [NAME]",
+		Use:               "inspect NAME",
 		Short:             "Show a guest's configuration and state",
-		Args:              cobra.MaximumNArgs(1),
+		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: a.guestArgs,
 		RunE: func(c *cobra.Command, args []string) error {
-			g, err := a.pick(c.Context(), args)
+			g, err := a.get(c.Context(), args[0])
 			if err != nil {
 				return err
 			}
@@ -228,9 +368,13 @@ func (a *app) guestInspect() *cobra.Command {
 			}
 			return a.out(i, func(w io.Writer) {
 				fmt.Fprintf(w, "Name:\t%s\nID:\t%s\nState:\t%s\nOS:\t%s\nSystem:\t%s\nCPUs:\t%d\nMemory:\t%s\nNetwork:\t%s\n",
-					i.Name, orDash(i.ID), state(i), i.OS, orDash(i.System), i.CPUs, i.Memory, i.Network)
+					i.Name, orDash(i.ID), state(i), i.OS, orDash(i.System),
+					i.CPUs, i.Memory, i.Network)
+				for _, p := range i.Ports {
+					fmt.Fprintf(w, "Port:\t127.0.0.1:%d -> %d\n", p.Host, p.Guest)
+				}
 				for _, s := range i.Shares {
-					fmt.Fprintf(w, "Share:\t%s (%s, %s%s)\n", s.Path, mode(s.ReadOnly), s.Source, map[bool]string{true: ", mounted"}[s.Mounted])
+					fmt.Fprintf(w, "Share:\t%s (%s%s)\n", s.Path, mode(s.ReadOnly), map[bool]string{true: ", mounted"}[s.Mounted])
 				}
 				for _, u := range i.Units {
 					fmt.Fprintf(w, "Unit:\t%s\n", u)
@@ -247,12 +391,12 @@ func (a *app) guestLogs() *cobra.Command {
 	var units []string
 	var lines int
 	c := &cobra.Command{
-		Use:               "logs [NAME]",
-		Short:             "Print a guest's console log (or, with --journal, its journal)",
-		Args:              cobra.MaximumNArgs(1),
+		Use:               "logs NAME",
+		Short:             "Print a guest's console log (or, with --journal, its systemd journal)",
+		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: a.guestArgs,
 		RunE: func(c *cobra.Command, args []string) error {
-			g, err := a.pick(c.Context(), args)
+			g, err := a.get(c.Context(), args[0])
 			if err != nil {
 				return err
 			}
@@ -265,8 +409,6 @@ func (a *app) guestLogs() *cobra.Command {
 				return err
 			}
 			defer f.Close()
-			// Console output comes from the guest: never pass terminal
-			// control sequences through.
 			w := &sanitizer{w: os.Stdout}
 			for {
 				_, err := io.Copy(w, f)
@@ -286,47 +428,18 @@ func (a *app) guestLogs() *cobra.Command {
 
 func (a *app) guestApply() *cobra.Command {
 	return &cobra.Command{
-		Use:   "apply [NAME]",
-		Short: "Build the guest's OS from its flake and switch to it",
-		Long: `Build nixosConfigurations.<attr> of the guest's flake on the host, copy it
-into the guest's store and, if the guest is running, switch to it there.`,
-		Args:              cobra.MaximumNArgs(1),
+		Use:               "apply NAME",
+		Short:             "Build the guest's OS and switch to it",
+		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: a.guestArgs,
 		RunE: func(c *cobra.Command, args []string) error {
-			g, err := a.pick(c.Context(), args)
+			g, err := a.get(c.Context(), args[0])
 			if err != nil {
 				return err
 			}
 			return g.Apply(c.Context())
 		},
 	}
-}
-
-func (a *app) guestPrune() *cobra.Command {
-	var yes bool
-	c := &cobra.Command{
-		Use:   "prune",
-		Short: "Delete guest state that no guest name refers to any more",
-		Args:  cobra.NoArgs,
-		RunE: func(c *cobra.Command, _ []string) error {
-			if err := a.load(c.Context()); err != nil {
-				return err
-			}
-			o, err := a.mgr.Orphans()
-			if err != nil || len(o) == 0 {
-				return err
-			}
-			fmt.Fprintln(os.Stderr, strings.Join(o, "\n"))
-			if !yes {
-				if err := confirm("Delete these?"); err != nil {
-					return err
-				}
-			}
-			return a.mgr.Prune(o)
-		},
-	}
-	c.Flags().BoolVarP(&yes, "yes", "y", false, "do not ask")
-	return c
 }
 
 func state(i guest.Info) string {
@@ -360,13 +473,6 @@ func mode(ro bool) string {
 		return "ro"
 	}
 	return "rw"
-}
-
-func tilde(p, home string) string {
-	if strings.HasPrefix(p, home+"/") {
-		return "~" + strings.TrimPrefix(p, home)
-	}
-	return p
 }
 
 // sanitizer drops terminal control sequences (ESC sequences and other

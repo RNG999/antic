@@ -14,7 +14,7 @@
       nixosModules.default = ./nix/module.nix;
 
       # antic (host CLI), antic-agent (used by the module) and the static
-      # cloud-hypervisor "antic upgrade" installs.
+      # cloud-hypervisor "antic update" installs.
       packages = forAll (pkgs:
         let p = import ./nix/packages.nix { inherit pkgs; };
         in p // { default = p.antic; });
