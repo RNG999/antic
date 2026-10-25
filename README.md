@@ -1,212 +1,223 @@
 # antic
 
-antic runs CLI tools, especially ones an AI agent drives, in minimal NixOS
-virtual machines ("guests") that are isolated from the host. Everything runs as
-your own user; there is no root daemon. Host directories are shared at the same
-path, and `antic run CMD` runs CMD inside a guest, in your current directory.
+`antic` runs CLI tools—especially those driven by AI coding agents—inside lightweight, isolated NixOS microVMs ("guests") powered by [cloud-hypervisor] and KVM.
 
-The guest side is **antic-agent**: a lightweight, pure-Go static binary that
-runs inside each guest to handle command sessions and host agent requests.
+Everything runs rootless as your own user with no privileged daemon. Host directories shared with a guest appear at the **exact same path** inside the VM, so `antic run -- <cmd>` executes seamlessly in your current working directory.
 
-## How it works
-
-- **VM:** [cloud-hypervisor] with KVM, booted directly from a kernel and
-  initrd. The configuration, including credentials, goes through its API
-  socket, never the command line.
-- **Guest filesystem:** `/` is tmpfs. `/nix` is the guest's own Nix store,
-  kept on the host and mounted read-only, so nothing in the guest survives a
-  reboot and even guest root cannot change installed software.
-  - The guest uses NixOS's `minimal` profile with Rust `nixos-init` (no
-    bootloader, desktop/XDG assets, LVM, bcache, FUSE or OpenSSH).
-  - `antic guest apply` builds the guest's NixOS on the host, copies it into
-    that store, and switches the running guest to it. The guest needs no
-    network and evaluates nothing itself. If switching fails, it automatically
-    rolls back the running guest to the previous configuration.
-- **Shares:** one rootless [virtiofsd] per shared directory, mapping only
-  your UID (as the guest user).
-  - Inside writable shares, the host exports existing paths that host tools
-    execute or trust read-only: `.git` (and bare-repository layouts),
-    `.claude`, `.mcp.json`, `CLAUDE.md`, `AGENTS.md`, `.envrc`, `.vscode`,
-    `.devcontainer`, `mise.toml`, and so on (`proto.ProtectedNames` plus
-    `policy.protect`). The guest cannot change them, even as root. Newly
-    created ones are not blocked.
-  - Runtime shares are hot-plugged through cloud-hypervisor's API and
-    mounted by `antic-agent`.
-- **Network:** [passt] (vhost-user) inside a rootless network namespace from
-  pasta.
-  - nftables there implements `[network]`: `mode = "internet"` (the default) allows
-    internet only, blocking LAN (including the host's on-link subnets, IPv4 and IPv6),
-    CGNAT/Tailscale, link-local/metadata, host addresses or loopback.
-  - `"lan"` still blocks the host, link-local and loopback; `"none"` gives the
-    guest no network device at all.
-  - `allow = [...]` (domains and CIDRs) turns the filter into default deny, while
-    `deny = [...]` blocks specific domains and CIDRs.
-    antic runs a small in-process DNS filter in the namespace: it answers only
-    A/AAAA queries for non-denied/allowed domains (and their subdomains), refuses
-    everything else, and adds the answer's addresses to an nftables set *before*
-    the guest sees them. Connecting by IP without asking DNS is rejected; only the
-    filter's marked sockets can reach the upstream resolver. In `"internet"`
-    mode, DNS answers pointing into the LAN stay blocked (static CIDR entries
-    may name LAN hosts).
-  - The filter is outside the guest, so guest root cannot change it.
-- **Access:** direct vsock sessions via `antic-agent session` (no `sshd`, SSH
-  keys, passwords, PAM, sudo or setuid wrappers). The host end is
-  cloud-hypervisor's unix socket in a 0700 directory, and the guest checks that
-  the peer CID is the host.
-  - Each `antic run` is one socket-activated `antic-session@` unit instance in
-    the guest. Sessions:
-    - wait for `antic-ready.target` (configured shares), so nothing runs
-      without those;
-    - run directly as the guest user with empty `CapabilityBoundingSet`,
-      `NoNewPrivileges`, `RestrictNamespaces` and a syscall filter.
-- **antic-agent daemon:** a root agent on vsock port 24 that accepts only the
-  host (the guest kernel sets the peer CID). It mounts runtime shares (no
-  symlink is ever followed: `openat2` + `fsmount`/`move_mount`), switches
-  systems, shows the journal, and lists or stops sessions. The guest user
-  cannot talk to it.
-- **Guest kernel hardening:**
-  - `lockdown=integrity`, kernel modules locked after boot;
-  - io_uring, unprivileged BPF and userfaultfd disabled.
-- **Host sandbox:** every unit sees only what it needs from `$HOME` and
-  runs with private PIDs, IPC and /tmp, a read-only system and no new
-  privileges. cloud-hypervisor also runs with seccomp, `AF_UNIX` only and no
-  network.
-  - Units: `antic-vm@ID` (cloud-hypervisor), `antic-net@ID`,
-    `antic-share@ID:TAG`, in `antic-ID.slice`. Helpers are bound to the VM
-    unit and stop with it.
-
-## Repository
-
-```
-cmd/antic/         host CLI
-cmd/antic-agent/   guest agent and session runner (run by the guest's units)
-internal/proto/    the host/guest contract (ports, credentials, session & agent protocols)
-internal/host/     config, instance (IDs, directories, locks), systemd, chv
-                   (cloud-hypervisor API), transport (vsock, session, agent),
-                   nixbuild, share (policy, protected paths), guest, cli
-internal/guest/    agent and session
-nix/module.nix     the guest NixOS module (nixosModules.guest)
-nix/packages.nix   antic, antic-agent, static cloud-hypervisor
-examples/          dev.toml and a guest flake to start from
-```
-
-## Host layout
-
-```
-~/.config/antic/guests/<NAME>.toml  one config file per guest
-~/.local/state/antic/
-  guests/<ID>/store/nix             a guest's Nix store (its /nix)
-  guests/<ID>/log/console.log       console
-  names/<NAME> -> ../guests/<ID>    name to ID (IDs are never reused)
-  locks/<NAME>.lock                 guest lifecycle and build locks (flock with timeout and holder PID)
-~/.local/libexec/antic/             cloud-hypervisor ("antic update")
-$XDG_RUNTIME_DIR/antic/<ID>/        sockets, boot record
-```
-
-Keep guest flakes and this repository outside shared directories: a guest
-that could write them would control what the host builds. antic refuses to
-share hidden directories of `$HOME` (and what symlinks there point to),
-`$PATH` directories, its own directories and guest flakes.
+---
 
 ## Requirements
 
-- Linux with KVM and systemd ≥ 257 (user units with `PrivatePIDs`).
-- Arch packages: `virtiofsd passt nftables`.
-- Nix with flakes (it can be a rootless static `nix` with
-  `store = local?root=$HOME/.local/share/nix-root`).
+- **Linux** with KVM (`/dev/kvm`) and **systemd ≥ 257** (user units with `PrivatePIDs`).
+- **Host packages** (`virtiofsd`, `passt`, `nftables`):
+  ```sh
+  # Arch Linux
+  sudo pacman -S virtiofsd passt nftables
+  ```
+- **Nix** with `nix-command` and `flakes` enabled.
+  - **Standard multi-user Nix (`nix-daemon`):**
+    ```sh
+    sudo systemctl enable --now nix-daemon.socket
+    mkdir -p ~/.config/nix
+    echo "experimental-features = nix-command flakes" >> ~/.config/nix/nix.conf
+    ```
+  - **Rootless Nix (no daemon required; `root=` must be an expanded absolute path):**
+    ```sh
+    mkdir -p ~/.config/nix
+    printf "experimental-features = nix-command flakes\nstore = local?root=%s/.local/share/nix-root\n" "$HOME" > ~/.config/nix/nix.conf
+    ```
 
-## Setup
+## Setup & Quickstart
+
+Install `antic` (`~/.local/bin/antic`) and the static `cloud-hypervisor` binary (`~/.local/libexec/antic/cloud-hypervisor`):
 
 ```sh
-mkdir -p ~/.config/antic/guests ~/.local/state/antic ~/Work
-nix run github:RNG999/antic -- update   # installs antic and cloud-hypervisor
+# Install from GitHub (or use `nix run path:. -- update --source .` from a local checkout)
+nix run github:RNG999/antic -- update
+
+# Verify host prerequisites
 antic doctor
-antic guest create dev -p git
+
+# Create and start a guest named "dev" with git and ripgrep installed
+antic guest create dev -p git -p ripgrep
+
+# Share a workspace directory and run a command inside the guest
+antic guest mount dev ~/Work
+cd ~/Work
 antic run dev -- uname -a
 ```
 
-## Guest configuration
+> [!TIP]
+> When only **one** guest is defined, the `[NAME]` argument is optional across commands (e.g. `antic run -- cargo test`, `antic shell`, `antic guest install jq`).
 
-Guest definitions live in `~/.config/antic/guests/<NAME>.toml`:
+---
+
+## Usage
+
+### Running Commands & Shells
+
+```sh
+antic run [NAME] [-w DIR] [-t|-T] [--] CMD [ARG...]   # Run CMD in the guest (starts it if stopped)
+antic shell [NAME]                                    # Open an interactive login shell
+```
+
+- Commands run in your current directory if it lies inside a shared path, or in the guest's `~` otherwise (override with `-w DIR`).
+- `antic run` exits with the command's own exit code (`antic`'s own errors exit with `125`).
+
+### Managing Packages, Shares, and Ports
+
+```sh
+# Add or remove nixpkgs packages and live-switch the guest without rebooting
+antic guest install [NAME] PKG...
+antic guest uninstall [NAME] PKG...
+
+# Hot-plug or remove shared directories (persisted in the guest's TOML config)
+antic guest mount [NAME] [--ro] DIR...
+antic guest unmount [NAME] DIR...
+
+# Forward host ports (127.0.0.1:HOST -> GUEST)
+antic guest forward [NAME] PORT... [-p tcp|udp|tcp,udp] [-d DESC]   # e.g. 3000, 8080:80, 53/tcp,udp
+antic guest unforward [NAME] PORT...
+```
+
+### Guest Lifecycle & Inspection
+
+```sh
+antic guest ls [--json] [-q]
+antic guest show [NAME] [--path] [--config] [--json]
+antic guest stats [NAME] [-w] [--json]                # Live CPU, memory, and session metrics
+
+antic guest create NAME [-p PKG...] [--cpus N] [--memory SIZE] [--network MODE] [--port PORT...]
+antic guest set [NAME] [--cpus N] [--memory SIZE] [--network MODE]
+antic guest edit [NAME]                               # Edit TOML config in $EDITOR and validate
+antic guest apply [NAME]                              # Rebuild NixOS closure and switch running guest
+
+antic guest start [NAME...]
+antic guest stop [NAME...] | --all
+antic guest restart [NAME...]
+antic guest rm NAME... [-y]
+
+antic guest ps [NAME] [--json]                        # List active command sessions
+antic guest kill [NAME] SESSION...                    # Stop a running session unit
+antic guest logs [NAME] [-f] [--journal [-u UNIT] [-n N]]
+```
+
+### Claude Code Skill & Host Maintenance
+
+```sh
+antic skill install [-p]                              # Install SKILL.md (~/.claude/skills/antic or ./.claude/skills/antic)
+antic skill rm [-p]
+antic skill path [-p]
+
+antic doctor                                          # Check KVM, helper binaries, Nix, and guest configs
+antic update [--source DIR]                           # Build and install antic and cloud-hypervisor
+antic version
+antic completion bash|zsh|fish
+```
+
+---
+
+## Configuration
+
+### Global Guest Config (`~/.config/antic/guests/<name>.toml`)
+
+Each guest is configured in its own TOML file:
 
 ```toml
-description = "tools for my agent"
-packages = ["git", "curl"]
+description = "Development environment"
+packages = ["git", "curl", "ripgrep"]
 
 [spec]
 cpus = 4
 memory = "8G"
 
 [network]
-mode = "internet"   # "internet" | "lan" | "none"
+mode = "internet"   # "internet" (default) | "lan" | "none"
 # allow = ["github.com", "*.githubusercontent.com", "1.1.1.1/32"]
 # deny = ["10.0.0.0/8"]
 
 [[network.ports]]
 host = 8080
 guest = 80
-proto = "tcp"          # "tcp" (default) | "udp" | "tcp,udp"
-description = "Web app"
+proto = "tcp"       # "tcp" (default) | "udp" | "tcp,udp"
+description = "Web server"
 
 [[shares]]
 source = "~/Work"
-mode = "rw"            # "rw" | "ro"
+mode = "rw"         # "rw" (default) | "ro"
 
 [env]
 EDITOR = "nvim"
 ```
 
-## Usage
+### Project-Local Config (`antic.toml`)
 
-```
-antic run [NAME] [-w DIR] [-t|-T] [--] CMD...   run CMD in the guest
-antic shell [NAME]
+You can place an `antic.toml` file at the root of a project repository. When you run `antic` inside that directory (or any subdirectory), it automatically discovers the project guest:
 
-antic guest ls [--json] [-q]
-antic guest create NAME [-p PKG...] [--cpus N] [--memory SIZE] [--network MODE] [--port PORT...]
-antic guest set [NAME] [--cpus N] [--memory SIZE] [--network MODE]
-antic guest edit [NAME]
-antic guest rm NAME... [-y]
-antic guest start|restart [NAME...]
-antic guest stop [NAME...] | --all
-antic guest show [NAME] [--path] [--config] [--json]
-antic guest logs [NAME] [-f] [--journal [-u UNIT] [-n N]]
-antic guest ps [NAME] [--json]
-antic guest kill [NAME] SESSION...
-antic guest apply [NAME]
+```toml
+name = "my-project"
+description = "Project-specific guest environment"
+flake = "nix/guest#my-project"   # or: packages = ["git", "nodejs"]
 
-antic guest install [NAME] PKG... | uninstall [NAME] PKG...
-antic guest mount [NAME] [--ro] DIR... | unmount [NAME] DIR...
-antic guest forward [NAME] PORT... [-p tcp|udp|tcp,udp] [-d DESC] | unforward [NAME] PORT...
-antic guest stats [NAME] [-w] [--json]
-antic skill install [-p] | rm [-p] | path [-p]
-antic doctor | update [--source DIR] | version | completion SHELL
+[spec]
+cpus = 4
+memory = "4G"
+
+[network]
+mode = "internet"
+
+[[shares]]
+source = "."
+mode = "rw"
 ```
 
-When exactly one guest is defined, the `[NAME]` argument can be omitted from guest commands (antic targets that single guest automatically). When multiple guests exist, `NAME` is required. `run` exits with the command's status; antic's own errors exit with 125.
+In `antic.toml`, `name` is required, and relative paths in `flake` and `[[shares]]` are resolved relative to the directory containing `antic.toml`.
 
-Add tools with `antic guest install [NAME] PKG...` (or edit `packages = [...]` in
-`~/.config/antic/guests/<name>.toml` and run `antic guest apply [NAME]`). A changed
-kernel needs `antic guest restart [NAME]`.
+### Custom NixOS Flakes
 
-`apply` refuses to build if the guest flake's lock pins an older state of a
-local-path input, or if a local input lies inside a share.
+For full NixOS configuration beyond a package list, set `flake = "/path/to/flake#attr"` instead of `packages = [...]` and import `antic.nixosModules.guest` (see [`examples/guest`](examples/guest)):
 
-## Caveats
+```nix
+{
+  inputs = {
+    antic.url = "github:RNG999/antic";
+    nixpkgs.follows = "antic/nixpkgs";
+  };
 
-- **Writable shares are trusted input.** Whatever the guest writes into a
-  writable share may later be read or executed on the host: new
-  `.git`/`.claude`/`.envrc`, build scripts, binaries. Review changes, keep
-  host tools from auto-trusting workspaces, and use read-only shares where
-  the guest only needs to read.
-- **Network egress is open in `internet` mode**; shares can be exfiltrated.
-  Use `[network]` with `allow = [...]`, `deny = [...]` or
-  `mode = "none"` for tools that need little or no network.
-- **`allow` is enforced by IP address.** An allowed domain's addresses are
-  often shared CDN addresses (Cloudflare, Fastly, ...), so other sites on the
-  same addresses become reachable too, and data can be sent to anything the
-  allowed services accept (e.g. a gist on github.com). Allow only what is
-  needed.
+  outputs = { antic, nixpkgs, ... }: {
+    nixosConfigurations.antic = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        antic.nixosModules.guest
+        ({ pkgs, ... }: {
+          antic.user = "your-host-username";
+          environment.systemPackages = with pkgs; [ git ];
+        })
+      ];
+    };
+  };
+}
+```
+
+---
+
+## Architecture & Security Model
+
+- **Stateless microVM:** Boots directly from a kernel and initrd via `cloud-hypervisor`. `/` is `tmpfs` (reset on every boot) and `/nix` is a per-guest store (`~/.local/state/antic/guests/<ID>/store/nix`) mounted read-only over `virtiofs`. The guest has no Nix daemon, no bootloader, no SSH daemon, no `sudo`, and no setuid wrappers.
+- **Live switching with rollback:** `antic guest apply` builds the NixOS system on the host, copies the closure into the guest store, and switches the running guest over vsock. If switching fails, it automatically rolls back to the previous generation.
+- **Protected paths in writable shares:** Each share runs an isolated rootless `virtiofsd` mapping only your UID/GID. Inside writable shares, sensitive files and directories that already exist on the host—such as `.git` (including bare repos), `.claude`, `.mcp.json`, `CLAUDE.md`, `AGENTS.md`, `.envrc`, `.vscode`, `.devcontainer`, `mise.toml`, etc.—are bound **read-only** by the host so even guest `root` cannot modify them.
+- **Host-side egress filtering:** Networking runs via [passt] inside a rootless `pasta` network namespace. Firewall rules (`nftables`) and DNS filtering live outside the guest:
+  - `"internet"` (default): allows internet access while blocking LAN subnets, CGNAT/Tailscale (`100.64.0.0/10`), link-local/cloud metadata (`169.254.0.0/16`), and host loopback.
+  - `"lan"`: allows internet and LAN, while still blocking host addresses, loopback, and link-local.
+  - `"none"`: attaches no network device to the VM.
+  - `allow` / `deny`: filters domains (including `*.example.com` wildcards) and CIDRs. When `allow` is set, an in-namespace DNS proxy resolves allowed domains and dynamically populates an `nftables` IP set before returning answers; direct IP connections bypassing DNS (except static CIDR entries) are rejected.
+- **Host sandboxing:** Every host helper unit (`antic-vm@`, `antic-net@`, `antic-share@`) runs under `systemd --user` with `ProtectHome=tmpfs`, `ProtectSystem=strict`, `PrivateTmp`, `PrivatePIDs`, and explicit bind mounts for only the paths it needs.
+
+### Caveats
+
+- **Writable shares are untrusted output:** Files created by the guest inside a writable share (new build scripts, binaries, or newly created dotfiles) remain on the host filesystem. Review changes before executing them on the host, and use `--ro` (`mode = "ro"`) where possible.
+- **Guest flakes must live outside writable shares:** `antic` refuses to build a local flake input located inside a shared directory, and refuses to share hidden directories in `$HOME` or `$PATH` directories.
+- **Shared CDN IPs with `allow`:** Because `allow` rules permit resolved IP addresses in `nftables`, other domains hosted behind the same shared CDN IP addresses become reachable at the IP layer while the entry is active.
 
 [cloud-hypervisor]: https://www.cloudhypervisor.org/
 [virtiofsd]: https://gitlab.com/virtio-fs/virtiofsd

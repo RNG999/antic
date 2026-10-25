@@ -456,7 +456,7 @@ type Info struct {
 	Name        string        `json:"name"`
 	ID          string        `json:"id,omitempty"`
 	Description string        `json:"description,omitempty"`
-	State       string        `json:"state"` // not-created, stopped, running
+	State       string        `json:"state"` // -, stopped, running
 	Since       *time.Time    `json:"since,omitempty"`
 	OS          string        `json:"os"` // builtin [...] or flake#attr
 	Packages    []string      `json:"packages,omitempty"`
@@ -473,7 +473,7 @@ type Info struct {
 func (g *Guest) Inspect(ctx context.Context) (Info, error) {
 	i := Info{
 		Name: g.Name(), ID: g.Inst.ID,
-		Description: g.Cfg.Description, State: "not-created",
+		Description: g.Cfg.Description, State: "-",
 		OS: g.osDesc(), Packages: g.Cfg.Packages,
 		CPUs: g.Cfg.CPUs, Memory: g.Cfg.Memory, Network: g.Cfg.Network.Mode, Ports: g.Cfg.Ports,
 		Shares: g.Shares(ctx),
