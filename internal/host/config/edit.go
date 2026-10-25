@@ -150,11 +150,7 @@ func (c *Config) RemoveShare(guest, path, home string) error {
 			if _, err := toml.Decode(strings.Join(body, "\n"), &s); err != nil {
 				return false
 			}
-			sp := s.Source
-			if sp == "" {
-				sp = s.Path
-			}
-			p, _ := absPath(sp, home, "", nil)
+			p, _ := absPath(s.Source, home, "", nil)
 			return p == path
 		})
 		if removed == 0 {
@@ -214,34 +210,16 @@ type ResourceUpdates struct {
 func (c *Config) SetResources(guest string, u ResourceUpdates, home string) error {
 	return c.editGuest(guest, home, func(lines []string) ([]string, error) {
 		if u.CPUs != nil {
-			if hasTable(lines, "spec") {
-				lines = setTableKey(lines, "spec", "cpus", strconv.Itoa(*u.CPUs))
-			} else {
-				lines = setRootKey(lines, "cpus", strconv.Itoa(*u.CPUs))
-			}
+			lines = setTableKey(lines, "spec", "cpus", strconv.Itoa(*u.CPUs))
 		}
 		if u.Memory != nil {
-			if hasTable(lines, "spec") {
-				lines = setTableKey(lines, "spec", "memory", tomlString(*u.Memory))
-			} else {
-				lines = setRootKey(lines, "memory", tomlString(*u.Memory))
-			}
+			lines = setTableKey(lines, "spec", "memory", tomlString(*u.Memory))
 		}
 		if u.Network != nil {
 			lines = setTableKey(lines, "network", "mode", tomlString(*u.Network))
 		}
 		return lines, nil
 	})
-}
-
-func hasTable(lines []string, tableName string) bool {
-	header := "[" + tableName + "]"
-	for _, l := range lines {
-		if strings.TrimSpace(l) == header {
-			return true
-		}
-	}
-	return false
 }
 
 // setTableKey sets key in [tableName] table. If [tableName] does not exist,

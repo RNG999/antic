@@ -35,8 +35,8 @@ const (
 
 // SpecConfig holds hardware specifications in [spec].
 type SpecConfig struct {
-	CPUs   int    `toml:"cpus" json:"cpus,omitempty"`
-	Memory string `toml:"memory" json:"memory,omitempty"`
+	CPUs   int    `toml:"cpus" json:"cpus"`
+	Memory string `toml:"memory" json:"memory"`
 }
 
 // NetworkConfig holds network settings in [network].
@@ -45,74 +45,6 @@ type NetworkConfig struct {
 	Allow []string `toml:"allow" json:"allow,omitempty"`
 	Deny  []string `toml:"deny" json:"deny,omitempty"`
 	Ports []Port   `toml:"ports" json:"ports,omitempty"`
-}
-
-// UnmarshalTOML supports both `network = "internet"` (string) and
-// `[network]\nmode = "internet"` (table).
-func (n *NetworkConfig) UnmarshalTOML(data any) error {
-	switch v := data.(type) {
-	case string:
-		n.Mode = v
-		return nil
-	case map[string]any:
-		for k := range v {
-			if !slices.Contains([]string{"mode", "allow", "deny", "ports"}, k) {
-				return fmt.Errorf("unknown key %q%s", k, suggest(toml.Key{k}))
-			}
-		}
-		if m, ok := v["mode"].(string); ok {
-			n.Mode = m
-		}
-		if a, ok := v["allow"].([]any); ok {
-			for _, item := range a {
-				if s, ok := item.(string); ok {
-					n.Allow = append(n.Allow, s)
-				}
-			}
-		}
-		if d, ok := v["deny"].([]any); ok {
-			for _, item := range d {
-				if s, ok := item.(string); ok {
-					n.Deny = append(n.Deny, s)
-				}
-			}
-		}
-		switch pts := v["ports"].(type) {
-		case []any:
-			for _, item := range pts {
-				if m, ok := item.(map[string]any); ok {
-					n.Ports = append(n.Ports, decodePortMap(m))
-				}
-			}
-		case []map[string]any:
-			for _, m := range pts {
-				n.Ports = append(n.Ports, decodePortMap(m))
-			}
-		}
-		return nil
-	default:
-		return fmt.Errorf("invalid network value: must be a mode string (e.g. \"internet\") or a [network] section")
-	}
-}
-
-func decodePortMap(m map[string]any) Port {
-	var p Port
-	if h, ok := m["host"].(int64); ok {
-		p.Host = int(h)
-	} else if h, ok := m["host"].(int); ok {
-		p.Host = h
-	}
-	if g, ok := m["guest"].(int64); ok {
-		p.Guest = int(g)
-	} else if g, ok := m["guest"].(int); ok {
-		p.Guest = g
-	} else {
-		p.Guest = p.Host
-	}
-	if desc, ok := m["description"].(string); ok {
-		p.Description = desc
-	}
-	return p
 }
 
 // Port is one host-to-guest TCP port mapping (127.0.0.1:Host -> Guest).
@@ -124,64 +56,13 @@ type Port struct {
 
 // Share is a host directory visible in the guest at the same path (or a remote share).
 type Share struct {
-	Source      string `toml:"source" json:"source,omitempty"`
-	Path        string `toml:"path" json:"path,omitempty"` // legacy alias or canonical local path
-	Target      string `toml:"target" json:"target,omitempty"`
-	Mode        string `toml:"mode" json:"mode,omitempty"` // "rw" | "ro"
-	ReadOnly    bool   `toml:"readonly" json:"readonly,omitempty"`
-	Credentials string `toml:"credentials" json:"credentials,omitempty"`
-}
+	Source      string `toml:"source" json:"source"`
+	Target      string `toml:"target,omitempty" json:"target,omitempty"`
+	Mode        string `toml:"mode" json:"mode"` // "rw" | "ro"
+	Credentials string `toml:"credentials,omitempty" json:"credentials,omitempty"`
 
-// UnmarshalTOML unmarshals a share entry, supporting both:
-// - New format: `source = "~/Work"`, `mode = "rw"` (or `"ro"`)
-// - Legacy format: `path = "~/Work"`, `readonly = true`
-func (s *Share) UnmarshalTOML(data any) error {
-	m, ok := data.(map[string]any)
-	if !ok {
-		return fmt.Errorf("invalid share entry: expected a table")
-	}
-	for k := range m {
-		if !slices.Contains([]string{"source", "path", "target", "mode", "readonly", "credentials"}, k) {
-			return fmt.Errorf("unknown key %q%s", k, suggest(toml.Key{k}))
-		}
-	}
-	if src, ok := m["source"].(string); ok {
-		s.Source = src
-	}
-	if p, ok := m["path"].(string); ok {
-		s.Path = p
-		if s.Source == "" {
-			s.Source = p
-		}
-	}
-	if tgt, ok := m["target"].(string); ok {
-		s.Target = tgt
-	}
-	if md, ok := m["mode"].(string); ok {
-		s.Mode = md
-		switch s.Mode {
-		case "ro":
-			s.ReadOnly = true
-		case "rw":
-			s.ReadOnly = false
-		default:
-			return fmt.Errorf("invalid share mode %q (must be \"rw\" or \"ro\")", s.Mode)
-		}
-	} else if ro, ok := m["readonly"].(bool); ok {
-		s.ReadOnly = ro
-		if ro {
-			s.Mode = "ro"
-		} else {
-			s.Mode = "rw"
-		}
-	} else {
-		s.Mode = "rw"
-		s.ReadOnly = false
-	}
-	if creds, ok := m["credentials"].(string); ok {
-		s.Credentials = creds
-	}
-	return nil
+	Path     string `toml:"-" json:"path"` // normalized local absolute path
+	ReadOnly bool   `toml:"-" json:"readonly,omitempty"`
 }
 
 // Guest is one ~/.config/antic/guests/<name>.toml file.
@@ -189,23 +70,20 @@ type Guest struct {
 	Name string `toml:"-"`
 	Path string `toml:"-"`
 
-	Description string   `toml:"description"`
-	Packages    []string `toml:"packages"`
-	// Optional custom flake ("/path/to/flake" or "/path/to/flake#attr").
-	// When empty, antic builds its built-in guest configuration with Packages.
-	Flake string `toml:"flake"`
+	Description string            `toml:"description"`
+	Packages    []string          `toml:"packages"`
+	Flake       string            `toml:"flake"`
+	Spec        SpecConfig        `toml:"spec"`
+	Network     NetworkConfig     `toml:"network"`
+	Shares      []Share           `toml:"shares"`
+	Env         map[string]string `toml:"env"`
 
-	Spec    SpecConfig        `toml:"spec"`
-	CPUs    int               `toml:"cpus"`   // fallback if [spec] omitted
-	Memory  string            `toml:"memory"` // fallback if [spec] omitted
-	Network NetworkConfig     `toml:"network"`
-	Shares  []Share           `toml:"shares"`
-	Ports   []Port            `toml:"ports"`  // fallback if [[network.ports]] omitted
-	Env     map[string]string `toml:"env"`
-
+	CPUs         int            `toml:"-"`
+	Memory       string         `toml:"-"`
+	Ports        []Port         `toml:"-"`
+	MemoryBytes  int64          `toml:"-"`
 	FlakePath    string         `toml:"-"`
 	FlakeAttr    string         `toml:"-"`
-	MemoryBytes  int64          `toml:"-"`
 	AllowDomains []string       `toml:"-"` // lowercase, no trailing dot
 	AllowNets    []netip.Prefix `toml:"-"` // masked
 	DenyDomains  []string       `toml:"-"` // lowercase, no trailing dot
@@ -381,31 +259,23 @@ func (g *Guest) normalize(home string) []error {
 			errs = append(errs, fmt.Errorf("packages: invalid package attribute %q", p))
 		}
 	}
-	if g.Spec.CPUs > 0 {
-		g.CPUs = g.Spec.CPUs
-	} else if g.CPUs > 0 {
-		g.Spec.CPUs = g.CPUs
-	}
-	if g.Spec.Memory != "" {
-		g.Memory = g.Spec.Memory
-	} else if g.Memory != "" {
-		g.Spec.Memory = g.Memory
-	}
+	g.CPUs = g.Spec.CPUs
 	if g.CPUs == 0 {
 		g.CPUs = 2
 		g.Spec.CPUs = 2
 	}
 	if g.CPUs < 1 || g.CPUs > 256 {
-		errs = append(errs, errors.New("cpus must be between 1 and 256"))
+		errs = append(errs, errors.New("spec.cpus must be between 1 and 256"))
 	}
+	g.Memory = g.Spec.Memory
 	if g.Memory == "" {
 		g.Memory = "4G"
 		g.Spec.Memory = "4G"
 	}
 	if n, err := ParseSize(g.Memory); err != nil {
-		errs = append(errs, fmt.Errorf("memory: %w", err))
+		errs = append(errs, fmt.Errorf("spec.memory: %w", err))
 	} else if n < 256<<20 {
-		errs = append(errs, errors.New("memory must be at least 256M"))
+		errs = append(errs, errors.New("spec.memory must be at least 256M"))
 	} else {
 		g.MemoryBytes = n
 	}
@@ -415,9 +285,10 @@ func (g *Guest) normalize(home string) []error {
 	if !slices.Contains([]string{NetworkNone, NetworkInternet, NetworkLAN}, g.Network.Mode) {
 		errs = append(errs, errors.New("network.mode must be \"none\", \"internet\" or \"lan\""))
 	}
+	g.Ports = g.Network.Ports
 	if g.Network.Mode == NetworkNone {
 		if len(g.Ports) > 0 {
-			errs = append(errs, errors.New("ports cannot be used when network.mode is \"none\""))
+			errs = append(errs, errors.New("network.ports cannot be used when network.mode is \"none\""))
 		}
 		if len(g.Network.Allow) > 0 {
 			errs = append(errs, errors.New("network.allow cannot be used when network.mode is \"none\""))
@@ -458,9 +329,6 @@ func (g *Guest) normalize(home string) []error {
 			}
 		}
 	}
-	if len(g.Network.Ports) > 0 {
-		g.Ports = append(g.Ports, g.Network.Ports...)
-	}
 	for k, v := range g.Env {
 		if k == "" || strings.Contains(k, "=") || strings.ContainsRune(k, 0) {
 			errs = append(errs, fmt.Errorf("env: invalid variable name %q", k))
@@ -476,23 +344,35 @@ func (g *Guest) normalize(home string) []error {
 		}
 		hp, gp := g.Ports[i].Host, g.Ports[i].Guest
 		if hp < 1 || hp > 65535 || gp < 1 || gp > 65535 {
-			errs = append(errs, fmt.Errorf("ports[%d]: port numbers must be between 1 and 65535", i))
+			errs = append(errs, fmt.Errorf("network.ports[%d]: port numbers must be between 1 and 65535", i))
 			continue
 		}
 		if seenPorts[hp] {
-			errs = append(errs, fmt.Errorf("ports[%d]: duplicate host port %d", i, hp))
+			errs = append(errs, fmt.Errorf("network.ports[%d]: duplicate host port %d", i, hp))
 			continue
 		}
 		seenPorts[hp] = true
 	}
 	for i := range g.Shares {
-		sp := g.Shares[i].Path
-		if sp == "" {
-			sp = g.Shares[i].Source
+		if g.Shares[i].Source == "" {
+			errs = append(errs, fmt.Errorf("shares[%d].source is required", i))
+			continue
 		}
-		if !strings.Contains(sp, "://") {
+		if g.Shares[i].Mode == "" {
+			g.Shares[i].Mode = "rw"
+		}
+		switch g.Shares[i].Mode {
+		case "ro":
+			g.Shares[i].ReadOnly = true
+		case "rw":
+			g.Shares[i].ReadOnly = false
+		default:
+			errs = append(errs, fmt.Errorf("shares[%d].mode must be \"rw\" or \"ro\"", i))
+		}
+		src := g.Shares[i].Source
+		if !strings.Contains(src, "://") {
 			var abs string
-			abs, errs = absPath(sp, home, fmt.Sprintf("shares[%d].source", i), errs)
+			abs, errs = absPath(src, home, fmt.Sprintf("shares[%d].source", i), errs)
 			g.Shares[i].Path = abs
 			g.Shares[i].Source = tildePath(abs, home)
 			if g.Shares[i].Target == "" {
@@ -505,13 +385,6 @@ func (g *Guest) normalize(home string) []error {
 				var abs string
 				abs, errs = absPath(g.Shares[i].Target, home, fmt.Sprintf("shares[%d].target", i), errs)
 				g.Shares[i].Target = abs
-			}
-		}
-		if g.Shares[i].Mode == "" {
-			if g.Shares[i].ReadOnly {
-				g.Shares[i].Mode = "ro"
-			} else {
-				g.Shares[i].Mode = "rw"
 			}
 		}
 	}
@@ -632,9 +505,9 @@ func ParseSize(s string) (int64, error) {
 var knownKeys = []string{
 	"description", "packages", "flake",
 	"spec", "cpus", "memory",
-	"network", "mode", "allow", "deny",
-	"shares", "source", "path", "target", "mode", "readonly", "credentials",
-	"ports", "host", "guest", "env",
+	"network", "mode", "allow", "deny", "ports",
+	"shares", "source", "target", "mode", "credentials",
+	"host", "guest", "env",
 }
 
 // suggest proposes the closest known key for a misspelled one.

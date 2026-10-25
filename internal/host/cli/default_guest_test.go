@@ -21,7 +21,7 @@ func setupTestAppWithGuests(t *testing.T, guestNames ...string) *app {
 	}
 
 	for _, name := range guestNames {
-		content := "memory = \"2G\"\ncpus = 2\nnetwork = \"internet\"\n"
+		content := "[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\n"
 		if err := os.WriteFile(filepath.Join(configDir, name+".toml"), []byte(content), 0o644); err != nil {
 			t.Fatalf("failed to write guest file: %v", err)
 		}

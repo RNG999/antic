@@ -24,22 +24,28 @@ func writeGuest(t *testing.T, dir, name, content string) string {
 const validDev = `# the dev guest
 description = "tools for my agent"
 packages = ["git", "ripgrep"]
+
+[spec]
 cpus = 4
 memory = "8G"
 
-[[shares]]
-path = "~/Work"
+[network]
+mode = "internet"
 
-[[shares]]
-path = "~/Docs/spec"
-readonly = true
-
-[[ports]]
+[[network.ports]]
 host = 3000
 
-[[ports]]
+[[network.ports]]
 host = 8080
 guest = 80
+
+[[shares]]
+source = "~/Work"
+mode = "rw"
+
+[[shares]]
+source = "~/Docs/spec"
+mode = "ro"
 `
 
 const validLab = `flake = "/srv/guest#lab"
@@ -80,23 +86,29 @@ func TestLoadDefaults(t *testing.T) {
 
 func TestLoadRejects(t *testing.T) {
 	for name, tc := range map[string]struct{ content, want string }{
-		"unknown key": {strings.Replace(validDev, `path = "~/Work"`, "path = \"~/Work\"\nread_only = true", 1), `did you mean "readonly"`},
-		"bad memory":  {strings.Replace(validDev, `"8G"`, `"8GiB"`, 1), "memory"},
-		"bad port":    {strings.Replace(validDev, `host = 3000`, `host = 70000`, 1), "ports"},
-		"dup port":    {strings.Replace(validDev, `host = 3000`, `host = 8080`, 1), "duplicate host port"},
-		"relative":    {strings.Replace(validLab, `"/srv/guest#lab"`, `"guest#lab"`, 1), "must be absolute"},
-		"network":     {strings.Replace(validLab, `"none"`, `"off"`, 1), "network.mode must be"},
-		"overlap":     {validDev + "\n[[shares]]\npath = \"~/Work/sub\"\n", "overlap"},
-		"allow none":  {validLab + "allow = [\"github.com\"]\n", "network.allow cannot be used"},
-		"allow bare ip": {"[network]\nallow = [\"1.1.1.1\"]\n", "IP addresses must use CIDR notation"},
-		"allow lo":    {"[network]\nallow = [\"127.0.0.1/32\"]\n", "never reach"},
-		"allow all":   {"[network]\nallow = [\"0.0.0.0/0\"]\n", "never reach"},
-		"allow all6":  {"[network]\nallow = [\"::/0\"]\n", "never reach"},
-		"allow meta":  {"[network]\nallow = [\"169.254.169.254/32\"]\n", "never reach"},
-		"allow tld":   {"[network]\nallow = [\"com\"]\n", "at least two labels"},
-		"allow bad":   {"[network]\nallow = [\"git hub.com\"]\n", "invalid domain"},
-		"allow cidr":  {"[network]\nallow = [\"10.0.0.0/33\"]\n", "invalid CIDR"},
-		"allow empty": {"[network]\nallow = [\"\"]\n", "empty"},
+		"unknown key":             {validDev + "\nunknown_field = true\n", "unknown key"},
+		"bad memory":              {strings.Replace(validDev, `"8G"`, `"8GiB"`, 1), "memory"},
+		"bad port":                {strings.Replace(validDev, `host = 3000`, `host = 70000`, 1), "network.ports"},
+		"dup port":                {strings.Replace(validDev, `host = 3000`, `host = 8080`, 1), "duplicate host port"},
+		"relative":                {strings.Replace(validLab, `"/srv/guest#lab"`, `"guest#lab"`, 1), "must be absolute"},
+		"network":                 {strings.Replace(validLab, `"none"`, `"off"`, 1), "network.mode must be"},
+		"overlap":                 {validDev + "\n[[shares]]\nsource = \"~/Work/sub\"\nmode = \"rw\"\n", "overlap"},
+		"reject top-level cpus":   {validDev + "\ncpus = 2\n", "unknown key"},
+		"reject top-level memory": {validDev + "\nmemory = \"4G\"\n", "unknown key"},
+		"reject top-level ports":  {validDev + "\n[[ports]]\nhost = 8080\n", "unknown key"},
+		"reject legacy share path":     {validDev + "\n[[shares]]\npath = \"~/tmp\"\n", "unknown key"},
+		"reject legacy share readonly": {validDev + "\n[[shares]]\nsource = \"~/tmp\"\nreadonly = true\n", "unknown key"},
+		"reject scalar network":        {"description = \"test\"\nnetwork = \"internet\"\n[spec]\ncpus = 4\nmemory = \"8G\"\n", "type mismatch"},
+		"allow none":              {validLab + "allow = [\"github.com\"]\n", "network.allow cannot be used"},
+		"allow bare ip":           {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"1.1.1.1\"]\n", "IP addresses must use CIDR notation"},
+		"allow lo":                {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"127.0.0.1/32\"]\n", "never reach"},
+		"allow all":               {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"0.0.0.0/0\"]\n", "never reach"},
+		"allow all6":              {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"::/0\"]\n", "never reach"},
+		"allow meta":              {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"169.254.169.254/32\"]\n", "never reach"},
+		"allow tld":               {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"com\"]\n", "at least two labels"},
+		"allow bad":               {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"git hub.com\"]\n", "invalid domain"},
+		"allow cidr":              {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"10.0.0.0/33\"]\n", "invalid CIDR"},
+		"allow empty":             {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"\"]\n", "empty"},
 	} {
 		dir := t.TempDir()
 		writeGuest(t, dir, "dev", tc.content)
@@ -126,7 +138,7 @@ func TestEdits(t *testing.T) {
 		func(c *Config) error {
 			return c.CreateGuest("new", Guest{Packages: []string{"git"}}, home)
 		},
-		func(c *Config) error { return c.AddShare("new", Share{Path: "/home/alice/a b", ReadOnly: true}, home) },
+		func(c *Config) error { return c.AddShare("new", Share{Source: "/home/alice/a b", Mode: "ro"}, home) },
 		func(c *Config) error { return c.SetPackages("dev", []string{"git", "jq"}, home) },
 		func(c *Config) error { return c.AddPort("new", Port{Host: 5173, Guest: 5173}, home) },
 		func(c *Config) error { return c.RemovePort("dev", 3000, home) },
