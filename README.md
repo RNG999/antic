@@ -139,7 +139,7 @@ antic guest path [NAME]
 antic guest check
 antic guest rm NAME... [-y]
 antic guest start|stop|restart NAME...
-antic guest inspect NAME [--json]
+antic guest show NAME [--json]
 antic guest logs NAME [-f] [--journal [-u UNIT] [-n N]]
 antic guest ps NAME [--json]
 antic guest kill NAME SESSION...

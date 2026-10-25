@@ -70,7 +70,7 @@ antic guest port rm <name> 8080
 
 ```sh
 antic guest ls
-antic guest inspect <name>
+antic guest show <name>
 
 # Create a new guest (automatically builds and starts it)
 antic guest create dev -p git -p ripgrep --cpus 4 --memory 8G --network internet

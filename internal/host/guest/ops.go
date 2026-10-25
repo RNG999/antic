@@ -409,7 +409,7 @@ func (g *Guest) osDesc() string {
 	return "builtin [" + strings.Join(g.Cfg.Packages, " ") + "]"
 }
 
-// Info describes a guest for "guest ls" and "guest inspect".
+// Info describes a guest for "guest ls" and "guest show".
 type Info struct {
 	Name        string        `json:"name"`
 	ID          string        `json:"id,omitempty"`

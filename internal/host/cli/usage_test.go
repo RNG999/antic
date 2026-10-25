@@ -23,7 +23,7 @@ func UsageText() string {
 	buf.WriteString("antic guest check\n")
 	buf.WriteString("antic guest rm NAME... [-y]\n")
 	buf.WriteString("antic guest start|stop|restart NAME...\n")
-	buf.WriteString("antic guest inspect NAME [--json]\n")
+	buf.WriteString("antic guest show NAME [--json]\n")
 	buf.WriteString("antic guest logs NAME [-f] [--journal [-u UNIT] [-n N]]\n")
 	buf.WriteString("antic guest ps NAME [--json]\n")
 	buf.WriteString("antic guest kill NAME SESSION...\n")

@@ -29,7 +29,7 @@ func (a *app) guestCmd() *cobra.Command {
 		a.guestApply(),
 		a.guestPs(),
 		a.guestKill(),
-		a.guestInspect(),
+		a.guestShow(),
 		a.guestLogs(),
 		a.pkgCmd(),
 		a.shareCmd(),
@@ -396,9 +396,9 @@ func (a *app) guestRestart() *cobra.Command {
 	}
 }
 
-func (a *app) guestInspect() *cobra.Command {
+func (a *app) guestShow() *cobra.Command {
 	c := &cobra.Command{
-		Use:               "inspect NAME",
+		Use:               "show NAME",
 		Short:             "Show a guest's configuration and state",
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: a.guestArgs,
