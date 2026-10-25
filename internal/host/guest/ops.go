@@ -44,20 +44,20 @@ func (g *Guest) Apply(ctx context.Context) error {
 			return err
 		}
 		g.m.logf("building %s#nixosConfigurations.%s...", g.Cfg.FlakePath, g.Cfg.FlakeAttr)
-		system, err = nix.Build(ctx, g.Cfg.FlakePath, "nixosConfigurations."+g.Cfg.FlakeAttr+".config.system.build.toplevel")
+		system, err = nix.BuildFlakeCached(ctx, g.m.Dirs.CacheDir(), g.Cfg.FlakePath, g.Cfg.FlakeAttr)
 		if err != nil {
 			return err
 		}
 	} else {
-		dir, cleanup, err := nixbuild.WriteBuiltinFlake(g.m.User, g.Cfg.Packages)
+		var hit bool
+		system, hit, err = nix.BuildBuiltinCached(ctx, g.m.Dirs.CacheDir(), g.m.User, g.Cfg.Packages, func() {
+			g.m.logf("building guest %s (%s)...", g.Name(), g.osDesc())
+		})
 		if err != nil {
 			return err
 		}
-		defer cleanup()
-		g.m.logf("building guest %s (%s)...", g.Name(), g.osDesc())
-		system, err = nix.Build(ctx, dir, "nixosConfigurations.antic.config.system.build.toplevel")
-		if err != nil {
-			return err
+		if hit {
+			g.m.logf("using cached guest %s (%s): %s", g.Name(), g.osDesc(), system)
 		}
 	}
 	if !g.Created {
@@ -70,9 +70,11 @@ func (g *Guest) Apply(ctx context.Context) error {
 	}
 	// Record config origin
 	_ = os.WriteFile(g.Inst.OriginFile(), []byte(g.Cfg.Path+"\n"), 0o600)
-	g.m.logf("installing %s into the guest store...", system)
-	if err := nix.Install(ctx, g.store(), system); err != nil {
-		return err
+	if cur, _ := g.store().Current(); cur != system {
+		g.m.logf("installing %s into the guest store...", system)
+		if err := nix.Install(ctx, g.store(), system); err != nil {
+			return err
+		}
 	}
 	bt, err := g.readBoot(ctx)
 	if err != nil {

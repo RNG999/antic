@@ -58,6 +58,7 @@ func Default() (Dirs, error) {
 }
 
 func (d Dirs) GuestsConfigDir() string { return filepath.Join(d.ConfigDir, "guests") }
+func (d Dirs) CacheDir() string        { return filepath.Join(d.StateRoot, "cache") }
 func (d Dirs) guestsDir() string       { return filepath.Join(d.StateRoot, "guests") }
 func (d Dirs) namesDir() string        { return filepath.Join(d.StateRoot, "names") }
 

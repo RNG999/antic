@@ -95,15 +95,19 @@ antic guest kill [NAME] SESSION...                    # Stop a running session u
 antic guest logs [NAME] [-f] [--journal [-u UNIT] [-n N]]
 ```
 
-### Claude Code Skill & Host Maintenance
+### Cache, Claude Code Skill & Host Maintenance
 
 ```sh
+antic cache ls [--json] [-q]                          # List cached guest OS builds
+antic cache rm [KEY...] [--all] [--gc]                # Remove cached builds (and optionally run Nix GC)
+antic cache gc                                        # Prune orphaned state and run 'nix store gc'
+
 antic skill install [-p]                              # Install SKILL.md (~/.claude/skills/antic or ./.claude/skills/antic)
 antic skill rm [-p]
 antic skill path [-p]
 
 antic doctor                                          # Check KVM, helper binaries, Nix, and guest configs
-antic update [--source DIR]                           # Build and install antic and cloud-hypervisor
+antic update [--source DIR]                           # Build and install antic and helper binaries
 antic version
 antic completion bash|zsh|fish
 ```
