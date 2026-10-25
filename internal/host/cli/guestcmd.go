@@ -37,7 +37,7 @@ func (a *app) guestCmd() *cobra.Command {
 		a.guestUnmount(),
 		a.guestForward(),
 		a.guestUnforward(),
-		a.guestMonitor(),
+		a.guestStats(),
 	)
 	return c
 }

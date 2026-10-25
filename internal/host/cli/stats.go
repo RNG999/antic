@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 
 	"github.com/RNG999/antic/internal/host/guest"
 )
@@ -30,7 +29,7 @@ type GuestStats struct {
 	CPUPercent  float64 `json:"cpu_percent"`
 	MemoryUsed  int64   `json:"memory_used"`
 	MemoryLimit string  `json:"memory_limit"`
-	Tasks       int     `json:"tasks"`
+	PIDs        int     `json:"pids"`
 	Sessions    int     `json:"sessions"`
 }
 
@@ -38,7 +37,7 @@ type sample struct {
 	time     time.Time
 	cpuUsec  int64
 	memBytes int64
-	tasks    int
+	pids     int
 	sessions int
 	state    string
 	uptime   string
@@ -81,7 +80,7 @@ func readGuestSample(ctx context.Context, g *guest.Guest) sample {
 	}
 	// Read tasks / pids count
 	if b, err := os.ReadFile(filepath.Join(cg, "pids.current")); err == nil {
-		s.tasks, _ = strconv.Atoi(strings.TrimSpace(string(b)))
+		s.pids, _ = strconv.Atoi(strings.TrimSpace(string(b)))
 	}
 	// Read running command sessions count
 	if ss, err := g.Sessions(ctx); err == nil {
@@ -98,7 +97,7 @@ func computeStats(name string, prev, curr sample) GuestStats {
 		CPUs:        curr.cpus,
 		MemoryUsed:  curr.memBytes,
 		MemoryLimit: curr.memLimit,
-		Tasks:       curr.tasks,
+		PIDs:        curr.pids,
 		Sessions:    curr.sessions,
 	}
 	if curr.state == "running" && prev.state == "running" {
@@ -131,34 +130,33 @@ func formatBytes(b int64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
-func printMonitorTable(w io.Writer, stats []GuestStats) {
+func printStatsTable(w io.Writer, stats []GuestStats) {
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tSTATE\tUPTIME\tCPUS\tCPU%\tMEM (HOST / LIMIT)\tTASKS\tSESSIONS")
+	fmt.Fprintln(tw, "NAME\tSTATE\tCPUS\tCPU%\tMEM USAGE / LIMIT\tPIDS\tSESSIONS")
 	for _, s := range stats {
 		cpuStr := "-"
-		tasksStr := "-"
+		pidsStr := "-"
 		sessStr := "-"
 		if s.State == "running" {
 			cpuStr = fmt.Sprintf("%.1f%%", s.CPUPercent)
-			tasksStr = strconv.Itoa(s.Tasks)
+			pidsStr = strconv.Itoa(s.PIDs)
 			sessStr = strconv.Itoa(s.Sessions)
 		}
 		memStr := formatMem(s.MemoryUsed, s.MemoryLimit)
 		if s.State != "running" {
 			memStr = "-"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
-			s.Name, s.State, s.Uptime, s.CPUs, cpuStr, memStr, tasksStr, sessStr)
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
+			s.Name, s.State, s.CPUs, cpuStr, memStr, pidsStr, sessStr)
 	}
 	tw.Flush()
 }
 
-func (a *app) guestMonitor() *cobra.Command {
-	var interval time.Duration
-	var once bool
+func (a *app) guestStats() *cobra.Command {
+	var watch bool
 	cmd := &cobra.Command{
-		Use:               "monitor [NAME]",
-		Short:             "Monitor guest resource usage (CPU, memory, tasks, sessions)",
+		Use:               "stats [NAME]",
+		Short:             "Display guest resource usage statistics",
 		Args:              cobra.MaximumNArgs(1),
 		ValidArgsFunction: a.guestArgs,
 		RunE: func(c *cobra.Command, args []string) error {
@@ -183,9 +181,8 @@ func (a *app) guestMonitor() *cobra.Command {
 				return fmt.Errorf("no guests defined (run \"antic guest create <name>\")")
 			}
 
-			// If once or non-terminal, sample over a short window and output single snapshot
-			isTerm := term.IsTerminal(int(os.Stdout.Fd()))
-			if once || !isTerm {
+			// If not watch mode, sample over a short window and output single snapshot
+			if !watch {
 				prev := make(map[string]sample)
 				for _, g := range targets {
 					prev[g.Name()] = readGuestSample(c.Context(), g)
@@ -201,11 +198,11 @@ func (a *app) guestMonitor() *cobra.Command {
 					enc.SetIndent("", "  ")
 					return enc.Encode(stats)
 				}
-				printMonitorTable(os.Stdout, stats)
+				printStatsTable(os.Stdout, stats)
 				return nil
 			}
 
-			// Interactive watch mode
+			// Watch mode: continuously stream updates
 			sigCh := make(chan os.Signal, 1)
 			signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 			defer signal.Stop(sigCh)
@@ -215,7 +212,7 @@ func (a *app) guestMonitor() *cobra.Command {
 				prev[g.Name()] = readGuestSample(c.Context(), g)
 			}
 
-			ticker := time.NewTicker(interval)
+			ticker := time.NewTicker(time.Second)
 			defer ticker.Stop()
 
 			// Print initial snapshot immediately
@@ -226,9 +223,13 @@ func (a *app) guestMonitor() *cobra.Command {
 				initialStats = append(initialStats, computeStats(g.Name(), prev[g.Name()], curr))
 				prev[g.Name()] = curr
 			}
-			fmt.Print("\033[H\033[2J")
-			fmt.Printf("antic guest monitor (interval %v, press Ctrl+C to quit) - %s\n\n", interval, time.Now().Format("15:04:05"))
-			printMonitorTable(os.Stdout, initialStats)
+			if a.json {
+				enc := json.NewEncoder(os.Stdout)
+				_ = enc.Encode(initialStats)
+			} else {
+				fmt.Print("\033[H\033[2J")
+				printStatsTable(os.Stdout, initialStats)
+			}
 
 			for {
 				select {
@@ -243,15 +244,18 @@ func (a *app) guestMonitor() *cobra.Command {
 						stats = append(stats, computeStats(g.Name(), prev[g.Name()], curr))
 						prev[g.Name()] = curr
 					}
-					fmt.Print("\033[H\033[2J")
-					fmt.Printf("antic guest monitor (interval %v, press Ctrl+C to quit) - %s\n\n", interval, time.Now().Format("15:04:05"))
-					printMonitorTable(os.Stdout, stats)
+					if a.json {
+						enc := json.NewEncoder(os.Stdout)
+						_ = enc.Encode(stats)
+					} else {
+						fmt.Print("\033[H\033[2J")
+						printStatsTable(os.Stdout, stats)
+					}
 				}
 			}
 		},
 	}
-	cmd.Flags().DurationVarP(&interval, "interval", "i", time.Second, "refresh interval")
-	cmd.Flags().BoolVar(&once, "once", false, "print a single snapshot and exit")
+	cmd.Flags().BoolVarP(&watch, "watch", "w", false, "continuously stream resource statistics")
 	a.jsonFlag(cmd)
 	return cmd
 }
