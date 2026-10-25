@@ -109,6 +109,11 @@ func (a *app) updateCmd() *cobra.Command {
 		Short: "Build antic (and cloud-hypervisor) and install them",
 		Args:  cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
+			for _, dir := range []string{a.dirs.GuestsConfigDir(), a.dirs.StateRoot} {
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					return err
+				}
+			}
 			unlockUpdate, err := a.dirs.LockWithReason("update", "antic update")
 			if err != nil {
 				return err
@@ -131,18 +136,37 @@ func (a *app) updateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			for _, t := range []struct{ attr, bin, dst string }{
-				{"antic", "antic", filepath.Join(a.dirs.BinDir, "antic")},
-				{"cloud-hypervisor", "cloud-hypervisor", filepath.Join(a.dirs.Libexec, "cloud-hypervisor")},
-			} {
-				out, err := nix.Build(c.Context(), src, t.attr)
-				if err != nil {
+			anticOut, err := nix.Build(c.Context(), src, "antic")
+			if err != nil {
+				return err
+			}
+			anticDst := filepath.Join(a.dirs.BinDir, "antic")
+			if err := install(nix.Real(anticOut)+"/bin/antic", anticDst); err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "antic: installed %s\n", anticDst)
+
+			gcRoot := filepath.Join(a.dirs.StateRoot, "libexec")
+			libexecOut, err := nix.BuildLink(c.Context(), src, "libexec", gcRoot)
+			if err != nil {
+				return err
+			}
+			binDir := filepath.Join(nix.Real(libexecOut), "bin")
+			for _, name := range []string{"cloud-hypervisor", "virtiofsd", "passt", "pasta", "passt.avx2", "pasta.avx2", "nft"} {
+				sp := filepath.Join(binDir, name)
+				if _, err := os.Stat(sp); err != nil {
+					if strings.HasSuffix(name, ".avx2") {
+						continue
+					}
 					return err
 				}
-				if err := install(nix.Real(out)+"/bin/"+t.bin, t.dst); err != nil {
+				dp := filepath.Join(a.dirs.Libexec, name)
+				if err := install(sp, dp); err != nil {
 					return err
 				}
-				fmt.Fprintf(os.Stderr, "antic: installed %s\n", t.dst)
+				if !strings.HasSuffix(name, ".avx2") {
+					fmt.Fprintf(os.Stderr, "antic: installed %s\n", dp)
+				}
 			}
 			return nil
 		},

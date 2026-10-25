@@ -8,36 +8,29 @@ Everything runs rootless as your own user with no privileged daemon. Host direct
 
 ## Requirements
 
-- **Linux** with KVM (`/dev/kvm`) and **systemd ≥ 257** (user units with `PrivatePIDs`).
-- **Host packages** (`virtiofsd`, `passt`, `nftables`):
-  ```sh
-  # Arch Linux
-  sudo pacman -S virtiofsd passt nftables
-  ```
-- **Nix** with `nix-command` and `flakes` enabled.
-  - **Standard multi-user Nix (`nix-daemon`):**
-    ```sh
-    sudo systemctl enable --now nix-daemon.socket
-    mkdir -p ~/.config/nix
-    echo "experimental-features = nix-command flakes" >> ~/.config/nix/nix.conf
-    ```
-  - **Rootless Nix (no daemon required; `root=` must be an expanded absolute path):**
-    ```sh
-    mkdir -p ~/.config/nix
-    printf "experimental-features = nix-command flakes\nstore = local?root=%s/.local/share/nix-root\n" "$HOME" > ~/.config/nix/nix.conf
-    ```
+- **Linux** (`x86_64` or `aarch64`) with KVM (`/dev/kvm`) and **systemd ≥ 257** (user units with `PrivatePIDs`).
+- **Nix** with flakes.
+
+`antic update` installs `antic` (`~/.local/bin/antic`) along with `cloud-hypervisor`, `virtiofsd`, `passt`/`pasta`, and `nft` into `~/.local/libexec/antic/` from `nixpkgs`, so no extra virtualization or firewall packages need to be installed on the host.
 
 ## Setup & Quickstart
 
-Install `antic` (`~/.local/bin/antic`) and the static `cloud-hypervisor` binary (`~/.local/libexec/antic/cloud-hypervisor`):
+Run the installer script to ensure Nix is configured, build and install `antic` and its helper binaries, and verify the setup:
 
 ```sh
-# Install from GitHub (or use `nix run path:. -- update --source .` from a local checkout)
-nix run github:RNG999/antic -- update
+curl -fsSL https://raw.githubusercontent.com/RNG999/antic/main/install.sh | sh
+```
 
-# Verify host prerequisites
+Or manually with `nix run`:
+
+```sh
+nix --extra-experimental-features "nix-command flakes" run github:RNG999/antic -- update
 antic doctor
+```
 
+Then create a guest and run commands inside it:
+
+```sh
 # Create and start a guest named "dev" with git and ripgrep installed
 antic guest create dev -p git -p ripgrep
 

@@ -19,8 +19,8 @@ type Nix struct {
 	root string // host directory backing /nix/store ("" for a real /nix)
 }
 
-// New finds nix and its store root (rootless "local?root=..." stores).
-func New() (*Nix, error) {
+// findNix locates the nix binary on PATH or in ~/.local/bin/nix.
+func findNix() (string, error) {
 	bin, err := exec.LookPath("nix")
 	if err != nil {
 		if home, herr := os.UserHomeDir(); herr == nil {
@@ -31,10 +31,32 @@ func New() (*Nix, error) {
 		}
 	}
 	if err != nil {
-		return nil, fmt.Errorf("nix not found: %w", err)
+		return "", fmt.Errorf("nix not found: %w", err)
+	}
+	return bin, nil
+}
+
+// withNixConfig ensures nix-command and flakes are enabled even if nix.conf
+// has not configured experimental-features yet.
+func withNixConfig(cmd *exec.Cmd) *exec.Cmd {
+	env := os.Environ()
+	cfg := os.Getenv("NIX_CONFIG")
+	if cfg != "" {
+		cfg += "\n"
+	}
+	cfg += "extra-experimental-features = nix-command flakes\n"
+	cmd.Env = append(env, "NIX_CONFIG="+cfg)
+	return cmd
+}
+
+// New finds nix and its store root (rootless "local?root=..." stores).
+func New() (*Nix, error) {
+	bin, err := findNix()
+	if err != nil {
+		return nil, err
 	}
 	n := &Nix{bin: bin}
-	out, err := exec.Command(bin, "config", "show", "store").Output()
+	out, err := withNixConfig(exec.Command(bin, "config", "show", "store")).Output()
 	if err != nil {
 		return nil, fmt.Errorf("nix config show store: %w", err)
 	}
@@ -49,13 +71,27 @@ func New() (*Nix, error) {
 	return n, nil
 }
 
+// Root returns the host directory backing /nix ("" when /nix is the real root store).
+func (n *Nix) Root() string { return n.root }
+
 // Real maps a store path to where it is on the host.
 func (n *Nix) Real(storePath string) string { return filepath.Join(n.root, storePath) }
 
 // Build builds flake#attr and returns its store path.
 func (n *Nix) Build(ctx context.Context, flake, attr string) (string, error) {
+	return n.BuildLink(ctx, flake, attr, "")
+}
+
+// BuildLink builds flake#attr, optionally registering outLink as a GC root
+// symlink (or --no-link if outLink is empty), and returns its store path.
+func (n *Nix) BuildLink(ctx context.Context, flake, attr, outLink string) (string, error) {
 	ref := flake
-	args := []string{"build", "--no-link", "--print-out-paths"}
+	args := []string{"build", "--print-out-paths"}
+	if outLink != "" {
+		args = append(args, "--out-link", outLink)
+	} else {
+		args = append(args, "--no-link")
+	}
 	if filepath.IsAbs(flake) {
 		ref = "path:" + flake
 	} else {
@@ -121,7 +157,7 @@ func (g GuestStore) Current() (string, error) {
 }
 
 func (n *Nix) output(ctx context.Context, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, n.bin, args...)
+	cmd := withNixConfig(exec.CommandContext(ctx, n.bin, args...))
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
 	return string(out), err
@@ -129,7 +165,7 @@ func (n *Nix) output(ctx context.Context, args ...string) (string, error) {
 
 // env runs nix-env (the static nix binary dispatches on argv[0]).
 func (n *Nix) env(ctx context.Context, args ...string) error {
-	cmd := exec.CommandContext(ctx, n.bin, args...)
+	cmd := withNixConfig(exec.CommandContext(ctx, n.bin, args...))
 	cmd.Args[0] = "nix-env"
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

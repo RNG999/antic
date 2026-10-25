@@ -187,7 +187,7 @@ func (g *Guest) startShare(ctx context.Context, tag, path string, ro bool, guest
 	if ro {
 		args = append(args, "--readonly")
 	}
-	props := append(systemd.Confine(rw, append(roPaths, g.m.Bins.Virtiofsd)),
+	props := append(g.m.confine(rw, append(roPaths, g.m.Bins.Virtiofsd)),
 		systemd.Prop("NoNewPrivileges", true), systemd.UnixOnly(), systemd.Prop("PrivateNetwork", true))
 	return sock, g.helper(ctx, g.shareUnit(tag), "antic share "+path+" ("+g.Name()+")", props, sock, args...)
 }

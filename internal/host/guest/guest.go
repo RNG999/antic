@@ -32,10 +32,16 @@ type Binaries struct {
 	CloudHypervisor, Virtiofsd, Passt, Pasta, Nft, Self string
 }
 
-// FindBinaries locates them: cloud-hypervisor from antic's libexec
-// ("antic update" installs it), the rest from the system.
+// FindBinaries locates them: helpers installed in antic's libexec
+// ("antic update") take precedence, falling back to the system.
 func FindBinaries(d instance.Dirs) Binaries {
 	find := func(name string, extra ...string) string {
+		if d.Libexec != "" {
+			cand := filepath.Join(d.Libexec, name)
+			if _, err := os.Stat(cand); err == nil {
+				return cand
+			}
+		}
 		if p, err := exec.LookPath(name); err == nil {
 			return p
 		}
@@ -62,6 +68,16 @@ func FindBinaries(d instance.Dirs) Binaries {
 		Nft:             find("nft", "/usr/sbin/nft"),
 		Self:            self,
 	}
+}
+
+// confine returns systemd sandbox properties for a unit, also binding the
+// rootless Nix store at /nix when helpers link against /nix/store.
+func (m *Manager) confine(rw, ro []string) []systemd.Property {
+	props := systemd.Confine(rw, ro)
+	if nix, err := m.nixBuilder(); err == nil && nix.Root() != "" {
+		props = append(props, systemd.BindReadOnly(filepath.Join(nix.Root(), "nix"), "/nix"))
+	}
+	return props
 }
 
 // Manager runs guests.

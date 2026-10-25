@@ -192,3 +192,8 @@ func UnixOnly() Property {
 func BindsTo(unit string) []Property {
 	return []Property{Prop("BindsTo", []string{unit}), Prop("After", []string{unit})}
 }
+
+// BindReadOnly mounts src read-only at dst inside the unit's mount namespace.
+func BindReadOnly(src, dst string) Property {
+	return Prop("BindReadOnlyPaths", []bindPath{{src, dst, true, msRec}})
+}

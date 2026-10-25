@@ -10,7 +10,6 @@ import (
 
 	"github.com/RNG999/antic/internal/host/config"
 	"github.com/RNG999/antic/internal/host/egress"
-	"github.com/RNG999/antic/internal/host/systemd"
 )
 
 const (
@@ -250,7 +249,7 @@ func (g *Guest) startNet(ctx context.Context) (string, error) {
 	// No NoNewPrivileges: it stops passt from setting up its own user
 	// namespace inside pasta's. passt and pasta drop privileges and apply
 	// seccomp themselves.
-	props := systemd.Confine([]string{dir}, []string{g.m.Bins.Pasta, g.m.Bins.Passt, g.m.Bins.Nft, g.m.Bins.Self})
+	props := g.m.confine([]string{dir}, []string{g.m.Bins.Pasta, g.m.Bins.Passt, g.m.Bins.Nft, g.m.Bins.Self})
 	return sock, g.helper(ctx, g.netUnit(), "antic network for "+g.Name(), props, sock, argv...)
 }
 

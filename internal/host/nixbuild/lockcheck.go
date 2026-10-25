@@ -17,7 +17,11 @@ type localInput struct {
 }
 
 func flakeMetadata(ref string) (map[string]any, error) {
-	out, err := exec.Command("nix", "flake", "metadata", "--json", "--no-write-lock-file", ref).Output()
+	bin, err := findNix()
+	if err != nil {
+		return nil, err
+	}
+	out, err := withNixConfig(exec.Command(bin, "flake", "metadata", "--json", "--no-write-lock-file", ref)).Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			return nil, fmt.Errorf("nix flake metadata %s: %s", ref, strings.TrimSpace(string(ee.Stderr)))
@@ -82,9 +86,13 @@ func CheckLocks(flake string, avoid []string) error {
 		}
 	}
 	if len(stale) > 0 {
+		bin, err := findNix()
+		if err != nil {
+			return err
+		}
 		args := append([]string{"flake", "update"}, stale...)
 		args = append(args, "--flake", "path:"+flake)
-		if out, err := exec.Command("nix", args...).CombinedOutput(); err != nil {
+		if out, err := withNixConfig(exec.Command(bin, args...)).CombinedOutput(); err != nil {
 			return fmt.Errorf("nix %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 		}
 	}

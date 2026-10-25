@@ -50,4 +50,14 @@ in
   };
 
   cloud-hypervisor = pkgs.pkgsStatic.cloud-hypervisor;
+
+  libexec = pkgs.symlinkJoin {
+    name = "antic-libexec";
+    paths = [
+      pkgs.pkgsStatic.cloud-hypervisor
+      pkgs.virtiofsd
+      pkgs.passt
+      pkgs.nftables
+    ];
+  };
 }
