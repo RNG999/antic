@@ -1,7 +1,6 @@
 {
   "portAgent": 24,
   "portSession": 22,
-  "portSessionOffline": 23,
   "runDir": "/run/antic",
   "storeTag": "antic-store",
   "version": 1

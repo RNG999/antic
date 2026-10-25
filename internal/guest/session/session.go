@@ -1,7 +1,6 @@
 // Package session runs a single command or interactive shell inside a
-// systemd-sandboxed session unit (antic-session@.service or
-// antic-session-offline@.service), speaking proto's framed session protocol
-// on the socket-activated vsock connection (fd 0/1).
+// systemd-sandboxed session unit (antic-session@.service), speaking proto's
+// framed session protocol on the socket-activated vsock connection (fd 0/1).
 package session
 
 import (

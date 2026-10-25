@@ -10,9 +10,8 @@ const Version = 1
 
 // vsock ports in the guest.
 const (
-	PortSession        = 22 // antic-agent session: "antic run", "antic shell"
-	PortSessionOffline = 23 // antic-agent session in a unit without network
-	PortAgent          = 24 // antic-agent root daemon; accepts connections from the host (CID 2) only
+	PortSession = 22 // antic-agent session: "antic run", "antic shell"
+	PortAgent   = 24 // antic-agent root daemon; accepts connections from the host (CID 2) only
 )
 
 // HostCID is the vsock address of the host as seen from the guest.
@@ -44,7 +43,7 @@ var ProtectedNames = []string{
 }
 
 // SessionReq is the JSON header sent at the start of a session connection on
-// PortSession or PortSessionOffline, followed by framed I/O.
+// PortSession, followed by framed I/O.
 type SessionReq struct {
 	Argv []string `json:"argv,omitempty"` // empty: interactive login shell
 	Dir  string   `json:"dir,omitempty"`  // working directory ("" or "~": home directory)
@@ -118,12 +117,10 @@ type Hello struct {
 // puts template instances in per-template slices; "-" is escaped as \x2d).
 var SessionSlices = []string{
 	"/sys/fs/cgroup/system.slice/system-antic\\x2dsession.slice",
-	"/sys/fs/cgroup/system.slice/system-antic\\x2dsession\\x2doffline.slice",
 }
 
 type Session struct {
 	Unit    string `json:"unit"`
-	Offline bool   `json:"offline"`
 	Started int64  `json:"started"` // Unix seconds
 	Command string `json:"command"`
 	PIDs    []int  `json:"pids"`

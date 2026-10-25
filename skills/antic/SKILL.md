@@ -23,7 +23,6 @@ antic run <name> -- <command> [args...]
 # Examples (using guest "dev")
 antic run dev -- git status
 antic run dev -- cargo test
-antic run dev --offline -- pytest          # Run without network access inside the guest
 antic run dev -w /tmp -- sh -c "uname -a"  # Explicit working directory in the guest
 ```
 

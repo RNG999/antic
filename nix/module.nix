@@ -176,7 +176,7 @@ in
     };
     users.groups.${user}.gid = 1000;
 
-    # Port 22: normal sessions; port 23: offline sessions.
+    # Port 22: session service.
     systemd.sockets.antic-session = {
       wantedBy = [ "sockets.target" ];
       socketConfig = {
@@ -184,26 +184,7 @@ in
         Accept = true;
       };
     };
-    systemd.sockets.antic-session-offline = {
-      wantedBy = [ "sockets.target" ];
-      socketConfig = {
-        ListenStream = "vsock::${toString proto.portSessionOffline}";
-        Accept = true;
-      };
-    };
     systemd.services."antic-session@" = sessionService;
-    systemd.services."antic-session-offline@" = lib.recursiveUpdate sessionService {
-      # No network and no way around it: no IP, only AF_UNIX, and neither the
-      # resolver (also via nsncd), D-Bus nor vsock; /tmp and IPC are private.
-      serviceConfig = {
-        PrivateNetwork = true;
-        IPAddressDeny = "any";
-        RestrictAddressFamilies = [ "AF_UNIX" ];
-        PrivateTmp = true;
-        PrivateIPC = true;
-        InaccessiblePaths = [ "-/run/nscd" "-/run/systemd/resolve" "-/run/dbus" "-/run/systemd/private" ];
-      };
-    };
 
     # Everything a session relies on: configured shares (fstab.extra).
     # Sessions require it, so they never start without these.

@@ -58,10 +58,7 @@ runs inside each guest to handle command sessions and host agent requests.
     - wait for `antic-ready.target` (configured shares), so nothing runs
       without those;
     - run directly as the guest user with empty `CapabilityBoundingSet`,
-      `NoNewPrivileges`, `RestrictNamespaces` and a syscall filter;
-    - with `--offline` also have no network: a
-      private network namespace, only `AF_UNIX`, and no access to the
-      resolver, nsncd, D-Bus or vsock.
+      `NoNewPrivileges`, `RestrictNamespaces` and a syscall filter.
 - **antic-agent daemon:** a root agent on vsock port 24 that accepts only the
   host (the guest kernel sets the peer CID). It mounts runtime shares (no
   symlink is ever followed: `openat2` + `fsmount`/`move_mount`), switches
@@ -162,7 +159,7 @@ EDITOR = "nvim"
 ## Usage
 
 ```
-antic run [NAME] [--offline] [-w DIR] [-t|-T] [--] CMD...   run CMD in the guest
+antic run [NAME] [-w DIR] [-t|-T] [--] CMD...   run CMD in the guest
 antic shell [NAME]
 
 antic guest ls [--json] [-q]
@@ -202,7 +199,7 @@ local-path input, or if a local input lies inside a share.
   host tools from auto-trusting workspaces, and use read-only shares where
   the guest only needs to read.
 - **Network egress is open in `internet` mode**; shares can be exfiltrated.
-  Use `[network]` with `allow = [...]`, `deny = [...]`, `--offline` or
+  Use `[network]` with `allow = [...]`, `deny = [...]` or
   `mode = "none"` for tools that need little or no network.
 - **`allow` is enforced by IP address.** An allowed domain's addresses are
   often shared CDN addresses (Cloudflare, Fastly, ...), so other sites on the

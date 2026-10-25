@@ -18,16 +18,14 @@ import (
 )
 
 func (a *app) runCmd() *cobra.Command {
-	var offline, tty, noTTY bool
+	var tty, noTTY bool
 	var workdir string
 	c := &cobra.Command{
 		Use:   "run [NAME] [flags] [--] CMD [ARG...]",
 		Short: "Run CMD in a guest",
 		Long: `Run CMD in a guest (in the current directory if shared, otherwise in the
 guest user's home directory). The guest is started if needed. The exit status
-is CMD's; antic's own errors exit with 125.
-
---offline runs CMD without any network.`,
+is CMD's; antic's own errors exit with 125.`,
 		Args: cobra.ArbitraryArgs,
 		// NAME, then the guest's commands are unknown here: default completion.
 		ValidArgsFunction: a.guestThen(func(*config.Guest, []string) ([]string, cobra.ShellCompDirective) {
@@ -73,11 +71,10 @@ is CMD's; antic's own errors exit with 125.
 			} else if noTTY {
 				pty = false
 			}
-			return a.execIn(c.Context(), g, workdir, cmdArgs, offline, pty)
+			return a.execIn(c.Context(), g, workdir, cmdArgs, pty)
 		},
 	}
 	c.Flags().SetInterspersed(false)
-	c.Flags().BoolVar(&offline, "offline", false, "run without network")
 	c.Flags().BoolVarP(&tty, "tty", "t", false, "always allocate a terminal")
 	c.Flags().BoolVarP(&noTTY, "no-tty", "T", false, "never allocate a terminal")
 	c.Flags().StringVarP(&workdir, "workdir", "w", "", "working directory inside the guest")
@@ -99,13 +96,13 @@ func (a *app) shellCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return a.execIn(c.Context(), g, "", nil, false, true)
+			return a.execIn(c.Context(), g, "", nil, true)
 		},
 	}
 }
 
 // execIn runs argv (or a login shell when argv is empty) in the guest and returns its status.
-func (a *app) execIn(ctx context.Context, g *guest.Guest, workdir string, argv []string, offline, pty bool) error {
+func (a *app) execIn(ctx context.Context, g *guest.Guest, workdir string, argv []string, pty bool) error {
 	dir := workdir
 	if dir == "" {
 		if d, err := g.Dir(ctx); err == nil {
@@ -117,7 +114,7 @@ func (a *app) execIn(ctx context.Context, g *guest.Guest, workdir string, argv [
 	sigs := make(chan os.Signal, 2)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer signal.Stop(sigs)
-	cmd := transport.Cmd{Argv: argv, Dir: dir, Offline: offline, Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Signals: sigs}
+	cmd := transport.Cmd{Argv: argv, Dir: dir, Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Signals: sigs}
 	if pty {
 		cmd.PTY = os.Stdin
 	}

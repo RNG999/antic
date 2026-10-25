@@ -65,13 +65,9 @@ func (a *app) guestPs() *cobra.Command {
 				return err
 			}
 			return a.out(ss, func(w io.Writer) {
-				fmt.Fprintln(w, "SESSION\tNETWORK\tSTARTED\tCOMMAND")
+				fmt.Fprintln(w, "SESSION\tSTARTED\tCOMMAND")
 				for _, s := range ss {
-					net := "online"
-					if s.Offline {
-						net = "offline"
-					}
-					fmt.Fprintf(w, "%s\t%s\t%s ago\t%s\n", s.Unit, net, age(time.Since(time.Unix(s.Started, 0))), s.Command)
+					fmt.Fprintf(w, "%s\t%s ago\t%s\n", s.Unit, age(time.Since(time.Unix(s.Started, 0))), s.Command)
 				}
 			})
 		},

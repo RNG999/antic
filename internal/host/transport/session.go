@@ -24,7 +24,6 @@ type Cmd struct {
 	Argv    []string         // empty: interactive login shell
 	Dir     string           // working directory in the guest
 	Env     []string         // extra environment variables (e.g. KEY=VAL)
-	Offline bool             // use the offline session unit (no network)
 	Stdin   io.Reader        // nil: no input
 	Stdout  io.Writer        // nil: discard
 	Stderr  io.Writer        // nil: discard
@@ -34,11 +33,7 @@ type Cmd struct {
 
 // Exec runs c in the guest and returns the remote exit status (128+N for signal N).
 func (v Vsock) Exec(ctx context.Context, c Cmd) (int, error) {
-	port := uint32(proto.PortSession)
-	if c.Offline {
-		port = proto.PortSessionOffline
-	}
-	conn, err := v.Dial(ctx, port)
+	conn, err := v.Dial(ctx, proto.PortSession)
 	if err != nil {
 		return 0, err
 	}

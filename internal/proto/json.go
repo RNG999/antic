@@ -6,12 +6,11 @@ import "encoding/json"
 // to nix/proto.json (kept in sync by TestNixProtoJSON).
 func JSON() ([]byte, error) {
 	b, err := json.MarshalIndent(map[string]any{
-		"version":            Version,
-		"portSession":        PortSession,
-		"portSessionOffline": PortSessionOffline,
-		"portAgent":          PortAgent,
-		"storeTag":           StoreTag,
-		"runDir":             RunDir,
+		"version":     Version,
+		"portSession": PortSession,
+		"portAgent":   PortAgent,
+		"storeTag":    StoreTag,
+		"runDir":      RunDir,
 	}, "", "  ")
 	return append(b, '\n'), err
 }

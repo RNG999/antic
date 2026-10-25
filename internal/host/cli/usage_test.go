@@ -13,7 +13,7 @@ func UsageText() string {
 	root := a.root()
 
 	var buf bytes.Buffer
-	buf.WriteString("antic run [NAME] [--offline] [-w DIR] [-t|-T] [--] CMD...   run CMD in the guest\n")
+	buf.WriteString("antic run [NAME] [-w DIR] [-t|-T] [--] CMD...   run CMD in the guest\n")
 	buf.WriteString("antic shell [NAME]\n\n")
 
 	buf.WriteString("antic guest ls [--json] [-q]\n")
