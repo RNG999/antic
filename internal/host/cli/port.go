@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"slices"
 	"strings"
@@ -12,39 +11,19 @@ import (
 	"github.com/RNG999/antic/internal/host/config"
 )
 
-func (a *app) portCmd() *cobra.Command {
-	c := &cobra.Command{Use: "port", Short: "Host-to-guest TCP port forwards", Args: cobra.NoArgs}
-	ls := &cobra.Command{
-		Use:               "ls NAME",
-		Aliases:           []string{"list"},
-		Short:             "List forwarded ports of guest NAME",
-		Args:              cobra.ExactArgs(1),
-		ValidArgsFunction: a.guestArgs,
-		RunE: func(c *cobra.Command, args []string) error {
-			g, err := a.get(c.Context(), args[0])
-			if err != nil {
-				return err
-			}
-			ports := g.Cfg.Ports
-			return a.out(ports, func(w io.Writer) {
-				fmt.Fprintln(w, "HOST\tGUEST")
-				for _, p := range ports {
-					fmt.Fprintf(w, "127.0.0.1:%d\t%d\n", p.Host, p.Guest)
-				}
-			})
-		},
-	}
-	a.jsonFlag(ls)
-
-	add := &cobra.Command{
-		Use:               "add NAME PORT...",
+func (a *app) guestForward() *cobra.Command {
+	return &cobra.Command{
+		Use:               "forward NAME PORT...",
 		Short:             "Forward TCP ports from host to guest NAME (e.g. 3000 or 8080:80)",
 		Args:              cobra.MinimumNArgs(2),
 		ValidArgsFunction: a.guestArgs,
 		RunE:              func(c *cobra.Command, args []string) error { return a.editPorts(c, args[0], args[1:], true) },
 	}
-	rm := &cobra.Command{
-		Use:   "rm NAME PORT...",
+}
+
+func (a *app) guestUnforward() *cobra.Command {
+	return &cobra.Command{
+		Use:   "unforward NAME PORT...",
 		Short: "Remove port forwards from guest NAME",
 		Args:  cobra.MinimumNArgs(2),
 		ValidArgsFunction: a.guestThen(func(g *config.Guest, rest []string) ([]string, cobra.ShellCompDirective) {
@@ -60,10 +39,8 @@ func (a *app) portCmd() *cobra.Command {
 			}
 			return out, cobra.ShellCompDirectiveNoFileComp
 		}),
-		RunE:              func(c *cobra.Command, args []string) error { return a.editPorts(c, args[0], args[1:], false) },
+		RunE: func(c *cobra.Command, args []string) error { return a.editPorts(c, args[0], args[1:], false) },
 	}
-	c.AddCommand(ls, add, rm)
-	return c
 }
 
 func (a *app) editPorts(c *cobra.Command, name string, specs []string, add bool) error {

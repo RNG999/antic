@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 
@@ -11,34 +10,11 @@ import (
 	"github.com/RNG999/antic/internal/host/config"
 )
 
-func (a *app) shareCmd() *cobra.Command {
-	c := &cobra.Command{Use: "share", Short: "Directories shared with a guest", Args: cobra.NoArgs}
-	ls := &cobra.Command{
-		Use:               "ls NAME",
-		Aliases:           []string{"list"},
-		Short:             "List shared directories of guest NAME",
-		Args:              cobra.ExactArgs(1),
-		ValidArgsFunction: a.guestArgs,
-		RunE: func(c *cobra.Command, args []string) error {
-			g, err := a.get(c.Context(), args[0])
-			if err != nil {
-				return err
-			}
-			ss := g.Shares(c.Context())
-			return a.out(ss, func(w io.Writer) {
-				fmt.Fprintln(w, "PATH\tMODE\tMOUNTED")
-				for _, s := range ss {
-					fmt.Fprintf(w, "%s\t%s\t%v\n", s.Path, mode(s.ReadOnly), s.Mounted)
-				}
-			})
-		},
-	}
-	a.jsonFlag(ls)
-
+func (a *app) guestMount() *cobra.Command {
 	var ro bool
-	add := &cobra.Command{
-		Use:   "add NAME DIR...",
-		Short: "Share directories with guest NAME",
+	cmd := &cobra.Command{
+		Use:   "mount NAME DIR...",
+		Short: "Share and mount directories in guest NAME",
 		Args:  cobra.MinimumNArgs(2),
 		ValidArgsFunction: a.guestThen(func(*config.Guest, []string) ([]string, cobra.ShellCompDirective) {
 			return nil, cobra.ShellCompDirectiveFilterDirs
@@ -59,11 +35,14 @@ func (a *app) shareCmd() *cobra.Command {
 			return nil
 		},
 	}
-	add.Flags().BoolVar(&ro, "ro", false, "read-only")
+	cmd.Flags().BoolVar(&ro, "ro", false, "read-only")
+	return cmd
+}
 
-	rm := &cobra.Command{
-		Use:   "rm NAME DIR...",
-		Short: "Stop sharing directories with guest NAME",
+func (a *app) guestUnmount() *cobra.Command {
+	return &cobra.Command{
+		Use:   "unmount NAME DIR...",
+		Short: "Unmount and stop sharing directories with guest NAME",
 		Args:  cobra.MinimumNArgs(2),
 		ValidArgsFunction: a.guestThen(func(g *config.Guest, rest []string) ([]string, cobra.ShellCompDirective) {
 			var paths []string
@@ -86,6 +65,4 @@ func (a *app) shareCmd() *cobra.Command {
 			return nil
 		},
 	}
-	c.AddCommand(ls, add, rm)
-	return c
 }

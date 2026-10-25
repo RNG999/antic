@@ -135,26 +135,24 @@ antic guest ls [--json] [-q]
 antic guest create NAME [-p PKG...] [--cpus N] [--memory SIZE] [--network MODE] [--port PORT...]
 antic guest set NAME [--cpus N] [--memory SIZE] [--network MODE]
 antic guest edit NAME
-antic guest path [NAME]
-antic guest check
 antic guest rm NAME... [-y]
 antic guest start|stop|restart NAME...
-antic guest show NAME [--json]
+antic guest show [NAME] [--path] [--config] [--json]
 antic guest logs NAME [-f] [--journal [-u UNIT] [-n N]]
 antic guest ps NAME [--json]
 antic guest kill NAME SESSION...
 antic guest apply NAME
 
-antic guest pkg ls NAME [--json] | add NAME PKG... | rm NAME PKG...
-antic guest share ls NAME [--json] | add NAME [--ro] DIR... | rm NAME DIR...
-antic guest port ls NAME [--json] | add NAME PORT... | rm NAME PORT...
+antic guest install NAME PKG... | uninstall NAME PKG...
+antic guest mount NAME [--ro] DIR... | unmount NAME DIR...
+antic guest forward NAME PORT... | unforward NAME PORT...
 antic skill install [-p] | rm [-p] | path [-p]
 antic doctor | update [--source DIR] | version | completion SHELL
 ```
 
 Every guest-targeted command requires an explicit `NAME` argument (omitting it is a syntax error). `run` exits with the command's status; antic's own errors exit with 125.
 
-Add tools with `antic guest pkg add NAME PKG...` (or edit `packages = [...]` in
+Add tools with `antic guest install NAME PKG...` (or edit `packages = [...]` in
 `~/.config/antic/guests/<name>.toml` and run `antic guest apply NAME`). A changed
 kernel needs `antic guest restart NAME`.
 

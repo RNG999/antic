@@ -24,59 +24,19 @@ func (a *app) guestCmd() *cobra.Command {
 		a.guestRestart(),
 		a.guestSet(),
 		a.guestEdit(),
-		a.guestPath(),
-		a.guestCheck(),
 		a.guestApply(),
 		a.guestPs(),
 		a.guestKill(),
 		a.guestShow(),
 		a.guestLogs(),
-		a.pkgCmd(),
-		a.shareCmd(),
-		a.portCmd(),
+		a.guestInstall(),
+		a.guestUninstall(),
+		a.guestMount(),
+		a.guestUnmount(),
+		a.guestForward(),
+		a.guestUnforward(),
 	)
 	return c
-}
-
-func (a *app) guestPath() *cobra.Command {
-	return &cobra.Command{
-		Use:               "path [NAME]",
-		Short:             "Print a guest's config file path (or the guests directory)",
-		Args:              cobra.MaximumNArgs(1),
-		ValidArgsFunction: a.guestArgs,
-		RunE: func(c *cobra.Command, args []string) error {
-			cfg, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
-			if err != nil {
-				return err
-			}
-			if len(args) == 1 {
-				g, err := cfg.Get(args[0])
-				if err != nil {
-					return err
-				}
-				fmt.Println(g.Path)
-				return nil
-			}
-			fmt.Println(a.dirs.GuestsConfigDir())
-			return nil
-		},
-	}
-}
-
-func (a *app) guestCheck() *cobra.Command {
-	return &cobra.Command{
-		Use:   "check",
-		Short: "Check all guest config files",
-		Args:  cobra.NoArgs,
-		ValidArgsFunction: cobra.NoFileCompletions,
-		RunE: func(*cobra.Command, []string) error {
-			if _, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home); err != nil {
-				return err
-			}
-			fmt.Fprintln(os.Stderr, "antic: config ok")
-			return nil
-		},
-	}
 }
 
 func (a *app) guestEdit() *cobra.Command {
@@ -397,13 +357,55 @@ func (a *app) guestRestart() *cobra.Command {
 }
 
 func (a *app) guestShow() *cobra.Command {
+	var showPath bool
+	var showConfig bool
+
 	c := &cobra.Command{
-		Use:               "show NAME",
+		Use:               "show [NAME]",
 		Short:             "Show a guest's configuration and state",
-		Args:              cobra.ExactArgs(1),
+		Args:              cobra.MaximumNArgs(1),
 		ValidArgsFunction: a.guestArgs,
 		RunE: func(c *cobra.Command, args []string) error {
-			g, err := a.get(c.Context(), args[0])
+			if len(args) == 0 {
+				if showPath {
+					fmt.Println(a.dirs.GuestsConfigDir())
+					return nil
+				}
+				return fmt.Errorf("accepts 1 arg(s), received 0")
+			}
+
+			name := args[0]
+			if showPath {
+				cfg, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
+				if err != nil {
+					return err
+				}
+				g, err := cfg.Get(name)
+				if err != nil {
+					return err
+				}
+				fmt.Println(g.Path)
+				return nil
+			}
+
+			if showConfig {
+				cfg, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
+				if err != nil {
+					return err
+				}
+				g, err := cfg.Get(name)
+				if err != nil {
+					return err
+				}
+				b, err := os.ReadFile(g.Path)
+				if err != nil {
+					return err
+				}
+				os.Stdout.Write(b)
+				return nil
+			}
+
+			g, err := a.get(c.Context(), name)
 			if err != nil {
 				return err
 			}
@@ -427,6 +429,8 @@ func (a *app) guestShow() *cobra.Command {
 			})
 		},
 	}
+	c.Flags().BoolVar(&showPath, "path", false, "Print the guest config file path (or config directory if NAME omitted)")
+	c.Flags().BoolVar(&showConfig, "config", false, "Print the guest raw TOML configuration")
 	a.jsonFlag(c)
 	return c
 }

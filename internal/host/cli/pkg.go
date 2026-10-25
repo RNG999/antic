@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"slices"
 
@@ -11,46 +10,26 @@ import (
 	"github.com/RNG999/antic/internal/host/config"
 )
 
-func (a *app) pkgCmd() *cobra.Command {
-	c := &cobra.Command{Use: "pkg", Short: "Packages installed in a guest", Args: cobra.NoArgs}
-	ls := &cobra.Command{
-		Use:               "ls NAME",
-		Aliases:           []string{"list"},
-		Short:             "List packages installed in guest NAME",
-		Args:              cobra.ExactArgs(1),
-		ValidArgsFunction: a.guestArgs,
-		RunE: func(c *cobra.Command, args []string) error {
-			g, err := a.get(c.Context(), args[0])
-			if err != nil {
-				return err
-			}
-			return a.out(g.Cfg.Packages, func(w io.Writer) {
-				for _, p := range g.Cfg.Packages {
-					fmt.Fprintln(w, p)
-				}
-			})
-		},
-	}
-	a.jsonFlag(ls)
-
-	add := &cobra.Command{
-		Use:               "add NAME PKG...",
-		Short:             "Add packages to guest NAME and apply",
+func (a *app) guestInstall() *cobra.Command {
+	return &cobra.Command{
+		Use:               "install NAME PKG...",
+		Short:             "Install packages in guest NAME and apply",
 		Args:              cobra.MinimumNArgs(2),
 		ValidArgsFunction: a.guestArgs,
 		RunE:              func(c *cobra.Command, args []string) error { return a.editPkgs(c, args[0], args[1:], true) },
 	}
-	rm := &cobra.Command{
-		Use:   "rm NAME PKG...",
-		Short: "Remove packages from guest NAME and apply",
+}
+
+func (a *app) guestUninstall() *cobra.Command {
+	return &cobra.Command{
+		Use:   "uninstall NAME PKG...",
+		Short: "Uninstall packages from guest NAME and apply",
 		Args:  cobra.MinimumNArgs(2),
 		ValidArgsFunction: a.guestThen(func(g *config.Guest, rest []string) ([]string, cobra.ShellCompDirective) {
 			return without(g.Packages, rest), cobra.ShellCompDirectiveNoFileComp
 		}),
-		RunE:              func(c *cobra.Command, args []string) error { return a.editPkgs(c, args[0], args[1:], false) },
+		RunE: func(c *cobra.Command, args []string) error { return a.editPkgs(c, args[0], args[1:], false) },
 	}
-	c.AddCommand(ls, add, rm)
-	return c
 }
 
 func (a *app) editPkgs(c *cobra.Command, name string, pkgs []string, add bool) error {

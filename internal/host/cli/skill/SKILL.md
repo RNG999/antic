@@ -30,47 +30,44 @@ antic run dev -w /tmp -- sh -c "uname -a"  # Explicit working directory in the g
 - Exit code `125` means an `antic` error occurred; any other exit code is the command's own exit status.
 - Inside writable shares, sensitive paths (`.git`, `.claude`, `CLAUDE.md`, `AGENTS.md`, `.envrc`, `.vscode`, `mise.toml`, etc.) are automatically mounted **read-only** so processes inside the guest cannot tamper with git hooks or agent configs.
 
-## 2. Installing Packages (`antic guest pkg`)
+## 2. Installing Packages (`antic guest install`)
 
 If a command or tool is missing inside the guest, install it from `nixpkgs`:
 
 ```sh
-antic guest pkg ls <name>
-antic guest pkg add <name> ripgrep jq nodejs python3
-antic guest pkg rm <name> nodejs
+antic guest install <name> ripgrep jq nodejs python3
+antic guest uninstall <name> nodejs
 ```
 
-`antic guest pkg add` updates `~/.config/antic/guests/<name>.toml`, builds the new NixOS closure on the host, copies it into the guest store, and live-switches the running guest without rebooting.
+`antic guest install` updates `~/.config/antic/guests/<name>.toml`, builds the new NixOS closure on the host, copies it into the guest store, and live-switches the running guest without rebooting.
 
-## 3. Sharing Directories (`antic guest share`)
+## 3. Sharing Directories (`antic guest mount`)
 
-If the current working directory is not yet shared with the guest, check or add shares:
+If the current working directory is not yet shared with the guest, mount it:
 
 ```sh
-antic guest share ls <name>
-antic guest share add <name> ~/Work/my-project        # Read-write share
-antic guest share add <name> ~/Docs/reference --ro    # Read-only share
-antic guest share rm <name> ~/Docs/reference
+antic guest mount <name> ~/Work/my-project        # Read-write share
+antic guest mount <name> ~/Docs/reference --ro    # Read-only share
+antic guest unmount <name> ~/Docs/reference
 ```
 
-`antic guest share add` persists the share in `~/.config/antic/guests/<name>.toml` and hot-plugs it into the running guest immediately.
+`antic guest mount` persists the share in `~/.config/antic/guests/<name>.toml` and hot-plugs it into the running guest immediately.
 
-## 4. Forwarding Ports (`antic guest port`)
+## 4. Forwarding Ports (`antic guest forward`)
 
 Expose a server running inside the guest on the host's `127.0.0.1`:
 
 ```sh
-antic guest port ls <name>
-antic guest port add <name> 3000          # 127.0.0.1:3000 (host) -> 3000 (guest)
-antic guest port add <name> 8080:80       # 127.0.0.1:8080 (host) -> 80 (guest)
-antic guest port rm <name> 8080
+antic guest forward <name> 3000          # 127.0.0.1:3000 (host) -> 3000 (guest)
+antic guest forward <name> 8080:80       # 127.0.0.1:8080 (host) -> 80 (guest)
+antic guest unforward <name> 8080
 ```
 
 ## 5. Managing Guests & Resources (`antic guest`)
 
 ```sh
 antic guest ls
-antic guest show <name>
+antic guest show <name>                  # Status, resources, ports, and mounts (--config for raw TOML, --path for file path)
 
 # Create a new guest (automatically builds and starts it)
 antic guest create dev -p git -p ripgrep --cpus 4 --memory 8G --network internet
