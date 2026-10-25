@@ -27,6 +27,13 @@ func (g *Guest) Apply(ctx context.Context) error {
 		return err
 	}
 	defer unlock()
+
+	unlockBuild, err := g.m.Dirs.LockNixBuild()
+	if err != nil {
+		return err
+	}
+	defer unlockBuild()
+
 	nix, err := g.m.nixBuilder()
 	if err != nil {
 		return err

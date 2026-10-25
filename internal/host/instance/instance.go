@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -172,6 +173,19 @@ func (d Dirs) Orphans() ([]string, error) {
 // processes (AI agents run tools in parallel). Unlock by calling the
 // returned function.
 func (d Dirs) Lock(name string) (func(), error) {
+	return d.LockWithReason(name, fmt.Sprintf("guest %q", name))
+}
+
+// LockNixBuild serializes Nix builds across antic processes so that
+// concurrent builds don't collide on the Nix eval-cache or store lock.
+func (d Dirs) LockNixBuild() (func(), error) {
+	return d.LockWithReason("nixbuild", "Nix build")
+}
+
+// LockWithReason takes an exclusive lock under StateRoot/locks/.
+// If the lock is held by another process, it notifies the user on stderr
+// and waits until the lock is acquired.
+func (d Dirs) LockWithReason(name, description string) (func(), error) {
 	dir := filepath.Join(d.StateRoot, "locks")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
@@ -180,9 +194,18 @@ func (d Dirs) Lock(name string) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
-		f.Close()
-		return nil, err
+	// Try non-blocking first to detect contention and inform the user.
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			fmt.Fprintf(os.Stderr, "antic: waiting for lock on %s (held by another process)...\n", description)
+			if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+				f.Close()
+				return nil, err
+			}
+		} else {
+			f.Close()
+			return nil, err
+		}
 	}
 	return func() { f.Close() }, nil
 }

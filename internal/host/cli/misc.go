@@ -108,6 +108,18 @@ func (a *app) updateCmd() *cobra.Command {
 		Short: "Build antic (and cloud-hypervisor) and install them",
 		Args:  cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
+			unlockUpdate, err := a.dirs.LockWithReason("update", "antic update")
+			if err != nil {
+				return err
+			}
+			defer unlockUpdate()
+
+			unlockBuild, err := a.dirs.LockNixBuild()
+			if err != nil {
+				return err
+			}
+			defer unlockBuild()
+
 			src := source
 			if abs, err := filepath.Abs(src); err == nil {
 				if _, serr := os.Stat(abs); serr == nil {

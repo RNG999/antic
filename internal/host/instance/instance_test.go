@@ -60,3 +60,61 @@ func TestOrphans(t *testing.T) {
 		t.Fatalf("Orphans = %v, %v", o, err)
 	}
 }
+
+func TestLockContention(t *testing.T) {
+	d := testDirs(t)
+	unlock1, err := d.Lock("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock1()
+
+	acquired := make(chan struct{})
+	go func() {
+		unlock2, err := d.LockWithReason("dev", "test dev")
+		if err != nil {
+			t.Errorf("second lock: %v", err)
+			return
+		}
+		defer unlock2()
+		close(acquired)
+	}()
+
+	select {
+	case <-acquired:
+		t.Fatal("second lock acquired while first is held")
+	default:
+	}
+
+	unlock1()
+	<-acquired
+}
+
+func TestLockNixBuild(t *testing.T) {
+	d := testDirs(t)
+	unlock1, err := d.LockNixBuild()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock1()
+
+	acquired := make(chan struct{})
+	go func() {
+		unlock2, err := d.LockNixBuild()
+		if err != nil {
+			t.Errorf("second nix build lock: %v", err)
+			return
+		}
+		defer unlock2()
+		close(acquired)
+	}()
+
+	select {
+	case <-acquired:
+		t.Fatal("second nix build lock acquired while first is held")
+	default:
+	}
+
+	unlock1()
+	<-acquired
+}
