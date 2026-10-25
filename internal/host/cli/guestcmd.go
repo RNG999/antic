@@ -362,7 +362,13 @@ func (a *app) guestStart() *cobra.Command {
 		Args:              cobra.ArbitraryArgs,
 		ValidArgsFunction: a.guestsArgs,
 		RunE: func(c *cobra.Command, args []string) error {
-			return a.eachGuest(c, args, false, func(g *guest.Guest) error { return g.Start(c.Context()) })
+			return a.eachGuest(c, args, false, func(g *guest.Guest) error {
+				if err := g.Start(c.Context()); err != nil {
+					return err
+				}
+				fmt.Fprintf(os.Stderr, "antic: started guest %s\n", g.Name())
+				return nil
+			})
 		},
 	}
 }
@@ -375,7 +381,13 @@ func (a *app) guestStop() *cobra.Command {
 		Args:              cobra.ArbitraryArgs,
 		ValidArgsFunction: a.guestsArgs,
 		RunE: func(c *cobra.Command, args []string) error {
-			return a.eachGuest(c, args, all, func(g *guest.Guest) error { return g.Stop(c.Context()) })
+			return a.eachGuest(c, args, all, func(g *guest.Guest) error {
+				if err := g.Stop(c.Context()); err != nil {
+					return err
+				}
+				fmt.Fprintf(os.Stderr, "antic: stopped guest %s\n", g.Name())
+				return nil
+			})
 		},
 	}
 	c.Flags().BoolVar(&all, "all", false, "stop every guest")
@@ -393,7 +405,11 @@ func (a *app) guestRestart() *cobra.Command {
 				if err := g.Stop(c.Context()); err != nil {
 					return err
 				}
-				return g.Start(c.Context())
+				if err := g.Start(c.Context()); err != nil {
+					return err
+				}
+				fmt.Fprintf(os.Stderr, "antic: restarted guest %s\n", g.Name())
+				return nil
 			})
 		},
 	}
