@@ -150,6 +150,10 @@ func (g *Guest) shareUnit(tag string) string {
 	return "antic-share@" + g.Inst.ID + ":" + tag + ".service"
 }
 func (g *Guest) slice() string              { return "antic-" + g.Inst.ID + ".slice" }
+func (g *Guest) CgroupDir() string {
+	uid := os.Getuid()
+	return filepath.Join("/sys/fs/cgroup/user.slice", fmt.Sprintf("user-%d.slice", uid), fmt.Sprintf("user@%d.service", uid), "antic.slice", g.slice())
+}
 func (g *Guest) store() nixbuild.GuestStore { return nixbuild.GuestStore(g.Inst.StoreDir()) }
 func (g *Guest) api() *chv.Client           { return chv.New(filepath.Join(g.Inst.VMDir(), "api.sock")) }
 func (g *Guest) vsock() transport.Vsock {

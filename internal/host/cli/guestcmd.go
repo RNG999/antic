@@ -37,6 +37,7 @@ func (a *app) guestCmd() *cobra.Command {
 		a.guestUnmount(),
 		a.guestForward(),
 		a.guestUnforward(),
+		a.guestMonitor(),
 	)
 	return c
 }
@@ -139,18 +140,20 @@ func (a *app) guestLs() *cobra.Command {
 				return nil
 			}
 			return a.out(infos, func(w io.Writer) {
-				fmt.Fprintln(w, "NAME\tSTATE\tCPUS\tMEMORY\tNETWORK")
+				fmt.Fprintln(w, "NAME\tSTATE\tUPTIME\tCPUS\tMEMORY\tNETWORK")
 				for _, i := range infos {
 					cpus := fmt.Sprintf("%d", i.CPUs)
 					mem := i.Memory
 					net := i.Network
+					upt := uptime(i)
 					if i.State == "error" {
 						cpus = "-"
 						mem = "-"
 						net = "-"
+						upt = "-"
 					}
-					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-						i.Name, state(i), cpus, orDash(mem), orDash(net))
+					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+						i.Name, state(i), upt, cpus, orDash(mem), orDash(net))
 				}
 			})
 		},
@@ -455,8 +458,8 @@ func (a *app) guestShow() *cobra.Command {
 				return err
 			}
 			return a.out(i, func(w io.Writer) {
-				fmt.Fprintf(w, "Name:\t%s\nID:\t%s\nState:\t%s\nOS:\t%s\nSystem:\t%s\nCPUs:\t%d\nMemory:\t%s\nNetwork:\t%s\n",
-					i.Name, orDash(i.ID), state(i), i.OS, orDash(i.System),
+				fmt.Fprintf(w, "Name:\t%s\nID:\t%s\nState:\t%s\nUptime:\t%s\nOS:\t%s\nSystem:\t%s\nCPUs:\t%d\nMemory:\t%s\nNetwork:\t%s\n",
+					i.Name, orDash(i.ID), state(i), uptime(i), i.OS, orDash(i.System),
 					i.CPUs, i.Memory, i.Network)
 				for _, p := range i.Ports {
 					desc := ""
@@ -545,10 +548,14 @@ func (a *app) guestApply() *cobra.Command {
 }
 
 func state(i guest.Info) string {
-	if i.Since != nil {
-		return "up " + age(time.Since(*i.Since))
-	}
 	return i.State
+}
+
+func uptime(i guest.Info) string {
+	if i.Since != nil {
+		return age(time.Since(*i.Since))
+	}
+	return "-"
 }
 
 func age(d time.Duration) string {
