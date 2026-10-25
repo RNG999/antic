@@ -1,13 +1,5 @@
-// Package dnsfilter is the DNS side of a guest's domain allow list. It runs
-// inside the guest's network namespace (next to passt), answers the guest's
-// DNS queries, forwards only queries for allowed names upstream, and adds the
-// addresses in the answers to an nftables set before the guest sees them.
-// Everything not in that set (or the static allow list) is rejected by the
-// namespace's egress filter, so connecting by IP without asking DNS fails.
-//
-// Parsing is deliberately strict: anything unusual is refused rather than
-// interpreted, since a parser bug here would be a filter bypass.
-package dnsfilter
+// Package egress controls guest egress networking (DNS filtering and dynamic nftables allow sets).
+package egress
 
 import (
 	"encoding/binary"
@@ -390,12 +382,21 @@ func ParseResponse(msg []byte, id uint16, q Question) (Response, error) {
 	return r, nil
 }
 
-// Matches reports whether name (lowercase, no trailing dot) is one of the
-// allowed domains or a subdomain of one.
-func Matches(name string, allowed []string) bool {
-	for _, d := range allowed {
-		if name == d || strings.HasSuffix(name, "."+d) {
-			return true
+// Matches reports whether name (lowercase, no trailing dot) matches any of the
+// pattern domains. A pattern starting with "*." (e.g. "*.example.com") matches
+// both the apex "example.com" and any subdomain (e.g. "api.example.com").
+// A pattern without "*." matches only the exact domain name.
+func Matches(name string, patterns []string) bool {
+	for _, p := range patterns {
+		if strings.HasPrefix(p, "*.") {
+			base := strings.TrimPrefix(p, "*.")
+			if name == base || strings.HasSuffix(name, "."+base) {
+				return true
+			}
+		} else {
+			if name == p {
+				return true
+			}
 		}
 	}
 	return false

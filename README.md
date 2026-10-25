@@ -33,19 +33,20 @@ runs inside each guest to handle command sessions and host agent requests.
     mounted by `antic-agent`.
 - **Network:** [passt] (vhost-user) inside a rootless network namespace from
   pasta.
-  - nftables there implements `network = "internet"`: internet only, no
-    LAN (including the host's on-link subnets, IPv4 and IPv6), CGNAT/Tailscale,
-    link-local/metadata, host addresses or loopback.
+  - nftables there implements `[network]`: `mode = "internet"` (the default) allows
+    internet only, blocking LAN (including the host's on-link subnets, IPv4 and IPv6),
+    CGNAT/Tailscale, link-local/metadata, host addresses or loopback.
   - `"lan"` still blocks the host, link-local and loopback; `"none"` gives the
     guest no network device at all.
-  - `allow = [...]` (domains, IPs, CIDRs) turns the filter into default deny.
-    antic runs a small DNS filter in the namespace: it answers only A/AAAA
-    queries for allowed domains (and their subdomains), refuses everything
-    else, and adds the answer's addresses to an nftables set *before* the
-    guest sees them. Connecting by IP without asking DNS is rejected; only the
+  - `allow = [...]` (domains and CIDRs) turns the filter into default deny, while
+    `deny = [...]` blocks specific domains and CIDRs.
+    antic runs a small in-process DNS filter in the namespace: it answers only
+    A/AAAA queries for non-denied/allowed domains (and their subdomains), refuses
+    everything else, and adds the answer's addresses to an nftables set *before*
+    the guest sees them. Connecting by IP without asking DNS is rejected; only the
     filter's marked sockets can reach the upstream resolver. In `"internet"`
-    mode, DNS answers pointing into the LAN stay blocked (static IP/CIDR
-    entries may name LAN hosts).
+    mode, DNS answers pointing into the LAN stay blocked (static CIDR entries
+    may name LAN hosts).
   - The filter is outside the guest, so guest root cannot change it.
 - **Access:** direct vsock sessions via `antic-agent session` (no `sshd`, SSH
   keys, passwords, PAM, sudo or setuid wrappers). The host end is
@@ -167,8 +168,8 @@ local-path input, or if a local input lies inside a share.
   host tools from auto-trusting workspaces, and use read-only shares where
   the guest only needs to read.
 - **Network egress is open in `internet` mode**; shares can be exfiltrated.
-  Use `allow = [...]`, `--offline` or `network = "none"` for tools that need
-  little or no network.
+  Use `[network]` with `allow = [...]`, `deny = [...]`, `--offline` or
+  `mode = "none"` for tools that need little or no network.
 - **`allow` is enforced by IP address.** An allowed domain's addresses are
   often shared CDN addresses (Cloudflare, Fastly, ...), so other sites on the
   same addresses become reachable too, and data can be sent to anything the

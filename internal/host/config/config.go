@@ -21,6 +21,7 @@ import (
 // Config holds all loaded guest configurations from ~/.config/antic/guests.
 type Config struct {
 	Guests map[string]*Guest
+	Errors map[string]error // guests that failed to load (name -> parse error)
 
 	dir string
 }
@@ -31,6 +32,44 @@ const (
 	NetworkInternet = "internet" // internet only: no LAN, CGNAT, link-local or host addresses
 	NetworkLAN      = "lan"      // internet and LAN (still no host loopback)
 )
+
+// NetworkConfig holds network settings in [network].
+type NetworkConfig struct {
+	Mode  string   `toml:"mode" json:"mode"`
+	Allow []string `toml:"allow" json:"allow,omitempty"`
+	Deny  []string `toml:"deny" json:"deny,omitempty"`
+}
+
+// UnmarshalTOML supports both `network = "internet"` (string) and
+// `[network]\nmode = "internet"` (table).
+func (n *NetworkConfig) UnmarshalTOML(data any) error {
+	switch v := data.(type) {
+	case string:
+		n.Mode = v
+		return nil
+	case map[string]any:
+		if m, ok := v["mode"].(string); ok {
+			n.Mode = m
+		}
+		if a, ok := v["allow"].([]any); ok {
+			for _, item := range a {
+				if s, ok := item.(string); ok {
+					n.Allow = append(n.Allow, s)
+				}
+			}
+		}
+		if d, ok := v["deny"].([]any); ok {
+			for _, item := range d {
+				if s, ok := item.(string); ok {
+					n.Deny = append(n.Deny, s)
+				}
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("invalid network value: must be a mode string (e.g. \"internet\") or a [network] section")
+	}
+}
 
 // Port is one host-to-guest TCP port mapping (127.0.0.1:Host -> Guest).
 type Port struct {
@@ -49,27 +88,25 @@ type Guest struct {
 	Name string `toml:"-"`
 	Path string `toml:"-"`
 
-	Description string   `toml:"description"`
-	Packages    []string `toml:"packages"`
+	Description string        `toml:"description"`
+	Packages    []string      `toml:"packages"`
 	// Optional custom flake ("/path/to/flake" or "/path/to/flake#attr").
 	// When empty, antic builds its built-in guest configuration with Packages.
 	Flake string `toml:"flake"`
 
-	CPUs    int     `toml:"cpus"`
-	Memory  string  `toml:"memory"`
-	Network string  `toml:"network"`
-	// Optional egress allow list: domains (a domain also allows its
-	// subdomains), IP addresses and CIDRs. When set, the guest can reach
-	// only these, and DNS answers only names under the listed domains.
-	Allow  []string `toml:"allow"`
-	Shares []Share  `toml:"shares"`
-	Ports  []Port   `toml:"ports"`
+	CPUs    int           `toml:"cpus"`
+	Memory  string        `toml:"memory"`
+	Network NetworkConfig `toml:"network"`
+	Shares  []Share       `toml:"shares"`
+	Ports   []Port        `toml:"ports"`
 
 	FlakePath    string         `toml:"-"`
 	FlakeAttr    string         `toml:"-"`
 	MemoryBytes  int64          `toml:"-"`
 	AllowDomains []string       `toml:"-"` // lowercase, no trailing dot
 	AllowNets    []netip.Prefix `toml:"-"` // masked
+	DenyDomains  []string       `toml:"-"` // lowercase, no trailing dot
+	DenyNets     []netip.Prefix `toml:"-"` // masked
 }
 
 // neverAllowed are destinations an allow entry may not overlap: loopback,
@@ -90,22 +127,18 @@ var neverAllowed = []netip.Prefix{
 
 var domainLabelRE = regexp.MustCompile(`^[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?$`)
 
-// parseAllow classifies one allow entry as a prefix or a domain.
-func parseAllow(raw string) (netip.Prefix, string, error) {
+// parseEntry classifies one allow/deny entry as a prefix or a domain.
+// Bare IP addresses without prefix lengths (e.g. "1.1.1.1") are rejected.
+func parseEntry(raw string) (netip.Prefix, string, error) {
 	s := strings.ToLower(strings.TrimSpace(raw))
 	if s == "" {
 		return netip.Prefix{}, "", errors.New("empty entry")
 	}
-	var p netip.Prefix
 	if strings.Contains(s, "/") {
-		var err error
-		if p, err = netip.ParsePrefix(s); err != nil {
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
 			return p, "", fmt.Errorf("%q: invalid CIDR", raw)
 		}
-	} else if a, err := netip.ParseAddr(s); err == nil {
-		p = netip.PrefixFrom(a, a.BitLen())
-	}
-	if p.IsValid() {
 		if p.Addr().Zone() != "" {
 			return netip.Prefix{}, "", fmt.Errorf("%q: zones are not allowed", raw)
 		}
@@ -117,15 +150,30 @@ func parseAllow(raw string) (netip.Prefix, string, error) {
 		}
 		return p, "", nil
 	}
-	d := strings.TrimSuffix(strings.TrimPrefix(s, "*."), ".")
+	if a, err := netip.ParseAddr(s); err == nil {
+		bitLen := 32
+		if a.Is6() {
+			bitLen = 128
+		}
+		return netip.Prefix{}, "", fmt.Errorf("%q: IP addresses must use CIDR notation (e.g. %s/%d)", raw, s, bitLen)
+	}
+	wildcard := false
+	if strings.HasPrefix(s, "*.") {
+		wildcard = true
+		s = strings.TrimPrefix(s, "*.")
+	}
+	d := strings.TrimSuffix(s, ".")
 	labels := strings.Split(d, ".")
 	if len(d) > 253 || len(labels) < 2 {
-		return netip.Prefix{}, "", fmt.Errorf("%q: not an IP, CIDR or domain (a domain needs at least two labels)", raw)
+		return netip.Prefix{}, "", fmt.Errorf("%q: not a CIDR or domain (a domain needs at least two labels)", raw)
 	}
 	for _, l := range labels {
 		if !domainLabelRE.MatchString(l) {
 			return netip.Prefix{}, "", fmt.Errorf("%q: invalid domain", raw)
 		}
+	}
+	if wildcard {
+		return netip.Prefix{}, "*." + d, nil
 	}
 	return netip.Prefix{}, d, nil
 }
@@ -143,9 +191,12 @@ func ValidPackage(s string) bool { return pkgRE.MatchString(s) }
 
 // Load reads and validates all *.toml guest files in dir. If dir does not
 // exist yet, an empty Config is returned without error.
+// Parse errors in individual guests are recorded in c.Errors rather than
+// causing Load to fail, so valid guests remain usable.
 func Load(dir, home string) (*Config, error) {
 	c := &Config{
 		Guests: map[string]*Guest{},
+		Errors: map[string]error{},
 		dir:    dir,
 	}
 	entries, err := os.ReadDir(dir)
@@ -155,7 +206,6 @@ func Load(dir, home string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", dir, err)
 	}
-	var errs []error
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".toml") || strings.HasPrefix(e.Name(), ".") {
 			continue
@@ -164,13 +214,10 @@ func Load(dir, home string) (*Config, error) {
 		path := filepath.Join(dir, e.Name())
 		g, err := LoadGuest(path, name, home)
 		if err != nil {
-			errs = append(errs, err)
+			c.Errors[name] = err
 			continue
 		}
 		c.Guests[name] = g
-	}
-	if len(errs) > 0 {
-		return nil, joinIndented(errs)
 	}
 	return c, nil
 }
@@ -247,24 +294,29 @@ func (g *Guest) normalize(home string) []error {
 	} else {
 		g.MemoryBytes = n
 	}
-	if g.Network == "" {
-		g.Network = NetworkInternet
+	if g.Network.Mode == "" {
+		g.Network.Mode = NetworkInternet
 	}
-	if !slices.Contains([]string{NetworkNone, NetworkInternet, NetworkLAN}, g.Network) {
-		errs = append(errs, errors.New("network must be \"none\", \"internet\" or \"lan\""))
+	if !slices.Contains([]string{NetworkNone, NetworkInternet, NetworkLAN}, g.Network.Mode) {
+		errs = append(errs, errors.New("network.mode must be \"none\", \"internet\" or \"lan\""))
 	}
-	if g.Network == NetworkNone && len(g.Ports) > 0 {
-		errs = append(errs, errors.New("ports cannot be used when network is \"none\""))
-	}
-	if g.Network == NetworkNone && len(g.Allow) > 0 {
-		errs = append(errs, errors.New("allow cannot be used when network is \"none\""))
+	if g.Network.Mode == NetworkNone {
+		if len(g.Ports) > 0 {
+			errs = append(errs, errors.New("ports cannot be used when network.mode is \"none\""))
+		}
+		if len(g.Network.Allow) > 0 {
+			errs = append(errs, errors.New("network.allow cannot be used when network.mode is \"none\""))
+		}
+		if len(g.Network.Deny) > 0 {
+			errs = append(errs, errors.New("network.deny cannot be used when network.mode is \"none\""))
+		}
 	}
 	g.AllowDomains, g.AllowNets = nil, nil
-	for i, raw := range g.Allow {
-		p, d, err := parseAllow(raw)
+	for i, raw := range g.Network.Allow {
+		p, d, err := parseEntry(raw)
 		switch {
 		case err != nil:
-			errs = append(errs, fmt.Errorf("allow[%d]: %w", i, err))
+			errs = append(errs, fmt.Errorf("network.allow[%d]: %w", i, err))
 		case d != "":
 			if !slices.Contains(g.AllowDomains, d) {
 				g.AllowDomains = append(g.AllowDomains, d)
@@ -272,6 +324,22 @@ func (g *Guest) normalize(home string) []error {
 		default:
 			if !slices.Contains(g.AllowNets, p) {
 				g.AllowNets = append(g.AllowNets, p)
+			}
+		}
+	}
+	g.DenyDomains, g.DenyNets = nil, nil
+	for i, raw := range g.Network.Deny {
+		p, d, err := parseEntry(raw)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("network.deny[%d]: %w", i, err))
+		case d != "":
+			if !slices.Contains(g.DenyDomains, d) {
+				g.DenyDomains = append(g.DenyDomains, d)
+			}
+		default:
+			if !slices.Contains(g.DenyNets, p) {
+				g.DenyNets = append(g.DenyNets, p)
 			}
 		}
 	}
@@ -339,10 +407,17 @@ func absPath(p, home, where string, errs []error) (string, []error) {
 
 func within(path, dir string) bool { return path == dir || strings.HasPrefix(path, dir+"/") }
 
-// Names returns the guest names, sorted.
+// Names returns the guest names (both valid and erroneous), sorted.
 func (c *Config) Names() []string {
-	names := make([]string, 0, len(c.Guests))
+	seen := map[string]bool{}
 	for n := range c.Guests {
+		seen[n] = true
+	}
+	for n := range c.Errors {
+		seen[n] = true
+	}
+	names := make([]string, 0, len(seen))
+	for n := range seen {
 		names = append(names, n)
 	}
 	sort.Strings(names)
@@ -354,7 +429,10 @@ func (c *Config) Get(name string) (*Guest, error) {
 	if name == "" {
 		return nil, errors.New("syntax error: guest name is required")
 	}
-	if len(c.Guests) == 0 {
+	if err := c.Errors[name]; err != nil {
+		return nil, err
+	}
+	if len(c.Guests) == 0 && len(c.Errors) == 0 {
 		return nil, fmt.Errorf("no guests defined in %s (run \"antic guest create %s\")", c.dir, name)
 	}
 	g := c.Guests[name]
@@ -394,7 +472,7 @@ func ParseSize(s string) (int64, error) {
 
 var knownKeys = []string{
 	"description", "packages", "flake",
-	"cpus", "memory", "network", "allow",
+	"cpus", "memory", "network", "mode", "allow", "deny",
 	"shares", "path", "readonly",
 	"ports", "host", "guest",
 }

@@ -43,7 +43,9 @@ guest = 80
 `
 
 const validLab = `flake = "/srv/guest#lab"
-network = "none"
+
+[network]
+mode = "none"
 `
 
 func TestLoadDefaults(t *testing.T) {
@@ -57,7 +59,7 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	g := c.Guests["dev"]
 	if len(g.Packages) != 2 || g.Packages[0] != "git" || g.CPUs != 4 ||
-		g.MemoryBytes != 8<<30 || g.Network != NetworkInternet || len(g.Ports) != 2 ||
+		g.MemoryBytes != 8<<30 || g.Network.Mode != NetworkInternet || len(g.Ports) != 2 ||
 		g.Ports[0].Host != 3000 || g.Ports[0].Guest != 3000 ||
 		g.Ports[1].Host != 8080 || g.Ports[1].Guest != 80 ||
 		g.Shares[0].Path != "/home/alice/Work" || g.Shares[0].ReadOnly ||
@@ -65,7 +67,7 @@ func TestLoadDefaults(t *testing.T) {
 		t.Fatalf("unexpected guest %+v", g)
 	}
 	lab := c.Guests["lab"]
-	if lab.FlakePath != "/srv/guest" || lab.FlakeAttr != "lab" {
+	if lab.FlakePath != "/srv/guest" || lab.FlakeAttr != "lab" || lab.Network.Mode != NetworkNone {
 		t.Fatalf("unexpected lab flake %+v", lab)
 	}
 	if _, err := c.Get(""); err == nil {
@@ -83,21 +85,26 @@ func TestLoadRejects(t *testing.T) {
 		"bad port":    {strings.Replace(validDev, `host = 3000`, `host = 70000`, 1), "ports"},
 		"dup port":    {strings.Replace(validDev, `host = 3000`, `host = 8080`, 1), "duplicate host port"},
 		"relative":    {strings.Replace(validLab, `"/srv/guest#lab"`, `"guest#lab"`, 1), "must be absolute"},
-		"network":     {strings.Replace(validLab, `"none"`, `"off"`, 1), "network must be"},
+		"network":     {strings.Replace(validLab, `"none"`, `"off"`, 1), "network.mode must be"},
 		"overlap":     {validDev + "\n[[shares]]\npath = \"~/Work/sub\"\n", "overlap"},
-		"allow none":  {validLab + "allow = [\"github.com\"]\n", "allow cannot be used"},
-		"allow lo":    {"allow = [\"127.0.0.1\"]\n", "never reach"},
-		"allow all":   {"allow = [\"0.0.0.0/0\"]\n", "never reach"},
-		"allow all6":  {"allow = [\"::/0\"]\n", "never reach"},
-		"allow meta":  {"allow = [\"169.254.169.254\"]\n", "never reach"},
-		"allow tld":   {"allow = [\"com\"]\n", "at least two labels"},
-		"allow bad":   {"allow = [\"git hub.com\"]\n", "invalid domain"},
-		"allow cidr":  {"allow = [\"10.0.0.0/33\"]\n", "invalid CIDR"},
-		"allow empty": {"allow = [\"\"]\n", "empty"},
+		"allow none":  {validLab + "allow = [\"github.com\"]\n", "network.allow cannot be used"},
+		"allow bare ip": {"[network]\nallow = [\"1.1.1.1\"]\n", "IP addresses must use CIDR notation"},
+		"allow lo":    {"[network]\nallow = [\"127.0.0.1/32\"]\n", "never reach"},
+		"allow all":   {"[network]\nallow = [\"0.0.0.0/0\"]\n", "never reach"},
+		"allow all6":  {"[network]\nallow = [\"::/0\"]\n", "never reach"},
+		"allow meta":  {"[network]\nallow = [\"169.254.169.254/32\"]\n", "never reach"},
+		"allow tld":   {"[network]\nallow = [\"com\"]\n", "at least two labels"},
+		"allow bad":   {"[network]\nallow = [\"git hub.com\"]\n", "invalid domain"},
+		"allow cidr":  {"[network]\nallow = [\"10.0.0.0/33\"]\n", "invalid CIDR"},
+		"allow empty": {"[network]\nallow = [\"\"]\n", "empty"},
 	} {
 		dir := t.TempDir()
 		writeGuest(t, dir, "dev", tc.content)
-		if _, err := Load(dir, home); err == nil || !strings.Contains(err.Error(), tc.want) {
+		c, err := Load(dir, home)
+		if err == nil {
+			_, err = c.Get("dev")
+		}
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: got %v, want error containing %q", name, err, tc.want)
 		}
 	}
@@ -114,6 +121,7 @@ func TestEdits(t *testing.T) {
 	}
 	cpus := 6
 	mem := "16G"
+	net := "lan"
 	steps := []func(*Config) error{
 		func(c *Config) error {
 			return c.CreateGuest("new", Guest{Packages: []string{"git"}}, home)
@@ -123,7 +131,7 @@ func TestEdits(t *testing.T) {
 		func(c *Config) error { return c.AddPort("new", Port{Host: 5173, Guest: 5173}, home) },
 		func(c *Config) error { return c.RemovePort("dev", 3000, home) },
 		func(c *Config) error {
-			return c.SetResources("new", ResourceUpdates{CPUs: &cpus, Memory: &mem}, home)
+			return c.SetResources("new", ResourceUpdates{CPUs: &cpus, Memory: &mem, Network: &net}, home)
 		},
 		func(c *Config) error { return c.RemoveShare("dev", "/home/alice/Work", home) },
 		func(c *Config) error { return c.RemoveGuest("lab") },
@@ -139,7 +147,7 @@ func TestEdits(t *testing.T) {
 	if c.Guests["lab"] != nil || len(c.Guests["dev"].Shares) != 1 || len(c.Guests["dev"].Ports) != 1 ||
 		strings.Join(c.Guests["dev"].Packages, ",") != "git,jq" ||
 		c.Guests["new"].Shares[0].Path != "/home/alice/a b" || !c.Guests["new"].Shares[0].ReadOnly ||
-		c.Guests["new"].CPUs != 6 || c.Guests["new"].Memory != "16G" ||
+		c.Guests["new"].CPUs != 6 || c.Guests["new"].Memory != "16G" || c.Guests["new"].Network.Mode != NetworkLAN ||
 		len(c.Guests["new"].Ports) != 1 {
 		b, _ := os.ReadFile(devPath)
 		t.Fatalf("unexpected result:\n%s", b)

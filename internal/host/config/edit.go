@@ -44,11 +44,18 @@ func (c *Config) CreateGuest(name string, g Guest, home string) error {
 		mem = "4G"
 	}
 	lines = append(lines, "memory = "+tomlString(mem))
-	netMode := g.Network
+	lines = append(lines, "", "[network]")
+	netMode := g.Network.Mode
 	if netMode == "" {
 		netMode = NetworkInternet
 	}
-	lines = append(lines, "network = "+tomlString(netMode))
+	lines = append(lines, "mode = "+tomlString(netMode))
+	if len(g.Network.Allow) > 0 {
+		lines = append(lines, "allow = "+tomlArray(g.Network.Allow))
+	}
+	if len(g.Network.Deny) > 0 {
+		lines = append(lines, "deny = "+tomlArray(g.Network.Deny))
+	}
 	for _, s := range g.Shares {
 		lines = append(lines, "", "[[shares]]", "path = "+tomlString(tildePath(s.Path, home)))
 		if s.ReadOnly {
@@ -171,10 +178,82 @@ func (c *Config) SetResources(guest string, u ResourceUpdates, home string) erro
 			lines = setRootKey(lines, "memory", tomlString(*u.Memory))
 		}
 		if u.Network != nil {
-			lines = setRootKey(lines, "network", tomlString(*u.Network))
+			lines = setTableKey(lines, "network", "mode", tomlString(*u.Network))
 		}
 		return lines, nil
 	})
+}
+
+// setTableKey sets key in [tableName] table. If [tableName] does not exist,
+// it creates it before any array of tables ([[...]]).
+func setTableKey(lines []string, tableName, key, valueExpr string) []string {
+	tableHeader := "[" + tableName + "]"
+	start := -1
+	end := len(lines)
+	for i, l := range lines {
+		trim := strings.TrimSpace(l)
+		if trim == tableHeader {
+			start = i
+			continue
+		}
+		if start != -1 {
+			if strings.HasPrefix(trim, "[") {
+				end = i
+				break
+			}
+		}
+	}
+
+	if start == -1 {
+		insertAt := len(lines)
+		for i, l := range lines {
+			if strings.HasPrefix(strings.TrimSpace(l), "[[") {
+				insertAt = i
+				break
+			}
+		}
+		var newLines []string
+		newLines = append(newLines, lines[:insertAt]...)
+		if insertAt > 0 && lines[insertAt-1] != "" {
+			newLines = append(newLines, "")
+		}
+		newLines = append(newLines, tableHeader, key+" = "+valueExpr)
+		if insertAt < len(lines) && lines[insertAt] != "" {
+			newLines = append(newLines, "")
+		}
+		newLines = append(newLines, lines[insertAt:]...)
+		return newLines
+	}
+
+	keyRE := regexp.MustCompile(`^\s*` + regexp.QuoteMeta(key) + `\s*=`)
+	for i := start + 1; i < end; i++ {
+		if !keyRE.MatchString(lines[i]) {
+			continue
+		}
+		j := i
+		depth := bracketDepth(lines[i])
+		for depth > 0 && j+1 < end {
+			j++
+			depth += bracketDepth(lines[j])
+		}
+		var out []string
+		out = append(out, lines[:i]...)
+		if valueExpr != "" {
+			out = append(out, key+" = "+valueExpr)
+		}
+		out = append(out, lines[j+1:]...)
+		return out
+	}
+
+	insertAt := end
+	for insertAt > start+1 && strings.TrimSpace(lines[insertAt-1]) == "" {
+		insertAt--
+	}
+	var out []string
+	out = append(out, lines[:insertAt]...)
+	out = append(out, key+" = "+valueExpr)
+	out = append(out, lines[insertAt:]...)
+	return out
 }
 
 // setRootKey sets or deletes key in the root (before the first [table] or [[array]]).

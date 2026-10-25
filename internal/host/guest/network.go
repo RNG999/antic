@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/RNG999/antic/internal/host/config"
-	"github.com/RNG999/antic/internal/host/dnsfilter"
+	"github.com/RNG999/antic/internal/host/egress"
 	"github.com/RNG999/antic/internal/host/systemd"
 )
 
@@ -34,21 +34,27 @@ var (
 	lanBlocked6    = []string{"fc00::/7", "fec0::/10", "64:ff9b::/96", "64:ff9b:1::/48"}
 )
 
-// filtered reports whether the guest has an allow list (default deny, DNS
-// through dnsfilter).
-func filtered(g *config.Guest) bool { return len(g.Allow) > 0 }
+// hasFilter reports whether the guest has an allow or deny filter.
+func hasFilter(g *config.Guest) bool {
+	return len(g.Network.Allow) > 0 || len(g.Network.Deny) > 0
+}
+
+func hasAllow(g *config.Guest) bool {
+	return len(g.Network.Allow) > 0
+}
 
 // nftRules renders the egress filter for the guest's network namespace.
 //
 // Order matters: always-blocked destinations and host addresses are
-// rejected first, then the static allow list is accepted (so it may name LAN
-// hosts in "internet" mode), then LAN ranges are rejected in "internet" mode
-// (so DNS answers pointing into the LAN never open it), then addresses the
-// DNS filter learned are accepted, and with an allow list everything else is
-// rejected.
+// rejected first, then static deny entries are rejected, then the static allow
+// list is accepted (so it may name LAN hosts in "internet" mode), then LAN
+// ranges are rejected in "internet" mode (so DNS answers pointing into the LAN
+// never open it), then addresses the DNS filter learned are accepted, and
+// with an allow list everything else is rejected.
 func nftRules(g *config.Guest, hostNets []*net.IPNet) string {
-	allow := filtered(g)
-	internet := g.Network == config.NetworkInternet
+	filter := hasFilter(g)
+	allow := hasAllow(g)
+	internet := g.Network.Mode == config.NetworkInternet
 	v4 := append([]string{}, alwaysBlocked4...)
 	v6 := append([]string{}, alwaysBlocked6...)
 	var lan4, lan6 []string
@@ -70,6 +76,14 @@ func nftRules(g *config.Guest, hostNets []*net.IPNet) string {
 			}
 		}
 	}
+	var deny4, deny6 []string
+	for _, p := range g.DenyNets {
+		if p.Addr().Is4() {
+			deny4 = append(deny4, p.String())
+		} else {
+			deny6 = append(deny6, p.String())
+		}
+	}
 	var static4, static6 []string
 	for _, p := range g.AllowNets {
 		if p.Addr().Is4() {
@@ -85,8 +99,8 @@ func nftRules(g *config.Guest, hostNets []*net.IPNet) string {
 
 	w("table inet antic {")
 	if allow {
-		w("  set %s { type ipv4_addr; flags timeout; size 65536; }", dnsfilter.Set4)
-		w("  set %s { type ipv6_addr; flags timeout; size 65536; }", dnsfilter.Set6)
+		w("  set %s { type ipv4_addr; flags timeout; size 65536; }", egress.Set4)
+		w("  set %s { type ipv6_addr; flags timeout; size 65536; }", egress.Set6)
 	}
 	w("  chain output {")
 	w("    type filter hook output priority filter; policy accept;")
@@ -95,13 +109,13 @@ func nftRules(g *config.Guest, hostNets []*net.IPNet) string {
 	for _, p := range g.Ports {
 		w(`    oifname "lo" ip saddr 127.0.0.1 ip daddr 127.0.0.1 tcp dport %d accept`, p.Host)
 	}
-	if allow {
+	if filter {
 		// passt -> DNS filter, and only the filter's marked sockets upstream.
-		l := dnsfilter.Listen
+		l := egress.Listen
 		w(`    oifname "lo" ip saddr 127.0.0.1 ip daddr %s udp dport %d accept`, l.Addr(), l.Port())
 		w(`    oifname "lo" ip saddr 127.0.0.1 ip daddr %s tcp dport %d accept`, l.Addr(), l.Port())
-		w("    meta mark %#x ip daddr %s udp dport 53 accept", dnsfilter.Mark, nsDNS)
-		w("    meta mark %#x ip daddr %s tcp dport 53 accept", dnsfilter.Mark, nsDNS)
+		w("    meta mark %#x ip daddr %s udp dport 53 accept", egress.Mark, nsDNS)
+		w("    meta mark %#x ip daddr %s tcp dport 53 accept", egress.Mark, nsDNS)
 	} else {
 		w("    ip daddr %s udp dport 53 accept", nsDNS)
 		w("    ip daddr %s tcp dport 53 accept", nsDNS)
@@ -109,6 +123,12 @@ func nftRules(g *config.Guest, hostNets []*net.IPNet) string {
 	w("    ip daddr %s reject", nsDNS)
 	w("    %s reject", set("ip", v4))
 	w("    %s reject", set("ip6", v6))
+	if len(deny4) > 0 {
+		w("    %s reject", set("ip", deny4))
+	}
+	if len(deny6) > 0 {
+		w("    %s reject", set("ip6", deny6))
+	}
 	if len(static4) > 0 {
 		w("    %s accept", set("ip", static4))
 	}
@@ -122,8 +142,8 @@ func nftRules(g *config.Guest, hostNets []*net.IPNet) string {
 		w("    %s reject", set("ip6", lan6))
 	}
 	if allow {
-		w("    ip daddr @%s accept", dnsfilter.Set4)
-		w("    ip6 daddr @%s accept", dnsfilter.Set6)
+		w("    ip daddr @%s accept", egress.Set4)
+		w("    ip6 daddr @%s accept", egress.Set6)
 		w("    reject")
 	}
 	w("  }")
@@ -160,14 +180,24 @@ func (g *Guest) startNet(ctx context.Context) (string, error) {
 		return "", err
 	}
 	dnsHost := nsDNS
-	helper := []string{g.m.Bins.Self, dnsfilter.HelperCmd, "--nft", g.m.Bins.Nft, "--rules", rules}
-	if filtered(g.Cfg) {
-		domains := filepath.Join(dir, "allow-domains")
-		if err := os.WriteFile(domains, []byte(strings.Join(g.Cfg.AllowDomains, "\n")+"\n"), 0o600); err != nil {
-			return "", err
+	helper := []string{g.m.Bins.Self, egress.HelperCmd, "--nft", g.m.Bins.Nft, "--rules", rules}
+	if hasFilter(g.Cfg) {
+		if len(g.Cfg.AllowDomains) > 0 {
+			domains := filepath.Join(dir, "allow-domains")
+			if err := os.WriteFile(domains, []byte(strings.Join(g.Cfg.AllowDomains, "\n")+"\n"), 0o600); err != nil {
+				return "", err
+			}
+			helper = append(helper, "--allow-domains", domains)
 		}
-		helper = append(helper, "--dns-domains", domains, "--upstream", nsDNS)
-		dnsHost = dnsfilter.Listen.Addr().String()
+		if len(g.Cfg.DenyDomains) > 0 {
+			denyFile := filepath.Join(dir, "deny-domains")
+			if err := os.WriteFile(denyFile, []byte(strings.Join(g.Cfg.DenyDomains, "\n")+"\n"), 0o600); err != nil {
+				return "", err
+			}
+			helper = append(helper, "--deny-domains", denyFile)
+		}
+		helper = append(helper, "--upstream", nsDNS)
+		dnsHost = egress.Listen.Addr().String()
 	}
 	passt := []string{g.m.Bins.Passt, "--vhost-user", "--socket", sock, "--foreground", "--quiet", "--one-off",
 		"--no-map-gw", "--map-host-loopback", "none", "-u", "none",

@@ -12,12 +12,12 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/RNG999/antic/internal/host/dnsfilter"
+	"github.com/RNG999/antic/internal/host/egress"
 )
 
 // NetnsCmd is the hidden argv[1] that runs antic as the first process in a
 // guest's network namespace (pasta runs it; see guest.startNet).
-const NetnsCmd = dnsfilter.HelperCmd
+const NetnsCmd = egress.HelperCmd
 
 // netnsMain loads the egress filter, starts the DNS filter if the guest has
 // an allow list, and runs passt. It exits when passt exits; if the DNS filter
@@ -27,17 +27,20 @@ func netnsMain(args []string) int {
 	fs := flag.NewFlagSet(NetnsCmd, flag.ContinueOnError)
 	nft := fs.String("nft", "", "nft binary")
 	rules := fs.String("rules", "", "nftables rules file")
-	domains := fs.String("dns-domains", "", "file with allowed domains (enables the DNS filter)")
+	var domains string
+	fs.StringVar(&domains, "allow-domains", "", "file with allowed domains")
+	fs.StringVar(&domains, "dns-domains", "", "alias for --allow-domains")
+	denyDomains := fs.String("deny-domains", "", "file with denied domains")
 	upstream := fs.String("upstream", "", "upstream resolver address")
 	if err := fs.Parse(args); err != nil {
 		return exitError
 	}
 	argv := fs.Args()
 	if *nft == "" || *rules == "" || len(argv) == 0 {
-		fmt.Fprintln(os.Stderr, "antic netns: usage: --nft PATH --rules FILE [--dns-domains FILE --upstream ADDR] -- PASST...")
+		fmt.Fprintln(os.Stderr, "antic netns: usage: --nft PATH --rules FILE [--allow-domains FILE] [--deny-domains FILE] [--upstream ADDR] -- PASST...")
 		return exitError
 	}
-	if err := netnsRun(*nft, *rules, *domains, *upstream, argv); err != nil {
+	if err := netnsRun(*nft, *rules, domains, *denyDomains, *upstream, argv); err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
 			return ee.ExitCode()
@@ -48,26 +51,38 @@ func netnsMain(args []string) int {
 	return 0
 }
 
-func netnsRun(nft, rules, domainsFile, upstream string, argv []string) error {
+func netnsRun(nft, rules, domainsFile, denyFile, upstream string, argv []string) error {
 	if out, err := exec.Command(nft, "-f", rules).CombinedOutput(); err != nil {
 		return fmt.Errorf("nft -f %s: %v: %s", rules, err, strings.TrimSpace(string(out)))
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	var proxy *dnsfilter.Proxy
-	if domainsFile != "" {
-		b, err := os.ReadFile(domainsFile)
-		if err != nil {
-			return err
+	var proxy *egress.Proxy
+	if domainsFile != "" || denyFile != "" {
+		var allowList, denyList []string
+		if domainsFile != "" {
+			b, err := os.ReadFile(domainsFile)
+			if err != nil {
+				return err
+			}
+			allowList = strings.Fields(string(b))
+		}
+		if denyFile != "" {
+			b, err := os.ReadFile(denyFile)
+			if err != nil {
+				return err
+			}
+			denyList = strings.Fields(string(b))
 		}
 		up, err := netip.ParseAddr(upstream)
 		if err != nil {
 			return fmt.Errorf("--upstream: %w", err)
 		}
-		proxy, err = dnsfilter.New(dnsfilter.Config{
+		proxy, err = egress.New(egress.Config{
 			Upstream: netip.AddrPortFrom(up, 53),
-			Domains:  strings.Fields(string(b)),
+			Allow:    allowList,
+			Deny:     denyList,
 			Nft:      nft,
 			Log:      os.Stderr,
 		})

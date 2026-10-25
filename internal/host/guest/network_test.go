@@ -55,7 +55,7 @@ func index(t *testing.T, rules, s string) int {
 }
 
 func TestNftRulesInternet(t *testing.T) {
-	g := &config.Guest{Network: config.NetworkInternet, Ports: []config.Port{{Host: 8080, Guest: 80}}}
+	g := &config.Guest{Network: config.NetworkConfig{Mode: config.NetworkInternet}, Ports: []config.Port{{Host: 8080, Guest: 80}}}
 	rules := nftRules(g, hostNets(t))
 	contains(t, rules,
 		"icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } ip6 hoplimit 255 accept",
@@ -70,7 +70,7 @@ func TestNftRulesInternet(t *testing.T) {
 }
 
 func TestNftRulesLAN(t *testing.T) {
-	g := &config.Guest{Network: config.NetworkLAN}
+	g := &config.Guest{Network: config.NetworkConfig{Mode: config.NetworkLAN}}
 	rules := nftRules(g, hostNets(t))
 	contains(t, rules, "169.254.0.0/16", "::ffff:0:0/96", "fe80::/10", "192.168.11.12", "2404:7a81:f80:4400:a578:cbae:3ab4:9bc9")
 	lacks(t, rules, "192.168.0.0/16", "192.168.11.0/24", "2404:7a81:f80:4400::/64")
@@ -78,8 +78,10 @@ func TestNftRulesLAN(t *testing.T) {
 
 func TestNftRulesAllowList(t *testing.T) {
 	g := &config.Guest{
-		Network:      config.NetworkInternet,
-		Allow:        []string{"github.com", "192.168.11.50", "2001:db8::/32"},
+		Network: config.NetworkConfig{
+			Mode:  config.NetworkInternet,
+			Allow: []string{"github.com", "192.168.11.50/32", "2001:db8::/32"},
+		},
 		AllowDomains: []string{"github.com"},
 		AllowNets:    []netip.Prefix{netip.MustParsePrefix("192.168.11.50/32"), netip.MustParsePrefix("2001:db8::/32")},
 	}
@@ -108,4 +110,23 @@ func TestNftRulesAllowList(t *testing.T) {
 	if index(t, rules, "192.168.11.12") > static4 {
 		t.Errorf("host address must be rejected before static allow:\n%s", rules)
 	}
+}
+
+func TestNftRulesDenyList(t *testing.T) {
+	g := &config.Guest{
+		Network: config.NetworkConfig{
+			Mode: config.NetworkInternet,
+			Deny: []string{"bad.com", "198.51.100.0/24"},
+		},
+		DenyDomains: []string{"bad.com"},
+		DenyNets:    []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")},
+	}
+	rules := nftRules(g, hostNets(t))
+	contains(t, rules,
+		`oifname "lo" ip saddr 127.0.0.1 ip daddr 127.0.0.1 udp dport 53 accept`,
+		"meta mark 0x616e7463 ip daddr 192.0.2.54 udp dport 53 accept",
+		"ip daddr { 198.51.100.0/24 } reject",
+	)
+	// Deny-only is default allow (no dyn4, no final reject)
+	lacks(t, rules, "@dyn4", "    reject\n  }")
 }

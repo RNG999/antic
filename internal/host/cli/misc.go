@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -80,7 +82,14 @@ func (a *app) doctorCmd() *cobra.Command {
 			}
 			_, err = nixbuild.New()
 			check("nix", err)
-			_, err = config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
+			cfg, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
+			if err == nil && cfg != nil && len(cfg.Errors) > 0 {
+				var errMsgs []string
+				for n, e := range cfg.Errors {
+					errMsgs = append(errMsgs, fmt.Sprintf("%s.toml: %v", n, e))
+				}
+				err = errors.New(strings.Join(errMsgs, "; "))
+			}
 			check("config "+a.dirs.GuestsConfigDir(), err)
 			if bad > 0 {
 				return fmt.Errorf("%d check(s) failed", bad)

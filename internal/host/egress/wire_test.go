@@ -1,4 +1,4 @@
-package dnsfilter
+package egress
 
 import (
 	"encoding/binary"
@@ -86,18 +86,19 @@ func make63() []byte {
 }
 
 func TestMatches(t *testing.T) {
-	allowed := []string{"github.com", "npmjs.org"}
+	patterns := []string{"*.github.com", "npmjs.org"}
 	for name, want := range map[string]bool{
-		"github.com":         true,
-		"api.github.com":     true,
-		"a.b.github.com":     true,
+		"github.com":         true,  // wildcard matches apex
+		"api.github.com":     true,  // wildcard matches subdomain
+		"a.b.github.com":     true,  // wildcard matches nested subdomain
 		"evilgithub.com":     false,
 		"github.com.evil.io": false,
 		"com":                false,
-		"registry.npmjs.org": true,
+		"npmjs.org":          true,  // exact match
+		"registry.npmjs.org": false, // exact match does NOT match subdomain
 		"npmjs.org.evil":     false,
 	} {
-		if got := Matches(name, allowed); got != want {
+		if got := Matches(name, patterns); got != want {
 			t.Errorf("Matches(%q) = %v, want %v", name, got, want)
 		}
 	}

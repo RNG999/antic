@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -118,6 +119,14 @@ func (a *app) guestLs() *cobra.Command {
 				}
 				infos = append(infos, i)
 			}
+			for name, err := range a.cfg.Errors {
+				infos = append(infos, guest.Info{
+					Name:        name,
+					State:       "error",
+					Description: err.Error(),
+				})
+			}
+			sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
 			if quiet {
 				for _, i := range infos {
 					fmt.Println(i.Name)
@@ -127,8 +136,16 @@ func (a *app) guestLs() *cobra.Command {
 			return a.out(infos, func(w io.Writer) {
 				fmt.Fprintln(w, "NAME\tSTATE\tCPUS\tMEMORY\tNETWORK")
 				for _, i := range infos {
-					fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\n",
-						i.Name, state(i), i.CPUs, i.Memory, i.Network)
+					cpus := fmt.Sprintf("%d", i.CPUs)
+					mem := i.Memory
+					net := i.Network
+					if i.State == "error" {
+						cpus = "-"
+						mem = "-"
+						net = "-"
+					}
+					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+						i.Name, state(i), cpus, orDash(mem), orDash(net))
 				}
 			})
 		},
@@ -167,7 +184,7 @@ func (a *app) guestCreate() *cobra.Command {
 				Packages: pkgs,
 				CPUs:     cpus,
 				Memory:   memory,
-				Network:  network,
+				Network:  config.NetworkConfig{Mode: network},
 				Ports:    ports,
 			}
 			_, err := a.mgr.Create(c.Context(), name, spec)

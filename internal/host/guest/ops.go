@@ -433,7 +433,7 @@ func (g *Guest) Inspect(ctx context.Context) (Info, error) {
 		Name: g.Name(), ID: g.Inst.ID,
 		Description: g.Cfg.Description, State: "not-created",
 		OS: g.osDesc(), Packages: g.Cfg.Packages,
-		CPUs: g.Cfg.CPUs, Memory: g.Cfg.Memory, Network: g.Cfg.Network, Ports: g.Cfg.Ports,
+		CPUs: g.Cfg.CPUs, Memory: g.Cfg.Memory, Network: g.Cfg.Network.Mode, Ports: g.Cfg.Ports,
 		Shares: g.Shares(ctx),
 	}
 	if !g.Created {
@@ -451,7 +451,7 @@ func (g *Guest) Inspect(ctx context.Context) (Info, error) {
 			i.System = bt.System
 		}
 		i.Units = []string{g.vmUnit()}
-		if g.Cfg.Network != config.NetworkNone {
+		if g.Cfg.Network.Mode != config.NetworkNone {
 			i.Units = append(i.Units, g.netUnit())
 		}
 		i.Units = append(i.Units, g.shareUnit("store"))

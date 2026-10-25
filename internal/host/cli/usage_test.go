@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 )
@@ -87,5 +88,17 @@ func TestCompletionFunctionsRegistered(t *testing.T) {
 		if sub.ValidArgsFunction == nil {
 			t.Errorf("guest subcommand %q has no ValidArgsFunction registered for shell completion", sub.Name())
 		}
+	}
+}
+
+// TestSkillFilesMatch ensures the repo copy skills/antic/SKILL.md and the embedded
+// internal/host/cli/skill/SKILL.md remain in sync without drift.
+func TestSkillFilesMatch(t *testing.T) {
+	repoSkill, err := os.ReadFile("../../../skills/antic/SKILL.md")
+	if err != nil {
+		return
+	}
+	if !bytes.Equal(repoSkill, skillMarkdown) {
+		t.Error("skills/antic/SKILL.md differs from internal/host/cli/skill/SKILL.md; keep them synchronized")
 	}
 }

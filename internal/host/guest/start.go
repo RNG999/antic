@@ -258,7 +258,7 @@ func (g *Guest) vmConfig(ctx context.Context, system string, bt *boot) (chv.VMCo
 			tag, fstabEscape(path), mode)
 	}
 
-	if g.Cfg.Network != config.NetworkNone {
+	if g.Cfg.Network.Mode != config.NetworkNone {
 		sock, err := g.startNet(ctx)
 		if err != nil {
 			return chv.VMConfig{}, fmt.Errorf("network: %w", err)

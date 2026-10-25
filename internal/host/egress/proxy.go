@@ -1,4 +1,4 @@
-package dnsfilter
+package egress
 
 import (
 	"bytes"
@@ -46,7 +46,8 @@ const (
 // Config configures a Proxy.
 type Config struct {
 	Upstream netip.AddrPort // the namespace's resolver address (pasta forwards it)
-	Domains  []string       // allowed domains (lowercase, no trailing dot)
+	Allow    []string       // allowed domains (lowercase, no trailing dot; empty means allow all except Deny)
+	Deny     []string       // denied domains (lowercase, no trailing dot)
 	Nft      string         // nft binary
 	Log      io.Writer
 }
@@ -182,13 +183,23 @@ func writeTCPMsg(w io.Writer, msg []byte) error {
 // handle answers one client message. Allowed A/AAAA queries are forwarded;
 // the answer's addresses are added to the nftables sets before the reply is
 // returned, and any failure on the way is SERVFAIL (fail closed).
+func (p *Proxy) domainAllowed(name string) bool {
+	if len(p.cfg.Deny) > 0 && Matches(name, p.cfg.Deny) {
+		return false
+	}
+	if len(p.cfg.Allow) > 0 && !Matches(name, p.cfg.Allow) {
+		return false
+	}
+	return true
+}
+
 func (p *Proxy) handle(ctx context.Context, msg []byte, tcp bool) []byte {
 	q, err := ParseQuery(msg)
 	if err != nil {
 		return BuildFormErr(msg)
 	}
 	qq := q.Question
-	if qq.Class != ClassIN || !Matches(qq.Name, p.cfg.Domains) {
+	if qq.Class != ClassIN || !p.domainAllowed(qq.Name) {
 		p.logRefused(qq.Name)
 		return BuildError(q.ID, qq, RcodeRefused)
 	}
@@ -224,9 +235,11 @@ func (p *Proxy) handle(ctx context.Context, msg []byte, tcp bool) []byte {
 		}
 		return Truncated(q.ID, qq)
 	}
-	if err := p.allow(ctx, r.Addrs); err != nil {
-		p.logf("dns: %s: allowing its addresses: %v", qq.Name, err)
-		return BuildError(q.ID, qq, RcodeServFail)
+	if len(p.cfg.Allow) > 0 {
+		if err := p.allow(ctx, r.Addrs); err != nil {
+			p.logf("dns: %s: allowing its addresses: %v", qq.Name, err)
+			return BuildError(q.ID, qq, RcodeServFail)
+		}
 	}
 	out := bytes.Clone(resp)
 	binary.BigEndian.PutUint16(out[0:2], q.ID)

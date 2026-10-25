@@ -93,7 +93,11 @@ description = "tools for my agent"
 packages = ["git", "ripgrep"]
 cpus = 2
 memory = "4G"
-network = "internet"   # none | internet | lan
+
+[network]
+mode = "internet"   # none | internet | lan
+# allow = ["github.com", "1.1.1.1/32"]  # Optional: default deny whitelist
+# deny = ["10.0.0.0/8"]                 # Optional: blacklist (CIDR or domain)
 
 [[shares]]
 path = "~/Work"
