@@ -18,9 +18,10 @@ func UsageText() string {
 	buf.WriteString("antic guest ls [--json] [-q]\n")
 	buf.WriteString("antic guest create NAME [-p PKG...] [--cpus N] [--memory SIZE] [--network MODE] [--port PORT...]\n")
 	buf.WriteString("antic guest set NAME [--cpus N] [--memory SIZE] [--network MODE]\n")
+	buf.WriteString("antic guest edit NAME\n")
+	buf.WriteString("antic guest path [NAME]\n")
+	buf.WriteString("antic guest check\n")
 	buf.WriteString("antic guest rm NAME... [-y]\n")
-	buf.WriteString("antic guest run NAME [--offline] [-w DIR] [-t|-T] [--] CMD...\n")
-	buf.WriteString("antic guest shell NAME\n")
 	buf.WriteString("antic guest start|stop|restart NAME...\n")
 	buf.WriteString("antic guest inspect NAME [--json]\n")
 	buf.WriteString("antic guest logs NAME [-f] [--journal [-u UNIT] [-n N]]\n")
@@ -30,8 +31,8 @@ func UsageText() string {
 
 	buf.WriteString("antic guest pkg ls NAME [--json] | add NAME PKG... | rm NAME PKG...\n")
 	buf.WriteString("antic guest share ls NAME [--json] | add NAME [--ro] DIR... | rm NAME DIR...\n")
-	buf.WriteString("antic guest port ls NAME [--json] | add NAME PORT... | rm NAME PORT...\n")
-	buf.WriteString("antic config path [NAME] | check | edit NAME\n")
+	buf.WriteString("antic guest port ls NAME [--json] | add NAME PORT... | rm NAME PORT...\n\n")
+
 	buf.WriteString("antic skill install [-p] | rm [-p] | path [-p]\n")
 	buf.WriteString("antic doctor | update [--source DIR] | version | completion SHELL\n")
 

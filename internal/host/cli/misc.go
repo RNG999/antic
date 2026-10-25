@@ -14,44 +14,6 @@ import (
 	"github.com/RNG999/antic/internal/proto"
 )
 
-func (a *app) configCmd() *cobra.Command {
-	c := &cobra.Command{Use: "config", Short: "Guest configuration files (~/.config/antic/guests/*.toml)", Args: cobra.NoArgs}
-	c.AddCommand(&cobra.Command{
-		Use:               "path [NAME]",
-		Short:             "Print a guest's config file path (or the guests directory)",
-		Args:              cobra.MaximumNArgs(1),
-		ValidArgsFunction: a.guestArgs,
-		RunE: func(c *cobra.Command, args []string) error {
-			cfg, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
-			if err != nil {
-				return err
-			}
-			if len(args) == 1 {
-				g, err := cfg.Get(args[0])
-				if err != nil {
-					return err
-				}
-				fmt.Println(g.Path)
-				return nil
-			}
-			fmt.Println(a.dirs.GuestsConfigDir())
-			return nil
-		},
-	}, &cobra.Command{
-		Use:   "check",
-		Short: "Check all guest config files",
-		Args:  cobra.NoArgs,
-		RunE: func(*cobra.Command, []string) error {
-			if _, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home); err != nil {
-				return err
-			}
-			fmt.Fprintln(os.Stderr, "antic: config ok")
-			return nil
-		},
-	}, a.editGuestCmd("edit NAME"))
-	return c
-}
-
 func (a *app) editGuestCmd(use string) *cobra.Command {
 	return &cobra.Command{
 		Use:               use,

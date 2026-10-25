@@ -23,10 +23,10 @@ func (a *app) guestCmd() *cobra.Command {
 		a.guestStop(),
 		a.guestRestart(),
 		a.guestSet(),
-		a.editGuestCmd("edit NAME"),
+		a.guestEdit(),
+		a.guestPath(),
+		a.guestCheck(),
 		a.guestApply(),
-		a.runCmd(),
-		a.shellCmd(),
 		a.guestPs(),
 		a.guestKill(),
 		a.guestInspect(),
@@ -36,6 +36,51 @@ func (a *app) guestCmd() *cobra.Command {
 		a.portCmd(),
 	)
 	return c
+}
+
+func (a *app) guestPath() *cobra.Command {
+	return &cobra.Command{
+		Use:               "path [NAME]",
+		Short:             "Print a guest's config file path (or the guests directory)",
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: a.guestArgs,
+		RunE: func(c *cobra.Command, args []string) error {
+			cfg, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
+			if err != nil {
+				return err
+			}
+			if len(args) == 1 {
+				g, err := cfg.Get(args[0])
+				if err != nil {
+					return err
+				}
+				fmt.Println(g.Path)
+				return nil
+			}
+			fmt.Println(a.dirs.GuestsConfigDir())
+			return nil
+		},
+	}
+}
+
+func (a *app) guestCheck() *cobra.Command {
+	return &cobra.Command{
+		Use:   "check",
+		Short: "Check all guest config files",
+		Args:  cobra.NoArgs,
+		ValidArgsFunction: cobra.NoFileCompletions,
+		RunE: func(*cobra.Command, []string) error {
+			if _, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home); err != nil {
+				return err
+			}
+			fmt.Fprintln(os.Stderr, "antic: config ok")
+			return nil
+		},
+	}
+}
+
+func (a *app) guestEdit() *cobra.Command {
+	return a.editGuestCmd("edit NAME")
 }
 
 func (a *app) guestPs() *cobra.Command {

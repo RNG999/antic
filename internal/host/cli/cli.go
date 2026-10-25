@@ -83,10 +83,7 @@ func (a *app) root() *cobra.Command {
 		c.GroupID = "run"
 		root.AddCommand(c)
 	}
-	for _, c := range []*cobra.Command{a.guestCmd(), a.configCmd()} {
-		c.GroupID = "manage"
-		root.AddCommand(c)
-	}
+	root.AddCommand(a.guestCmd())
 	root.AddCommand(a.doctorCmd(), a.skillCmd(), a.updateCmd(), a.versionCmd())
 	return root
 }

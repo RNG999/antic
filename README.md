@@ -134,9 +134,10 @@ antic shell NAME
 antic guest ls [--json] [-q]
 antic guest create NAME [-p PKG...] [--cpus N] [--memory SIZE] [--network MODE] [--port PORT...]
 antic guest set NAME [--cpus N] [--memory SIZE] [--network MODE]
+antic guest edit NAME
+antic guest path [NAME]
+antic guest check
 antic guest rm NAME... [-y]
-antic guest run NAME [--offline] [-w DIR] [-t|-T] [--] CMD...
-antic guest shell NAME
 antic guest start|stop|restart NAME...
 antic guest inspect NAME [--json]
 antic guest logs NAME [-f] [--journal [-u UNIT] [-n N]]
@@ -147,7 +148,6 @@ antic guest apply NAME
 antic guest pkg ls NAME [--json] | add NAME PKG... | rm NAME PKG...
 antic guest share ls NAME [--json] | add NAME [--ro] DIR... | rm NAME DIR...
 antic guest port ls NAME [--json] | add NAME PORT... | rm NAME PORT...
-antic config path [NAME] | check | edit NAME
 antic skill install [-p] | rm [-p] | path [-p]
 antic doctor | update [--source DIR] | version | completion SHELL
 ```
