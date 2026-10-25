@@ -20,7 +20,8 @@ runs inside each guest to handle command sessions and host agent requests.
     bootloader, desktop/XDG assets, LVM, bcache, FUSE or OpenSSH).
   - `antic guest apply` builds the guest's NixOS on the host, copies it into
     that store, and switches the running guest to it. The guest needs no
-    network and evaluates nothing itself.
+    network and evaluates nothing itself. If switching fails, it automatically
+    rolls back the running guest to the previous configuration.
 - **Shares:** one rootless [virtiofsd] per shared directory, mapping only
   your UID (as the guest user).
   - Inside writable shares, the host exports existing paths that host tools
@@ -100,6 +101,7 @@ examples/          dev.toml and a guest flake to start from
   guests/<ID>/store/nix             a guest's Nix store (its /nix)
   guests/<ID>/log/console.log       console
   names/<NAME> -> ../guests/<ID>    name to ID (IDs are never reused)
+  locks/<NAME>.lock                 guest lifecycle and build locks (flock with timeout and holder PID)
 ~/.local/libexec/antic/             cloud-hypervisor ("antic update")
 $XDG_RUNTIME_DIR/antic/<ID>/        sockets, boot record
 ```
@@ -126,6 +128,37 @@ antic guest create dev -p git
 antic run dev -- uname -a
 ```
 
+## Guest configuration
+
+Guest definitions live in `~/.config/antic/guests/<NAME>.toml`:
+
+```toml
+description = "tools for my agent"
+packages = ["git", "curl"]
+
+[spec]
+cpus = 4
+memory = "8G"
+
+[network]
+mode = "internet"   # "internet" | "lan" | "none"
+# allow = ["github.com", "*.githubusercontent.com", "1.1.1.1/32"]
+# deny = ["10.0.0.0/8"]
+
+[[network.ports]]
+host = 8080
+guest = 80
+proto = "tcp"          # "tcp" (default) | "udp" | "tcp,udp"
+description = "Web app"
+
+[[shares]]
+source = "~/Work"
+mode = "rw"            # "rw" | "ro"
+
+[env]
+EDITOR = "nvim"
+```
+
 ## Usage
 
 ```
@@ -146,7 +179,7 @@ antic guest apply NAME
 
 antic guest install NAME PKG... | uninstall NAME PKG...
 antic guest mount NAME [--ro] DIR... | unmount NAME DIR...
-antic guest forward NAME PORT... | unforward NAME PORT...
+antic guest forward NAME PORT... [-p tcp|udp|tcp,udp] [-d DESC] | unforward NAME PORT...
 antic skill install [-p] | rm [-p] | path [-p]
 antic doctor | update [--source DIR] | version | completion SHELL
 ```

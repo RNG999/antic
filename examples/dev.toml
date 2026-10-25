@@ -14,10 +14,12 @@ mode = "internet"   # none | internet | lan
 # allow = ["github.com", "*.githubusercontent.com", "registry.npmjs.org", "192.168.11.50/32"]
 # deny = [...]
 
-# Port forwarding: forward TCP ports from host to guest
+# Port forwarding: forward host ports to guest
 # [[network.ports]]
 # host = 8080
 # guest = 80
+# proto = "tcp"          # "tcp" (default) | "udp" | "tcp,udp"
+# description = "Web app"
 
 [[shares]]
 source = "~/Work"
