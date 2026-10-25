@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 
@@ -91,20 +92,32 @@ func (a *app) root() *cobra.Command {
 	return root
 }
 
-// load reads the config and connects to systemd, once.
-func (a *app) load(ctx context.Context) error {
-	if a.mgr != nil {
+// loadConfig reads the config without connecting to systemd.
+func (a *app) loadConfig() error {
+	if a.cfg != nil {
 		return nil
 	}
 	cfg, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
 	if err != nil {
 		return err
 	}
-	m, err := guest.NewManager(ctx, a.dirs, cfg, os.Stderr)
+	a.cfg = cfg
+	return nil
+}
+
+// load reads the config and connects to systemd, once.
+func (a *app) load(ctx context.Context) error {
+	if a.mgr != nil {
+		return nil
+	}
+	if err := a.loadConfig(); err != nil {
+		return err
+	}
+	m, err := guest.NewManager(ctx, a.dirs, a.cfg, os.Stderr)
 	if err != nil {
 		return err
 	}
-	a.cfg, a.mgr = cfg, m
+	a.mgr = m
 	return nil
 }
 
@@ -114,6 +127,63 @@ func (a *app) get(ctx context.Context, name string) (*guest.Guest, error) {
 		return nil, err
 	}
 	return a.mgr.Get(name)
+}
+
+// resolveTargetGuest resolves a guest name when optional (or omitted in args).
+// If a name is provided in args, it uses it and returns the remaining args.
+// If args is empty:
+//   - If exactly one guest exists, it selects that guest automatically.
+//   - If multiple guests exist, it returns an error listing the available guests.
+//   - If no guests exist, it returns an error saying no guests are defined.
+func (a *app) resolveTargetGuest(ctx context.Context, args []string, usage string) (string, []string, error) {
+	if err := a.loadConfig(); err != nil {
+		return "", nil, err
+	}
+	if len(args) > 0 {
+		return args[0], args[1:], nil
+	}
+	names := a.cfg.Names()
+	if len(names) == 0 {
+		return "", nil, fmt.Errorf("no guests defined (run \"antic guest create <name>\")")
+	}
+	if len(names) == 1 {
+		return names[0], nil, nil
+	}
+	return "", nil, fmt.Errorf("guest NAME is required\n\nUsage:\n  %s\n\nAvailable guests:\n  %s", usage, strings.Join(names, ", "))
+}
+
+// resolveGuestAndItems resolves a target guest and trailing items (e.g. packages, ports, dirs).
+// If args has at least 1 element and matches an existing guest name:
+//   that guest is selected and args[1:] are items.
+// Otherwise:
+//   - If exactly one guest exists: that guest is selected and all args are items.
+//   - If multiple guests exist: returns an error listing the available guests.
+//   - If no guests exist: returns an error saying no guests are defined.
+// Finally, if len(items) == 0: returns a syntax error indicating itemNoun is required.
+func (a *app) resolveGuestAndItems(ctx context.Context, args []string, usage, itemNoun string) (string, []string, error) {
+	if err := a.loadConfig(); err != nil {
+		return "", nil, err
+	}
+	var guestName string
+	var items []string
+	if len(args) > 0 && (a.cfg.Guests[args[0]] != nil || a.cfg.Errors[args[0]] != nil) {
+		guestName = args[0]
+		items = args[1:]
+	} else {
+		names := a.cfg.Names()
+		if len(names) == 1 {
+			guestName = names[0]
+			items = args
+		} else if len(names) == 0 {
+			return "", nil, fmt.Errorf("no guests defined (run \"antic guest create <name>\")")
+		} else {
+			return "", nil, fmt.Errorf("guest NAME is required\n\nUsage:\n  %s\n\nAvailable guests:\n  %s", usage, strings.Join(names, ", "))
+		}
+	}
+	if len(items) == 0 {
+		return "", nil, fmt.Errorf("syntax error: %s is required (usage: %s)", itemNoun, usage)
+	}
+	return guestName, items, nil
 }
 
 // out prints v as JSON with --json, or calls table.

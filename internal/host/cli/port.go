@@ -13,19 +13,25 @@ import (
 
 func (a *app) guestForward() *cobra.Command {
 	return &cobra.Command{
-		Use:               "forward NAME PORT...",
-		Short:             "Forward TCP ports from host to guest NAME (e.g. 3000 or 8080:80)",
-		Args:              cobra.MinimumNArgs(2),
+		Use:               "forward [NAME] PORT...",
+		Short:             "Forward TCP ports from host to a guest (e.g. 3000 or 8080:80)",
+		Args:              cobra.ArbitraryArgs,
 		ValidArgsFunction: a.guestArgs,
-		RunE:              func(c *cobra.Command, args []string) error { return a.editPorts(c, args[0], args[1:], true) },
+		RunE: func(c *cobra.Command, args []string) error {
+			name, ports, err := a.resolveGuestAndItems(c.Context(), args, "antic guest forward [NAME] PORT...", "PORT")
+			if err != nil {
+				return err
+			}
+			return a.editPorts(c, name, ports, true)
+		},
 	}
 }
 
 func (a *app) guestUnforward() *cobra.Command {
 	return &cobra.Command{
-		Use:   "unforward NAME PORT...",
-		Short: "Remove port forwards from guest NAME",
-		Args:  cobra.MinimumNArgs(2),
+		Use:   "unforward [NAME] PORT...",
+		Short: "Remove port forwards from a guest",
+		Args:  cobra.ArbitraryArgs,
 		ValidArgsFunction: a.guestThen(func(g *config.Guest, rest []string) ([]string, cobra.ShellCompDirective) {
 			var ports []string
 			for _, p := range g.Ports {
@@ -39,7 +45,13 @@ func (a *app) guestUnforward() *cobra.Command {
 			}
 			return out, cobra.ShellCompDirectiveNoFileComp
 		}),
-		RunE: func(c *cobra.Command, args []string) error { return a.editPorts(c, args[0], args[1:], false) },
+		RunE: func(c *cobra.Command, args []string) error {
+			name, ports, err := a.resolveGuestAndItems(c.Context(), args, "antic guest unforward [NAME] PORT...", "PORT")
+			if err != nil {
+				return err
+			}
+			return a.editPorts(c, name, ports, false)
+		},
 	}
 }
 

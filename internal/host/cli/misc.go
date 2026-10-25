@@ -20,14 +20,18 @@ func (a *app) editGuestCmd(use string) *cobra.Command {
 	return &cobra.Command{
 		Use:               use,
 		Short:             "Edit a guest's config file with $EDITOR, then check it",
-		Args:              cobra.ExactArgs(1),
+		Args:              cobra.MaximumNArgs(1),
 		ValidArgsFunction: a.guestArgs,
 		RunE: func(c *cobra.Command, args []string) error {
+			name, _, err := a.resolveTargetGuest(c.Context(), args, "antic guest edit [NAME]")
+			if err != nil {
+				return err
+			}
 			cfg, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
 			if err != nil {
 				return err
 			}
-			g, err := cfg.Get(args[0])
+			g, err := cfg.Get(name)
 			if err != nil {
 				return err
 			}

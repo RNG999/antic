@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -41,17 +42,21 @@ func (a *app) guestCmd() *cobra.Command {
 }
 
 func (a *app) guestEdit() *cobra.Command {
-	return a.editGuestCmd("edit NAME")
+	return a.editGuestCmd("edit [NAME]")
 }
 
 func (a *app) guestPs() *cobra.Command {
 	c := &cobra.Command{
-		Use:               "ps NAME",
+		Use:               "ps [NAME]",
 		Short:             "List running command sessions in a guest",
-		Args:              cobra.ExactArgs(1),
+		Args:              cobra.MaximumNArgs(1),
 		ValidArgsFunction: a.guestArgs,
 		RunE: func(c *cobra.Command, args []string) error {
-			g, err := a.get(c.Context(), args[0])
+			name, _, err := a.resolveTargetGuest(c.Context(), args, "antic guest ps [NAME]")
+			if err != nil {
+				return err
+			}
+			g, err := a.get(c.Context(), name)
 			if err != nil {
 				return err
 			}
@@ -77,16 +82,20 @@ func (a *app) guestPs() *cobra.Command {
 
 func (a *app) guestKill() *cobra.Command {
 	return &cobra.Command{
-		Use:               "kill NAME SESSION...",
+		Use:               "kill [NAME] SESSION...",
 		Short:             "Stop running command sessions in a guest",
-		Args:              cobra.MinimumNArgs(2),
+		Args:              cobra.ArbitraryArgs,
 		ValidArgsFunction: a.guestArgs,
 		RunE: func(c *cobra.Command, args []string) error {
-			g, err := a.get(c.Context(), args[0])
+			name, sessions, err := a.resolveGuestAndItems(c.Context(), args, "antic guest kill [NAME] SESSION...", "SESSION")
 			if err != nil {
 				return err
 			}
-			for _, s := range args[1:] {
+			g, err := a.get(c.Context(), name)
+			if err != nil {
+				return err
+			}
+			for _, s := range sessions {
 				if err := g.Kill(c.Context(), s); err != nil {
 					return err
 				}
@@ -162,9 +171,15 @@ func (a *app) guestCreate() *cobra.Command {
 	c := &cobra.Command{
 		Use:               "create NAME",
 		Short:             "Create, build, and start a guest",
-		Args:              cobra.ExactArgs(1),
+		Args:              cobra.ArbitraryArgs,
 		ValidArgsFunction: cobra.NoFileCompletions, // a new name
 		RunE: func(c *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return errors.New("syntax error: guest NAME is required (usage: antic guest create NAME [flags])")
+			}
+			if len(args) > 1 {
+				return errors.New("syntax error: unexpected arguments (usage: antic guest create NAME [flags])")
+			}
 			if err := a.load(c.Context()); err != nil {
 				return err
 			}
@@ -207,12 +222,16 @@ func (a *app) guestSet() *cobra.Command {
 	var cpus int
 	var memory, network string
 	c := &cobra.Command{
-		Use:               "set NAME",
+		Use:               "set [NAME]",
 		Short:             "Update a guest's CPUs, memory, or network mode",
-		Args:              cobra.ExactArgs(1),
+		Args:              cobra.MaximumNArgs(1),
 		ValidArgsFunction: a.guestArgs,
 		RunE: func(c *cobra.Command, args []string) error {
-			g, err := a.get(c.Context(), args[0])
+			name, _, err := a.resolveTargetGuest(c.Context(), args, "antic guest set [NAME] [flags]")
+			if err != nil {
+				return err
+			}
+			g, err := a.get(c.Context(), name)
 			if err != nil {
 				return err
 			}
@@ -233,7 +252,7 @@ func (a *app) guestSet() *cobra.Command {
 			if !changed {
 				return errors.New("specify at least one of --cpus, --memory, or --network")
 			}
-			name := g.Name()
+			name = g.Name()
 			if err := a.cfg.SetResources(name, u, a.dirs.Home); err != nil {
 				return err
 			}
@@ -267,9 +286,12 @@ func (a *app) guestRm() *cobra.Command {
 	c := &cobra.Command{
 		Use:               "rm NAME...",
 		Short:             "Delete guests (their state and their config file)",
-		Args:              cobra.MinimumNArgs(1),
+		Args:              cobra.ArbitraryArgs,
 		ValidArgsFunction: a.guestsArgs,
 		RunE: func(c *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return errors.New("syntax error: guest NAME is required (usage: antic guest rm NAME...)")
+			}
 			if err := a.load(c.Context()); err != nil {
 				return err
 			}
@@ -308,7 +330,14 @@ func (a *app) eachGuest(c *cobra.Command, args []string, all bool, fn func(*gues
 		}
 	} else {
 		if len(args) == 0 {
-			return errors.New("syntax error: guest name is required")
+			names := a.cfg.Names()
+			if len(names) == 1 {
+				args = names
+			} else if len(names) == 0 {
+				return fmt.Errorf("no guests defined (run \"antic guest create <name>\")")
+			} else {
+				return fmt.Errorf("guest NAME is required\n\nAvailable guests: %s", strings.Join(names, ", "))
+			}
 		}
 		for _, n := range args {
 			g, err := a.mgr.Get(n)
@@ -329,9 +358,9 @@ func (a *app) eachGuest(c *cobra.Command, args []string, all bool, fn func(*gues
 
 func (a *app) guestStart() *cobra.Command {
 	return &cobra.Command{
-		Use:               "start NAME...",
+		Use:               "start [NAME...]",
 		Short:             "Start guests and wait until they are ready",
-		Args:              cobra.MinimumNArgs(1),
+		Args:              cobra.ArbitraryArgs,
 		ValidArgsFunction: a.guestsArgs,
 		RunE: func(c *cobra.Command, args []string) error {
 			return a.eachGuest(c, args, false, func(g *guest.Guest) error { return g.Start(c.Context()) })
@@ -342,13 +371,11 @@ func (a *app) guestStart() *cobra.Command {
 func (a *app) guestStop() *cobra.Command {
 	var all bool
 	c := &cobra.Command{
-		Use:               "stop NAME... | --all",
+		Use:               "stop [NAME...] | --all",
 		Short:             "Shut guests down",
+		Args:              cobra.ArbitraryArgs,
 		ValidArgsFunction: a.guestsArgs,
 		RunE: func(c *cobra.Command, args []string) error {
-			if len(args) == 0 && !all {
-				return errors.New("syntax error: guest name is required (or use --all)")
-			}
 			return a.eachGuest(c, args, all, func(g *guest.Guest) error { return g.Stop(c.Context()) })
 		},
 	}
@@ -358,9 +385,9 @@ func (a *app) guestStop() *cobra.Command {
 
 func (a *app) guestRestart() *cobra.Command {
 	return &cobra.Command{
-		Use:               "restart NAME...",
+		Use:               "restart [NAME...]",
 		Short:             "Restart guests",
-		Args:              cobra.MinimumNArgs(1),
+		Args:              cobra.ArbitraryArgs,
 		ValidArgsFunction: a.guestsArgs,
 		RunE: func(c *cobra.Command, args []string) error {
 			return a.eachGuest(c, args, false, func(g *guest.Guest) error {
@@ -383,15 +410,16 @@ func (a *app) guestShow() *cobra.Command {
 		Args:              cobra.MaximumNArgs(1),
 		ValidArgsFunction: a.guestArgs,
 		RunE: func(c *cobra.Command, args []string) error {
-			if len(args) == 0 {
-				if showPath {
-					fmt.Println(a.dirs.GuestsConfigDir())
-					return nil
-				}
-				return fmt.Errorf("accepts 1 arg(s), received 0")
+			if len(args) == 0 && showPath {
+				fmt.Println(a.dirs.GuestsConfigDir())
+				return nil
 			}
 
-			name := args[0]
+			name, _, err := a.resolveTargetGuest(c.Context(), args, "antic guest show [NAME] [flags]")
+			if err != nil {
+				return err
+			}
+
 			if showPath {
 				cfg, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
 				if err != nil {
@@ -457,12 +485,16 @@ func (a *app) guestLogs() *cobra.Command {
 	var units []string
 	var lines int
 	c := &cobra.Command{
-		Use:               "logs NAME",
+		Use:               "logs [NAME]",
 		Short:             "Print a guest's console log (or, with --journal, its systemd journal)",
-		Args:              cobra.ExactArgs(1),
+		Args:              cobra.MaximumNArgs(1),
 		ValidArgsFunction: a.guestArgs,
 		RunE: func(c *cobra.Command, args []string) error {
-			g, err := a.get(c.Context(), args[0])
+			name, _, err := a.resolveTargetGuest(c.Context(), args, "antic guest logs [NAME] [flags]")
+			if err != nil {
+				return err
+			}
+			g, err := a.get(c.Context(), name)
 			if err != nil {
 				return err
 			}
@@ -494,12 +526,16 @@ func (a *app) guestLogs() *cobra.Command {
 
 func (a *app) guestApply() *cobra.Command {
 	return &cobra.Command{
-		Use:               "apply NAME",
+		Use:               "apply [NAME]",
 		Short:             "Build the guest's OS and switch to it",
-		Args:              cobra.ExactArgs(1),
+		Args:              cobra.MaximumNArgs(1),
 		ValidArgsFunction: a.guestArgs,
 		RunE: func(c *cobra.Command, args []string) error {
-			g, err := a.get(c.Context(), args[0])
+			name, _, err := a.resolveTargetGuest(c.Context(), args, "antic guest apply [NAME]")
+			if err != nil {
+				return err
+			}
+			g, err := a.get(c.Context(), name)
 			if err != nil {
 				return err
 			}

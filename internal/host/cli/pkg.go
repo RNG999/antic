@@ -12,23 +12,35 @@ import (
 
 func (a *app) guestInstall() *cobra.Command {
 	return &cobra.Command{
-		Use:               "install NAME PKG...",
-		Short:             "Install packages in guest NAME and apply",
-		Args:              cobra.MinimumNArgs(2),
+		Use:               "install [NAME] PKG...",
+		Short:             "Install packages in a guest and apply",
+		Args:              cobra.ArbitraryArgs,
 		ValidArgsFunction: a.guestArgs,
-		RunE:              func(c *cobra.Command, args []string) error { return a.editPkgs(c, args[0], args[1:], true) },
+		RunE: func(c *cobra.Command, args []string) error {
+			name, pkgs, err := a.resolveGuestAndItems(c.Context(), args, "antic guest install [NAME] PKG...", "PKG")
+			if err != nil {
+				return err
+			}
+			return a.editPkgs(c, name, pkgs, true)
+		},
 	}
 }
 
 func (a *app) guestUninstall() *cobra.Command {
 	return &cobra.Command{
-		Use:   "uninstall NAME PKG...",
-		Short: "Uninstall packages from guest NAME and apply",
-		Args:  cobra.MinimumNArgs(2),
+		Use:   "uninstall [NAME] PKG...",
+		Short: "Uninstall packages from a guest and apply",
+		Args:  cobra.ArbitraryArgs,
 		ValidArgsFunction: a.guestThen(func(g *config.Guest, rest []string) ([]string, cobra.ShellCompDirective) {
 			return without(g.Packages, rest), cobra.ShellCompDirectiveNoFileComp
 		}),
-		RunE: func(c *cobra.Command, args []string) error { return a.editPkgs(c, args[0], args[1:], false) },
+		RunE: func(c *cobra.Command, args []string) error {
+			name, pkgs, err := a.resolveGuestAndItems(c.Context(), args, "antic guest uninstall [NAME] PKG...", "PKG")
+			if err != nil {
+				return err
+			}
+			return a.editPkgs(c, name, pkgs, false)
+		},
 	}
 }
 
