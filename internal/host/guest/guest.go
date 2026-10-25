@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/RNG999/antic/internal/host/chv"
@@ -124,6 +125,15 @@ func (m *Manager) Get(name string) (*Guest, error) {
 	inst, ok, err := m.Dirs.Lookup(c.Name)
 	if err != nil {
 		return nil, err
+	}
+	if ok {
+		// Check ownership if an origin file exists
+		if origBytes, err := os.ReadFile(inst.OriginFile()); err == nil {
+			orig := strings.TrimSpace(string(origBytes))
+			if orig != "" && orig != c.Path {
+				return nil, fmt.Errorf("guest %q already exists and is owned by %s (cannot use from %s)", c.Name, orig, c.Path)
+			}
+		}
 	}
 	return &Guest{m: m, Cfg: c, Inst: inst, Created: ok}, nil
 }

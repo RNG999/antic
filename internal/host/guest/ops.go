@@ -68,6 +68,8 @@ func (g *Guest) Apply(ctx context.Context) error {
 		g.Inst, g.Created = inst, true
 		g.m.logf("guest %s has ID %s", g.Name(), inst.ID)
 	}
+	// Record config origin
+	_ = os.WriteFile(g.Inst.OriginFile(), []byte(g.Cfg.Path+"\n"), 0o600)
 	g.m.logf("installing %s into the guest store...", system)
 	if err := nix.Install(ctx, g.store(), system); err != nil {
 		return err

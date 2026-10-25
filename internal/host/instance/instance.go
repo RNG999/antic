@@ -71,6 +71,7 @@ func (i Instance) StateDir() string { return filepath.Join(i.d.guestsDir(), i.ID
 func (i Instance) StoreDir() string { return filepath.Join(i.StateDir(), "store") } // the guest's /nix lives in store/nix
 func (i Instance) LogDir() string   { return filepath.Join(i.StateDir(), "log") }
 func (i Instance) Console() string  { return filepath.Join(i.LogDir(), "console.log") }
+func (i Instance) OriginFile() string { return filepath.Join(i.StateDir(), "origin") }
 func (i Instance) RunDir() string   { return filepath.Join(i.d.RunRoot, i.ID) }
 func (i Instance) VMDir() string    { return filepath.Join(i.RunDir(), "vm") }   // cloud-hypervisor's own sockets
 func (i Instance) SockDir() string  { return filepath.Join(i.RunDir(), "sock") } // helpers' sockets, one directory each

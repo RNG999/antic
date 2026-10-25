@@ -240,6 +240,9 @@ func LoadWithProject(dir, home, startDir string) (*Config, error) {
 			if err != nil {
 				c.Errors[filepath.Base(ppath)] = err
 			} else {
+				if existing, ok := c.Guests[g.Name]; ok && existing.Path != g.Path {
+					fmt.Fprintf(os.Stderr, "antic: warning: guest %q in %s shadows %s\n", g.Name, g.Path, existing.Path)
+				}
 				// Project guest takes precedence or adds to guests
 				c.Guests[g.Name] = g
 			}
