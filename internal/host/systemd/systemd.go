@@ -138,7 +138,11 @@ const msRec = 0x4000 // MS_REC
 func binds(name string, paths []string) Property {
 	b := make([]bindPath, len(paths))
 	for i, p := range paths {
-		b[i] = bindPath{p, p, false, msRec}
+		src, dst, ok := strings.Cut(p, ":")
+		if !ok {
+			src, dst = p, p
+		}
+		b[i] = bindPath{src, dst, ok, msRec}
 	}
 	return Prop(name, b)
 }
@@ -191,9 +195,4 @@ func UnixOnly() Property {
 // BindsTo ties a unit's lifetime to another (stopped when it stops).
 func BindsTo(unit string) []Property {
 	return []Property{Prop("BindsTo", []string{unit}), Prop("After", []string{unit})}
-}
-
-// BindReadOnly mounts src read-only at dst inside the unit's mount namespace.
-func BindReadOnly(src, dst string) Property {
-	return Prop("BindReadOnlyPaths", []bindPath{{src, dst, true, msRec}})
 }

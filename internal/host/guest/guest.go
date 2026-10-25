@@ -73,11 +73,10 @@ func FindBinaries(d instance.Dirs) Binaries {
 // confine returns systemd sandbox properties for a unit, also binding the
 // rootless Nix store at /nix when helpers link against /nix/store.
 func (m *Manager) confine(rw, ro []string) []systemd.Property {
-	props := systemd.Confine(rw, ro)
 	if nix, err := m.nixBuilder(); err == nil && nix.Root() != "" {
-		props = append(props, systemd.BindReadOnly(filepath.Join(nix.Root(), "nix"), "/nix"))
+		ro = append(append([]string{}, ro...), filepath.Join(nix.Root(), "nix")+":/nix")
 	}
-	return props
+	return systemd.Confine(rw, ro)
 }
 
 // Manager runs guests.

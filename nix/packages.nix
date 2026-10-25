@@ -59,5 +59,10 @@ in
       pkgs.passt
       pkgs.nftables
     ];
+    postBuild = ''
+      for f in "$out/bin"/*; do
+        cp --remove-destination "$(realpath "$f")" "$f"
+      done
+    '';
   };
 }
