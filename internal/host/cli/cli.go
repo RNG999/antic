@@ -97,7 +97,8 @@ func (a *app) loadConfig() error {
 	if a.cfg != nil {
 		return nil
 	}
-	cfg, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
+	cwd, _ := os.Getwd()
+	cfg, err := config.LoadWithProject(a.dirs.GuestsConfigDir(), a.dirs.Home, cwd)
 	if err != nil {
 		return err
 	}
@@ -221,22 +222,20 @@ func (a *app) guestArgs(c *cobra.Command, args []string, _ string) ([]string, co
 	if len(args) > 0 {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
-	cfg, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
-	if err != nil {
+	if err := a.loadConfig(); err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
-	return cfg.Names(), cobra.ShellCompDirectiveNoFileComp
+	return a.cfg.Names(), cobra.ShellCompDirectiveNoFileComp
 }
 
 // guestsArgs completes guest names for every argument (commands taking
 // NAME...), leaving out names already given.
 func (a *app) guestsArgs(c *cobra.Command, args []string, _ string) ([]string, cobra.ShellCompDirective) {
-	cfg, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
-	if err != nil {
+	if err := a.loadConfig(); err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
 	var out []string
-	for _, n := range cfg.Names() {
+	for _, n := range a.cfg.Names() {
 		if !slices.Contains(args, n) {
 			out = append(out, n)
 		}
@@ -251,11 +250,10 @@ func (a *app) guestThen(fn func(g *config.Guest, rest []string) ([]string, cobra
 		if len(args) == 0 {
 			return a.guestArgs(c, args, toComplete)
 		}
-		cfg, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
-		if err != nil {
+		if err := a.loadConfig(); err != nil {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
-		g, ok := cfg.Guests[args[0]]
+		g, ok := a.cfg.Guests[args[0]]
 		if !ok {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}

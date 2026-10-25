@@ -1,6 +1,7 @@
 # antic project environment configuration
 # Defines the formal verification guest environment for this repository.
 
+name = "formal"
 description = "antic formal verification environment"
 flake = "nix/formal#formal"
 

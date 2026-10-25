@@ -94,9 +94,9 @@ type Share struct {
 	ReadOnly bool   `toml:"-" json:"readonly,omitempty"`
 }
 
-// Guest is one ~/.config/antic/guests/<name>.toml file.
+// Guest is one ~/.config/antic/guests/<name>.toml or antic.toml file.
 type Guest struct {
-	Name string `toml:"-"`
+	Name string `toml:"name"`
 	Path string `toml:"-"`
 
 	Description string            `toml:"description"`
@@ -204,16 +204,19 @@ func ValidPackage(s string) bool { return pkgRE.MatchString(s) }
 // Parse errors in individual guests are recorded in c.Errors rather than
 // causing Load to fail, so valid guests remain usable.
 func Load(dir, home string) (*Config, error) {
+	return LoadWithProject(dir, home, "")
+}
+
+// LoadWithProject reads guests from dir, and additionally discovers a project
+// guest config (e.g. antic.toml) from startDir (walking up parent directories).
+func LoadWithProject(dir, home, startDir string) (*Config, error) {
 	c := &Config{
 		Guests: map[string]*Guest{},
 		Errors: map[string]error{},
 		dir:    dir,
 	}
 	entries, err := os.ReadDir(dir)
-	if errors.Is(err, os.ErrNotExist) {
-		return c, nil
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("%s: %w", dir, err)
 	}
 	for _, e := range entries {
@@ -229,15 +232,86 @@ func Load(dir, home string) (*Config, error) {
 		}
 		c.Guests[name] = g
 	}
+
+	// Discover project antic.toml if startDir is provided
+	if startDir != "" {
+		if ppath := findProjectConfig(startDir); ppath != "" {
+			g, err := LoadProjectGuest(ppath, home)
+			if err != nil {
+				c.Errors[filepath.Base(ppath)] = err
+			} else {
+				// Project guest takes precedence or adds to guests
+				c.Guests[g.Name] = g
+			}
+		}
+	}
+
 	return c, nil
 }
 
-// LoadGuest reads and validates a single guest's TOML file.
+// LoadProjectGuest reads and validates a project-level antic.toml file.
+// In project-level configs, "name" is strictly required, and relative paths
+// (e.g. for flake or shares) are resolved relative to the directory containing
+// antic.toml.
+func LoadProjectGuest(path, home string) (*Guest, error) {
+	var g Guest
+	md, err := toml.DecodeFile(path, &g)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if g.Name == "" {
+		return nil, fmt.Errorf("%s: \"name\" is required", path)
+	}
+	g.Path = path
+	var errs []error
+	if !ValidName(g.Name) {
+		errs = append(errs, fmt.Errorf("invalid guest name %q (a-z, 0-9 and -, up to 32 characters)", g.Name))
+	}
+	if und := md.Undecoded(); len(und) > 0 {
+		for _, k := range und {
+			errs = append(errs, fmt.Errorf("unknown key %q%s", k.String(), suggest(k)))
+		}
+	}
+	baseDir := filepath.Dir(path)
+	errs = append(errs, g.normalize(home, baseDir)...)
+	if len(errs) > 0 {
+		return nil, fmt.Errorf("%s:\n  %w", path, joinIndented(errs))
+	}
+	return &g, nil
+}
+
+func findProjectConfig(start string) string {
+	curr, err := filepath.Abs(start)
+	if err != nil {
+		return ""
+	}
+	for {
+		candidate := filepath.Join(curr, "antic.toml")
+		if fi, err := os.Stat(candidate); err == nil && !fi.IsDir() {
+			return candidate
+		}
+		parent := filepath.Dir(curr)
+		if parent == curr {
+			break
+		}
+		curr = parent
+	}
+	return ""
+}
+
+// LoadGuest reads and validates a single global guest TOML file (~/.config/antic/guests/<name>.toml).
+// In global guest files, paths must be absolute or start with ~/.
 func LoadGuest(path, name, home string) (*Guest, error) {
 	var g Guest
 	md, err := toml.DecodeFile(path, &g)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if name == "" {
+		name = g.Name
+	}
+	if name == "" {
+		return nil, fmt.Errorf("%s: \"name\" is required", path)
 	}
 	g.Name = name
 	g.Path = path
@@ -265,7 +339,11 @@ func (c *Config) GuestPath(name string) string {
 	return filepath.Join(c.dir, name+".toml")
 }
 
-func (g *Guest) normalize(home string) []error {
+func (g *Guest) normalize(home string, baseDir ...string) []error {
+	var dir string
+	if len(baseDir) > 0 {
+		dir = baseDir[0]
+	}
 	var errs []error
 	if g.Flake != "" {
 		rawPath, attr, hasAttr := strings.Cut(g.Flake, "#")
@@ -273,7 +351,7 @@ func (g *Guest) normalize(home string) []error {
 			attr = "antic"
 		}
 		var p string
-		p, errs = absPath(rawPath, home, "flake", errs)
+		p, errs = resolvePath(rawPath, home, dir, "flake", errs)
 		if real, err := filepath.EvalSymlinks(p); err == nil {
 			p = real
 		}
@@ -425,7 +503,7 @@ func (g *Guest) normalize(home string) []error {
 		src := g.Shares[i].Source
 		if !strings.Contains(src, "://") {
 			var abs string
-			abs, errs = absPath(src, home, fmt.Sprintf("shares[%d].source", i), errs)
+			abs, errs = resolvePath(src, home, dir, fmt.Sprintf("shares[%d].source", i), errs)
 			g.Shares[i].Path = abs
 			g.Shares[i].Source = tildePath(abs, home)
 			if g.Shares[i].Target == "" {
@@ -436,7 +514,7 @@ func (g *Guest) normalize(home string) []error {
 				errs = append(errs, fmt.Errorf("shares[%d]: remote share requires target mount path", i))
 			} else {
 				var abs string
-				abs, errs = absPath(g.Shares[i].Target, home, fmt.Sprintf("shares[%d].target", i), errs)
+				abs, errs = resolvePath(g.Shares[i].Target, home, dir, fmt.Sprintf("shares[%d].target", i), errs)
 				g.Shares[i].Target = abs
 			}
 		}
@@ -488,19 +566,27 @@ func ParsePort(raw string) (Port, error) {
 	return Port{Host: hp, Guest: gp, Proto: proto}, nil
 }
 
-// absPath expands "~" and requires an absolute path without control
-// characters.
-func absPath(p, home, where string, errs []error) (string, []error) {
+// resolvePath resolves a path relative to baseDir (if relative) or home (if starts with ~).
+func resolvePath(p, home, baseDir, where string, errs []error) (string, []error) {
 	if p == "~" || strings.HasPrefix(p, "~/") {
 		p = filepath.Join(home, strings.TrimPrefix(p, "~"))
-	}
-	if !filepath.IsAbs(p) {
-		return p, append(errs, fmt.Errorf("%s: %q must be absolute or start with ~/", where, p))
+	} else if !filepath.IsAbs(p) {
+		if baseDir != "" {
+			p = filepath.Join(baseDir, p)
+		} else {
+			return p, append(errs, fmt.Errorf("%s: %q must be absolute or start with ~/", where, p))
+		}
 	}
 	if strings.ContainsFunc(p, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 		return p, append(errs, fmt.Errorf("%s: %q contains control characters", where, p))
 	}
 	return filepath.Clean(p), errs
+}
+
+// absPath expands "~" and requires an absolute path without control
+// characters.
+func absPath(p, home, where string, errs []error) (string, []error) {
+	return resolvePath(p, home, "", where, errs)
 }
 
 func within(path, dir string) bool { return path == dir || strings.HasPrefix(path, dir+"/") }

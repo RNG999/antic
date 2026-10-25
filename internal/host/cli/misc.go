@@ -27,11 +27,7 @@ func (a *app) editGuestCmd(use string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			cfg, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
-			if err != nil {
-				return err
-			}
-			g, err := cfg.Get(name)
+			g, err := a.cfg.Get(name)
 			if err != nil {
 				return err
 			}
@@ -44,7 +40,8 @@ func (a *app) editGuestCmd(use string) *cobra.Command {
 			if err := cmd.Run(); err != nil {
 				return err
 			}
-			_, err = config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
+			cwd, _ := os.Getwd()
+			_, err = config.LoadWithProject(a.dirs.GuestsConfigDir(), a.dirs.Home, cwd)
 			return err
 		},
 	}

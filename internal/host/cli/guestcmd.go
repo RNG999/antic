@@ -436,11 +436,7 @@ func (a *app) guestShow() *cobra.Command {
 			}
 
 			if showPath {
-				cfg, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
-				if err != nil {
-					return err
-				}
-				g, err := cfg.Get(name)
+				g, err := a.cfg.Get(name)
 				if err != nil {
 					return err
 				}
@@ -449,11 +445,7 @@ func (a *app) guestShow() *cobra.Command {
 			}
 
 			if showConfig {
-				cfg, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
-				if err != nil {
-					return err
-				}
-				g, err := cfg.Get(name)
+				g, err := a.cfg.Get(name)
 				if err != nil {
 					return err
 				}
