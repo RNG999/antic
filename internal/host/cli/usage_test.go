@@ -30,11 +30,7 @@ func UsageText() string {
 
 	buf.WriteString("antic guest pkg ls NAME [--json] | add NAME PKG... | rm NAME PKG...\n")
 	buf.WriteString("antic guest share ls NAME [--json] | add NAME [--ro] DIR... | rm NAME DIR...\n")
-	buf.WriteString("antic guest port ls NAME [--json] | add NAME PORT... | rm NAME PORT...\n\n")
-
-	buf.WriteString("antic pkg ls NAME [--json] | add NAME PKG... | rm NAME PKG...\n")
-	buf.WriteString("antic share ls NAME [--json] | add NAME [--ro] DIR... | rm NAME DIR...\n")
-	buf.WriteString("antic port ls NAME [--json] | add NAME PORT... | rm NAME PORT...\n")
+	buf.WriteString("antic guest port ls NAME [--json] | add NAME PORT... | rm NAME PORT...\n")
 	buf.WriteString("antic config path [NAME] | check | edit NAME\n")
 	buf.WriteString("antic skill install [-p] | rm [-p] | path [-p]\n")
 	buf.WriteString("antic doctor | update [--source DIR] | version | completion SHELL\n")
