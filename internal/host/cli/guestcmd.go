@@ -463,7 +463,11 @@ func (a *app) guestShow() *cobra.Command {
 					i.Name, orDash(i.ID), state(i), i.OS, orDash(i.System),
 					i.CPUs, i.Memory, i.Network)
 				for _, p := range i.Ports {
-					fmt.Fprintf(w, "Port:\t127.0.0.1:%d -> %d\n", p.Host, p.Guest)
+					desc := ""
+					if p.Description != "" {
+						desc = fmt.Sprintf(" (%s)", p.Description)
+					}
+					fmt.Fprintf(w, "Port:\t127.0.0.1:%d -> %d%s\n", p.Host, p.Guest, desc)
 				}
 				for _, s := range i.Shares {
 					fmt.Fprintf(w, "Share:\t%s (%s%s)\n", s.Path, mode(s.ReadOnly), map[bool]string{true: ", mounted"}[s.Mounted])

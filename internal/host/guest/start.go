@@ -248,14 +248,18 @@ func (g *Guest) vmConfig(ctx context.Context, system string, bt *boot) (chv.VMCo
 			return chv.VMConfig{}, fmt.Errorf("share %s: %w", path, err)
 		}
 		cfg.FS = append(cfg.FS, chv.FS{ID: "fs-" + tag, Tag: tag, Socket: sock, NumQueues: 1, QueueSize: 1024})
-		bt.Shares = append(bt.Shares, bootShare{Share: config.Share{Path: path, ReadOnly: s.ReadOnly}, Tag: tag})
+		bt.Shares = append(bt.Shares, bootShare{Share: config.Share{Path: path, ReadOnly: s.ReadOnly, Source: s.Source, Mode: s.Mode, Target: s.Target}, Tag: tag})
 		// Sessions require antic-ready.target, which requires every share.
 		mode := "rw"
 		if s.ReadOnly {
 			mode = "ro"
 		}
+		target := path
+		if s.Target != "" {
+			target = s.Target
+		}
 		fmt.Fprintf(&fstab, "%s %s virtiofs %s,nosuid,nodev,x-systemd.required-by=antic-ready.target,x-systemd.before=antic-ready.target 0 0\n",
-			tag, fstabEscape(path), mode)
+			tag, fstabEscape(target), mode)
 	}
 
 	if g.Cfg.Network.Mode != config.NetworkNone {

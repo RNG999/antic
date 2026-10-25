@@ -1,22 +1,31 @@
 # ~/.config/antic/guests/dev.toml
 description = "tools for my agent"
 packages = ["git"]
+
+[spec]
 cpus = 2
 memory = "4G"
-network = "internet"   # none | internet | lan
 
-# Optional allow list. When set, the guest can reach only these: domains
-# (subdomains included), IP addresses and CIDRs. Everything else, including
-# DNS for other names, is refused.
-# allow = ["github.com", "githubusercontent.com", "registry.npmjs.org", "192.168.11.50"]
+[network]
+mode = "internet"   # none | internet | lan
 
-[[shares]]
-path = "~/Work"
+# Optional egress allow list. Domains (and subdomains if prefixed with *.),
+# IP addresses and CIDRs (must use CIDR notation like /32 or /24).
+# allow = ["github.com", "*.githubusercontent.com", "registry.npmjs.org", "192.168.11.50/32"]
+# deny = [...]
 
-# [[shares]]
-# path = "~/Docs/spec"
-# readonly = true
-
-# [[ports]]
+# Port forwarding: forward TCP ports from host to guest
+# [[network.ports]]
 # host = 8080
 # guest = 80
+
+[[shares]]
+source = "~/Work"
+mode = "rw"         # "rw" | "ro"
+
+# [[shares]]
+# source = "~/Docs/spec"
+# mode = "ro"
+
+[env]
+# EDITOR = "nvim"

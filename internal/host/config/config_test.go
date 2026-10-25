@@ -157,6 +157,65 @@ func TestEdits(t *testing.T) {
 	}
 }
 
+func TestLoadNewFormat(t *testing.T) {
+	const newDev = `description = "new format guest"
+packages = ["git"]
+
+[spec]
+cpus = 4
+memory = "8G"
+
+[network]
+mode = "internet"
+
+[[network.ports]]
+host = 3000
+guest = 3000
+
+[[network.ports]]
+host = 8080
+guest = 80
+
+[[shares]]
+source = "~/Work"
+mode = "rw"
+
+[[shares]]
+source = "~/Docs/spec"
+mode = "ro"
+
+[env]
+EDITOR = "nvim"
+DEBUG = "1"
+`
+	dir := t.TempDir()
+	writeGuest(t, dir, "newdev", newDev)
+
+	c, err := Load(dir, home)
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	g := c.Guests["newdev"]
+	if g == nil {
+		t.Fatalf("guest not found")
+	}
+	if g.CPUs != 4 || g.Spec.CPUs != 4 || g.Memory != "8G" || g.Spec.Memory != "8G" {
+		t.Errorf("unexpected spec: cpus=%d, memory=%s", g.CPUs, g.Memory)
+	}
+	if len(g.Ports) != 2 || g.Ports[0].Host != 3000 || g.Ports[1].Guest != 80 {
+		t.Errorf("unexpected ports: %+v", g.Ports)
+	}
+	if len(g.Shares) != 2 || g.Shares[0].Path != "/home/alice/Work" || g.Shares[0].Mode != "rw" || g.Shares[0].ReadOnly {
+		t.Errorf("unexpected share 0: %+v", g.Shares[0])
+	}
+	if g.Shares[1].Path != "/home/alice/Docs/spec" || g.Shares[1].Mode != "ro" || !g.Shares[1].ReadOnly {
+		t.Errorf("unexpected share 1: %+v", g.Shares[1])
+	}
+	if g.Env["EDITOR"] != "nvim" || g.Env["DEBUG"] != "1" {
+		t.Errorf("unexpected env: %+v", g.Env)
+	}
+}
+
 func TestParseSize(t *testing.T) {
 	for in, want := range map[string]int64{"4G": 4 << 30, "512M": 512 << 20, "1024": 1024, "2k": 2048} {
 		if got, err := ParseSize(in); err != nil || got != want {

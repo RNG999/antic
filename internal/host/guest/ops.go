@@ -227,6 +227,16 @@ func (g *Guest) Exec(ctx context.Context, c transport.Cmd) (int, error) {
 	if err := g.EnsureRunning(ctx); err != nil {
 		return 0, err
 	}
+	if len(g.Cfg.Env) > 0 {
+		var envKeys []string
+		for k := range g.Cfg.Env {
+			envKeys = append(envKeys, k)
+		}
+		slices.Sort(envKeys)
+		for _, k := range envKeys {
+			c.Env = append(c.Env, k+"="+g.Cfg.Env[k])
+		}
+	}
 	return g.vsock().Exec(ctx, c)
 }
 

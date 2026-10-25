@@ -91,19 +91,24 @@ Each guest is configured in its own TOML file at `~/.config/antic/guests/<name>.
 ```toml
 description = "tools for my agent"
 packages = ["git", "ripgrep"]
+
+[spec]
 cpus = 2
 memory = "4G"
 
 [network]
 mode = "internet"   # none | internet | lan
-# allow = ["github.com", "1.1.1.1/32"]  # Optional: default deny whitelist
+# allow = ["github.com", "*.githubusercontent.com", "1.1.1.1/32"]  # Optional: default deny whitelist
 # deny = ["10.0.0.0/8"]                 # Optional: blacklist (CIDR or domain)
 
-[[shares]]
-path = "~/Work"
-readonly = false
-
-[[ports]]
+[[network.ports]]
 host = 8080
 guest = 80
+
+[[shares]]
+source = "~/Work"
+mode = "rw"         # "rw" | "ro"
+
+[env]
+# EDITOR = "nvim"
 ```

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -38,12 +39,14 @@ func (c *Config) CreateGuest(name string, g Guest, home string) error {
 	if cpus == 0 {
 		cpus = 2
 	}
-	lines = append(lines, fmt.Sprintf("cpus = %d", cpus))
 	mem := g.Memory
 	if mem == "" {
 		mem = "4G"
 	}
-	lines = append(lines, "memory = "+tomlString(mem))
+	lines = append(lines, "", "[spec]",
+		fmt.Sprintf("cpus = %d", cpus),
+		"memory = "+tomlString(mem))
+
 	lines = append(lines, "", "[network]")
 	netMode := g.Network.Mode
 	if netMode == "" {
@@ -56,16 +59,37 @@ func (c *Config) CreateGuest(name string, g Guest, home string) error {
 	if len(g.Network.Deny) > 0 {
 		lines = append(lines, "deny = "+tomlArray(g.Network.Deny))
 	}
-	for _, s := range g.Shares {
-		lines = append(lines, "", "[[shares]]", "path = "+tomlString(tildePath(s.Path, home)))
-		if s.ReadOnly {
-			lines = append(lines, "readonly = true")
-		}
-	}
 	for _, p := range g.Ports {
-		lines = append(lines, "", "[[ports]]",
+		lines = append(lines, "", "[[network.ports]]",
 			fmt.Sprintf("host = %d", p.Host),
 			fmt.Sprintf("guest = %d", p.Guest))
+		if p.Description != "" {
+			lines = append(lines, "description = "+tomlString(p.Description))
+		}
+	}
+	for _, s := range g.Shares {
+		sp := s.Source
+		if sp == "" {
+			sp = s.Path
+		}
+		mode := "rw"
+		if s.ReadOnly || s.Mode == "ro" {
+			mode = "ro"
+		}
+		lines = append(lines, "", "[[shares]]",
+			"source = "+tomlString(tildePath(sp, home)),
+			"mode = "+tomlString(mode))
+	}
+	if len(g.Env) > 0 {
+		lines = append(lines, "", "[env]")
+		var keys []string
+		for k := range g.Env {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+		for _, k := range keys {
+			lines = append(lines, fmt.Sprintf("%s = %s", k, tomlString(g.Env[k])))
+		}
 	}
 	return writeGuestAtomic(path, name, home, lines)
 }
@@ -89,18 +113,29 @@ func (c *Config) SetPackages(guest string, pkgs []string, home string) error {
 
 // AddShare appends a [[shares]] entry unless already configured.
 func (c *Config) AddShare(guest string, s Share, home string) error {
+	sp := s.Source
+	if sp == "" {
+		sp = s.Path
+	}
 	if g := c.Guests[guest]; g != nil {
 		for _, have := range g.Shares {
-			if have.Path == s.Path {
+			hp := have.Source
+			if hp == "" {
+				hp = have.Path
+			}
+			if hp == sp {
 				return nil
 			}
 		}
 	}
 	return c.editGuest(guest, home, func(lines []string) ([]string, error) {
-		lines = append(lines, "", "[[shares]]", "path = "+tomlString(tildePath(s.Path, home)))
-		if s.ReadOnly {
-			lines = append(lines, "readonly = true")
+		mode := "rw"
+		if s.ReadOnly || s.Mode == "ro" {
+			mode = "ro"
 		}
+		lines = append(lines, "", "[[shares]]",
+			"source = "+tomlString(tildePath(sp, home)),
+			"mode = "+tomlString(mode))
 		return lines, nil
 	})
 }
@@ -115,7 +150,11 @@ func (c *Config) RemoveShare(guest, path, home string) error {
 			if _, err := toml.Decode(strings.Join(body, "\n"), &s); err != nil {
 				return false
 			}
-			p, _ := absPath(s.Path, home, "", nil)
+			sp := s.Source
+			if sp == "" {
+				sp = s.Path
+			}
+			p, _ := absPath(sp, home, "", nil)
 			return p == path
 		})
 		if removed == 0 {
@@ -125,7 +164,7 @@ func (c *Config) RemoveShare(guest, path, home string) error {
 	})
 }
 
-// AddPort appends a [[ports]] entry unless host port is already configured.
+// AddPort appends a [[network.ports]] entry unless host port is already configured.
 func (c *Config) AddPort(guest string, p Port, home string) error {
 	if g := c.Guests[guest]; g != nil {
 		for _, have := range g.Ports {
@@ -135,18 +174,21 @@ func (c *Config) AddPort(guest string, p Port, home string) error {
 		}
 	}
 	return c.editGuest(guest, home, func(lines []string) ([]string, error) {
-		lines = append(lines, "", "[[ports]]",
+		lines = append(lines, "", "[[network.ports]]",
 			fmt.Sprintf("host = %d", p.Host),
 			fmt.Sprintf("guest = %d", p.Guest))
+		if p.Description != "" {
+			lines = append(lines, "description = "+tomlString(p.Description))
+		}
 		return lines, nil
 	})
 }
 
-// RemovePort removes the [[ports]] entry for hostPort.
+// RemovePort removes the [[network.ports]] or [[ports]] entry for hostPort.
 func (c *Config) RemovePort(guest string, hostPort int, home string) error {
 	return c.editGuest(guest, home, func(lines []string) ([]string, error) {
 		out, removed := removeBlocks(lines, func(h string) bool {
-			return h == "ports"
+			return h == "ports" || h == "network.ports"
 		}, func(body []string) bool {
 			var p Port
 			if _, err := toml.Decode(strings.Join(body, "\n"), &p); err != nil {
@@ -172,16 +214,34 @@ type ResourceUpdates struct {
 func (c *Config) SetResources(guest string, u ResourceUpdates, home string) error {
 	return c.editGuest(guest, home, func(lines []string) ([]string, error) {
 		if u.CPUs != nil {
-			lines = setRootKey(lines, "cpus", strconv.Itoa(*u.CPUs))
+			if hasTable(lines, "spec") {
+				lines = setTableKey(lines, "spec", "cpus", strconv.Itoa(*u.CPUs))
+			} else {
+				lines = setRootKey(lines, "cpus", strconv.Itoa(*u.CPUs))
+			}
 		}
 		if u.Memory != nil {
-			lines = setRootKey(lines, "memory", tomlString(*u.Memory))
+			if hasTable(lines, "spec") {
+				lines = setTableKey(lines, "spec", "memory", tomlString(*u.Memory))
+			} else {
+				lines = setRootKey(lines, "memory", tomlString(*u.Memory))
+			}
 		}
 		if u.Network != nil {
 			lines = setTableKey(lines, "network", "mode", tomlString(*u.Network))
 		}
 		return lines, nil
 	})
+}
+
+func hasTable(lines []string, tableName string) bool {
+	header := "[" + tableName + "]"
+	for _, l := range lines {
+		if strings.TrimSpace(l) == header {
+			return true
+		}
+	}
+	return false
 }
 
 // setTableKey sets key in [tableName] table. If [tableName] does not exist,

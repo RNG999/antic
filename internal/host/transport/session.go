@@ -23,6 +23,7 @@ import (
 type Cmd struct {
 	Argv    []string         // empty: interactive login shell
 	Dir     string           // working directory in the guest
+	Env     []string         // extra environment variables (e.g. KEY=VAL)
 	Offline bool             // use the offline session unit (no network)
 	Stdin   io.Reader        // nil: no input
 	Stdout  io.Writer        // nil: discard
@@ -46,6 +47,7 @@ func (v Vsock) Exec(ctx context.Context, c Cmd) (int, error) {
 	req := proto.SessionReq{
 		Argv: c.Argv,
 		Dir:  c.Dir,
+		Env:  c.Env,
 	}
 	if termName := os.Getenv("TERM"); termName != "" {
 		req.Env = append(req.Env, "TERM="+termName)
