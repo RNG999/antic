@@ -1,0 +1,16 @@
+# antic project environment configuration
+# Defines the formal verification guest environment for this repository.
+
+description = "antic formal verification environment"
+flake = "nix/formal#formal"
+
+[spec]
+cpus = 4
+memory = "4G"
+
+[network]
+mode = "internet"
+
+[[shares]]
+source = "."
+mode = "rw"
