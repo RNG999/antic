@@ -25,8 +25,8 @@ import (
 // Exit status for antic's own errors (as opposed to a command's status).
 const exitError = 125
 
-// Version is set at build time.
-var Version = "dev"
+// version is set at build time.
+var version = "dev"
 
 // exitCode carries a command's exit status through cobra.
 type exitCode int
@@ -42,7 +42,7 @@ type app struct {
 
 // Main runs antic and returns its exit status.
 func Main() int {
-	if len(os.Args) > 1 && os.Args[1] == NetnsCmd {
+	if len(os.Args) > 1 && os.Args[1] == netnsCmd {
 		return netnsMain(os.Args[2:])
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
@@ -77,7 +77,7 @@ func (a *app) root() *cobra.Command {
 ~/.config/antic/guests/<name>.toml; host directories are shared at the same path.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Version:       Version,
+		Version:       version,
 	}
 	root.AddGroup(&cobra.Group{ID: "run", Title: "Running commands:"}, &cobra.Group{ID: "manage", Title: "Managing:"})
 	for _, c := range []*cobra.Command{a.runCmd(), a.shellCmd()} {

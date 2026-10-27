@@ -108,8 +108,8 @@ func (p Policy) InRoots(path string) bool {
 
 func within(path, dir string) bool { return path == dir || strings.HasPrefix(path, dir+"/") }
 
-// MaxDepth limits how deep Protected looks for protected names.
-const MaxDepth = 8
+// maxDepth limits how deep Protected looks for protected names.
+const maxDepth = 8
 
 // Protected lists the directories and files under root that host-side tools
 // execute or trust (names), plus bare-repository layouts, so the host can
@@ -143,7 +143,7 @@ func Protected(root string, names []string) ([]string, error) {
 			return nil
 		}
 		if d.IsDir() {
-			if d.Name() == "node_modules" || depth >= MaxDepth {
+			if d.Name() == "node_modules" || depth >= maxDepth {
 				return fs.SkipDir
 			}
 			if bareRepo(path) {

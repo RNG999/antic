@@ -10,15 +10,15 @@ import (
 
 // DNS constants used here.
 const (
-	TypeA     = 1
-	TypeCNAME = 5
-	TypeAAAA  = 28
-	TypeOPT   = 41
-	ClassIN   = 1
+	typeA     = 1
+	typeCNAME = 5
+	typeAAAA  = 28
+	typeOPT   = 41
+	classIN   = 1
 
-	RcodeFormErr  = 1
-	RcodeServFail = 2
-	RcodeRefused  = 5
+	rcodeFormErr  = 1
+	rcodeServFail = 2
+	rcodeRefused  = 5
 
 	headerLen  = 12
 	maxNameLen = 255 // wire format, including length bytes and the root label
@@ -28,20 +28,20 @@ const (
 
 var errMalformed = errors.New("malformed DNS message")
 
-// Question is a validated query question. Labels keep the client's case
+// question is a validated query question. Labels keep the client's case
 // (resolvers may randomize it and compare); Name is the lowercase form used
 // for matching.
-type Question struct {
+type question struct {
 	Labels []string
 	Name   string // lowercase, dot-separated, no trailing dot
 	Type   uint16
 	Class  uint16
 }
 
-// Query is a validated client query.
-type Query struct {
+// dnsQuery is a validated client query.
+type dnsQuery struct {
 	ID       uint16
-	Question Question
+	Question question
 	UDPSize  int  // the client's EDNS UDP payload size (512 without EDNS)
 	EDNS     bool // whether the client sent an OPT record
 }
@@ -63,11 +63,11 @@ func validLabel(b []byte) bool {
 	return true
 }
 
-// ParseQuery validates a client query: a standard query with exactly one
+// parseQuery validates a client query: a standard query with exactly one
 // question (uncompressed, LDH/underscore labels), no answer or authority
 // records, and at most an EDNS OPT record, with nothing after it.
-func ParseQuery(msg []byte) (Query, error) {
-	var q Query
+func parseQuery(msg []byte) (dnsQuery, error) {
+	var q dnsQuery
 	if len(msg) < headerLen || len(msg) > 4096 {
 		return q, errMalformed
 	}
@@ -121,7 +121,7 @@ func ParseQuery(msg []byte) (Query, error) {
 	if off+4 > len(msg) {
 		return q, errMalformed
 	}
-	q.Question = Question{
+	q.Question = question{
 		Labels: labels,
 		Name:   strings.Join(lower, "."),
 		Type:   binary.BigEndian.Uint16(msg[off : off+2]),
@@ -131,7 +131,7 @@ func ParseQuery(msg []byte) (Query, error) {
 	q.UDPSize = minUDPSize
 	if ar == 1 {
 		// OPT: root name, type 41, class = UDP size, TTL, RDLENGTH, RDATA.
-		if off+11 > len(msg) || msg[off] != 0 || binary.BigEndian.Uint16(msg[off+1:off+3]) != TypeOPT {
+		if off+11 > len(msg) || msg[off] != 0 || binary.BigEndian.Uint16(msg[off+1:off+3]) != typeOPT {
 			return q, errMalformed
 		}
 		size := int(binary.BigEndian.Uint16(msg[off+3 : off+5]))
@@ -159,11 +159,11 @@ func appendName(b []byte, labels []string) []byte {
 	return append(b, 0)
 }
 
-// BuildQuery builds the upstream query: a fresh ID, recursion desired, the
+// buildQuery builds the upstream query: a fresh ID, recursion desired, the
 // validated question re-encoded from its labels, and (only if the client used
 // EDNS) an OPT record with no options. Nothing else from the client's message
 // is forwarded.
-func BuildQuery(id uint16, q Question, edns bool, udpSize int) []byte {
+func buildQuery(id uint16, q question, edns bool, udpSize int) []byte {
 	b := make([]byte, headerLen, 64)
 	binary.BigEndian.PutUint16(b[0:2], id)
 	binary.BigEndian.PutUint16(b[2:4], 0x0100) // RD
@@ -176,16 +176,16 @@ func BuildQuery(id uint16, q Question, edns bool, udpSize int) []byte {
 	b = binary.BigEndian.AppendUint16(b, q.Class)
 	if edns {
 		b = append(b, 0)
-		b = binary.BigEndian.AppendUint16(b, TypeOPT)
+		b = binary.BigEndian.AppendUint16(b, typeOPT)
 		b = binary.BigEndian.AppendUint16(b, uint16(udpSize))
 		b = append(b, 0, 0, 0, 0, 0, 0) // extended RCODE/flags, RDLENGTH 0
 	}
 	return b
 }
 
-// BuildError builds a reply with rcode and the client's question (no
+// buildError builds a reply with rcode and the client's question (no
 // records). With rcode 0 this is NODATA (NOERROR without answers).
-func BuildError(id uint16, q Question, rcode int) []byte {
+func buildError(id uint16, q question, rcode int) []byte {
 	b := make([]byte, headerLen, 64)
 	binary.BigEndian.PutUint16(b[0:2], id)
 	binary.BigEndian.PutUint16(b[2:4], 0x8180|uint16(rcode&0xf)) // QR, RD, RA
@@ -196,36 +196,36 @@ func BuildError(id uint16, q Question, rcode int) []byte {
 	return b
 }
 
-// BuildFormErr answers a message that could not be parsed as a query.
-func BuildFormErr(msg []byte) []byte {
+// buildFormErr answers a message that could not be parsed as a query.
+func buildFormErr(msg []byte) []byte {
 	if len(msg) < 2 {
 		return nil
 	}
 	b := make([]byte, headerLen)
 	copy(b[0:2], msg[0:2])
-	binary.BigEndian.PutUint16(b[2:4], 0x8000|RcodeFormErr)
+	binary.BigEndian.PutUint16(b[2:4], 0x8000|rcodeFormErr)
 	return b
 }
 
-// Truncated returns a header-and-question reply with TC set, telling the
+// truncated returns a header-and-question reply with TC set, telling the
 // client to retry over TCP.
-func Truncated(id uint16, q Question) []byte {
-	b := BuildError(id, q, 0)
+func truncated(id uint16, q question) []byte {
+	b := buildError(id, q, 0)
 	b[2] |= 0x02 // TC
 	return b
 }
 
-// Answer is an address from a response, with its TTL.
-type Answer struct {
+// answer is an address from a response, with its TTL.
+type answer struct {
 	Addr netip.Addr
 	TTL  uint32
 }
 
-// Response is the part of an upstream response the filter needs.
-type Response struct {
+// dnsResponse is the part of an upstream response the filter needs.
+type dnsResponse struct {
 	Rcode     int
 	Truncated bool
-	Addrs     []Answer
+	Addrs     []answer
 }
 
 // readName reads a possibly compressed name starting at off and returns it
@@ -279,12 +279,12 @@ func readName(msg []byte, off int) (string, int, error) {
 	}
 }
 
-// ParseResponse validates an upstream response to the query (id, q) and
+// parseResponse validates an upstream response to the query (id, q) and
 // returns the A/AAAA addresses that answer it: records owned by the question
 // name or by a name reached from it through CNAME records in the answer
 // section. Authority and additional sections are ignored.
-func ParseResponse(msg []byte, id uint16, q Question) (Response, error) {
-	var r Response
+func parseResponse(msg []byte, id uint16, q question) (dnsResponse, error) {
+	var r dnsResponse
 	if len(msg) < headerLen {
 		return r, errMalformed
 	}
@@ -338,19 +338,19 @@ func ParseResponse(msg []byte, id uint16, q Question) (Response, error) {
 			return r, errMalformed
 		}
 		rd := msg[o : o+rdlen]
-		if class == ClassIN {
+		if class == classIN {
 			switch typ {
-			case TypeA:
+			case typeA:
 				if rdlen != 4 {
 					return r, errMalformed
 				}
 				rrs = append(rrs, rr{owner: owner, typ: typ, ttl: ttl, addr: netip.AddrFrom4([4]byte(rd))})
-			case TypeAAAA:
+			case typeAAAA:
 				if rdlen != 16 {
 					return r, errMalformed
 				}
 				rrs = append(rrs, rr{owner: owner, typ: typ, ttl: ttl, addr: netip.AddrFrom16([16]byte(rd))})
-			case TypeCNAME:
+			case typeCNAME:
 				target, tend, err := readName(msg, o)
 				if err != nil || tend != o+rdlen {
 					return r, errMalformed
@@ -365,7 +365,7 @@ func ParseResponse(msg []byte, id uint16, q Question) (Response, error) {
 	for changed := true; changed; {
 		changed = false
 		for _, x := range rrs {
-			if x.typ == TypeCNAME && chain[x.owner] && !chain[x.cname] {
+			if x.typ == typeCNAME && chain[x.owner] && !chain[x.cname] {
 				chain[x.cname] = true
 				changed = true
 			}
@@ -375,18 +375,18 @@ func ParseResponse(msg []byte, id uint16, q Question) (Response, error) {
 		}
 	}
 	for _, x := range rrs {
-		if (x.typ == TypeA || x.typ == TypeAAAA) && chain[x.owner] {
-			r.Addrs = append(r.Addrs, Answer{Addr: x.addr, TTL: x.ttl})
+		if (x.typ == typeA || x.typ == typeAAAA) && chain[x.owner] {
+			r.Addrs = append(r.Addrs, answer{Addr: x.addr, TTL: x.ttl})
 		}
 	}
 	return r, nil
 }
 
-// Matches reports whether name (lowercase, no trailing dot) matches any of the
+// matches reports whether name (lowercase, no trailing dot) matches any of the
 // pattern domains. A pattern starting with "*." (e.g. "*.example.com") matches
 // both the apex "example.com" and any subdomain (e.g. "api.example.com").
 // A pattern without "*." matches only the exact domain name.
-func Matches(name string, patterns []string) bool {
+func matches(name string, patterns []string) bool {
 	for _, p := range patterns {
 		if strings.HasPrefix(p, "*.") {
 			base := strings.TrimPrefix(p, "*.")

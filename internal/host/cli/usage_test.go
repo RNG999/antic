@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// UsageText returns the formatted usage summary for the CLI commands.
-func UsageText() string {
+// usageText returns the formatted usage summary for the CLI commands.
+func usageText() string {
 	a := &app{}
 	root := a.root()
 
@@ -46,7 +46,7 @@ func UsageText() string {
 func TestRegisteredCommandsMatchUsage(t *testing.T) {
 	a := &app{}
 	root := a.root()
-	usage := UsageText()
+	usage := usageText()
 
 	// Verify root subcommands are in usage
 	for _, cmd := range root.Commands() {

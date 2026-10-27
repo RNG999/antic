@@ -31,8 +31,8 @@ type CacheEntry struct {
 
 var cacheKeyRE = regexp.MustCompile(`^[0-9a-f]{12}$`)
 
-// ValidCacheKey reports whether k is a valid 12-hex-digit cache key.
-func ValidCacheKey(k string) bool { return cacheKeyRE.MatchString(k) }
+// validCacheKey reports whether k is a valid 12-hex-digit cache key.
+func validCacheKey(k string) bool { return cacheKeyRE.MatchString(k) }
 
 // BuiltinKey returns a deterministic 12-hex-character cache key for the embedded
 // guest flake, target architecture, user, and normalized package list.
@@ -117,7 +117,7 @@ func (n *Nix) BuildBuiltinCached(ctx context.Context, cacheDir, user string, pac
 		onBuild()
 	}
 	flakeDir := filepath.Join(entryDir, "flake")
-	if err := WriteBuiltinFlakeTo(flakeDir, user, normPkgs); err != nil {
+	if err := writeBuiltinFlakeTo(flakeDir, user, normPkgs); err != nil {
 		return "", false, err
 	}
 	system, err := n.BuildLink(ctx, flakeDir, "nixosConfigurations.antic.config.system.build.toplevel", resultLink)
@@ -183,7 +183,7 @@ func ListCache(cacheDir string) ([]CacheEntry, error) {
 	}
 	var out []CacheEntry
 	for _, e := range entries {
-		if !e.IsDir() || !ValidCacheKey(e.Name()) {
+		if !e.IsDir() || !validCacheKey(e.Name()) {
 			continue
 		}
 		dir := filepath.Join(cacheDir, e.Name())
@@ -214,7 +214,7 @@ func ListCache(cacheDir string) ([]CacheEntry, error) {
 
 // RemoveCache deletes one cache entry by key.
 func RemoveCache(cacheDir, key string) error {
-	if !ValidCacheKey(key) {
+	if !validCacheKey(key) {
 		return fmt.Errorf("invalid cache key %q", key)
 	}
 	dir := filepath.Join(cacheDir, key)
@@ -222,28 +222,6 @@ func RemoveCache(cacheDir, key string) error {
 		return fmt.Errorf("no cache entry %q", key)
 	}
 	return removeCacheDir(dir)
-}
-
-// RemoveAllCache deletes all cache entries in cacheDir and returns the removed keys.
-func RemoveAllCache(cacheDir string) ([]string, error) {
-	entries, err := os.ReadDir(cacheDir)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var removed []string
-	for _, e := range entries {
-		if !e.IsDir() || !ValidCacheKey(e.Name()) {
-			continue
-		}
-		if err := removeCacheDir(filepath.Join(cacheDir, e.Name())); err != nil {
-			return removed, err
-		}
-		removed = append(removed, e.Name())
-	}
-	return removed, nil
 }
 
 func removeCacheDir(dir string) error {

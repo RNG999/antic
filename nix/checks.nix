@@ -10,7 +10,7 @@ in
     doCheck = true;
     checkPhase = ''
       runHook preCheck
-      go test ./internal/proto ./internal/host/config ./internal/host/instance ./internal/host/share ./internal/host/cli ./internal/host/guest ./internal/host/egress ./internal/host/nixbuild
+      go test ./internal/arch ./internal/tea/... ./internal/proto ./internal/host/config ./internal/host/instance ./internal/host/share ./internal/host/cli ./internal/host/guest ./internal/host/egress ./internal/host/nixbuild
       runHook postCheck
     '';
   });

@@ -230,13 +230,13 @@ DEBUG = "1"
 
 func TestParseSize(t *testing.T) {
 	for in, want := range map[string]int64{"4G": 4 << 30, "512M": 512 << 20, "1024": 1024, "2k": 2048} {
-		if got, err := ParseSize(in); err != nil || got != want {
-			t.Errorf("ParseSize(%q) = %d, %v", in, got, err)
+		if got, err := parseSize(in); err != nil || got != want {
+			t.Errorf("parseSize(%q) = %d, %v", in, got, err)
 		}
 	}
 	for _, in := range []string{"", "G", "-1G", "4GiB", "x"} {
-		if _, err := ParseSize(in); err == nil {
-			t.Errorf("ParseSize(%q) succeeded", in)
+		if _, err := parseSize(in); err == nil {
+			t.Errorf("parseSize(%q) succeeded", in)
 		}
 	}
 }
@@ -290,7 +290,7 @@ proto = "udp"
 		t.Errorf("port 2 should be udp: %+v", g.Ports[2])
 	}
 
-	conflictToml := `
+	conflictTOML := `
 [spec]
 cpus = 2
 memory = "4G"
@@ -309,7 +309,7 @@ guest = 8080
 proto = "tcp,udp"
 `
 	dir2 := t.TempDir()
-	writeGuest(t, dir2, "conflict", conflictToml)
+	writeGuest(t, dir2, "conflict", conflictTOML)
 	c2, err := Load(dir2, home)
 	if err == nil {
 		_, err = c2.Get("conflict")

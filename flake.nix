@@ -20,5 +20,14 @@
         in p // { default = p.antic; });
 
       checks = forAll (pkgs: import ./nix/checks.nix { inherit pkgs; });
+
+      devShells = forAll (pkgs: {
+        default = pkgs.mkShell {
+          packages = [
+            pkgs.go
+            pkgs.golangci-lint
+          ];
+        };
+      });
     };
 }

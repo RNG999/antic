@@ -22,7 +22,7 @@ func TestBuiltinKeyOrderIndependence(t *testing.T) {
 	if len(norm1) != 2 || norm1[0] != "git" || norm1[1] != "ripgrep" {
 		t.Fatalf("unexpected normalized packages: %v (norm2=%v)", norm1, norm2)
 	}
-	if !ValidCacheKey(k1) {
+	if !validCacheKey(k1) {
 		t.Fatalf("expected valid 12-hex key, got %q", k1)
 	}
 

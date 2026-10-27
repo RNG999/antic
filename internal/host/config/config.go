@@ -225,7 +225,7 @@ func LoadWithProject(dir, home, startDir string) (*Config, error) {
 		}
 		name := strings.TrimSuffix(e.Name(), ".toml")
 		path := filepath.Join(dir, e.Name())
-		g, err := LoadGuest(path, name, home)
+		g, err := loadGuest(path, name, home)
 		if err != nil {
 			c.Errors[name] = err
 			continue
@@ -236,7 +236,7 @@ func LoadWithProject(dir, home, startDir string) (*Config, error) {
 	// Discover project antic.toml if startDir is provided
 	if startDir != "" {
 		if ppath := findProjectConfig(startDir); ppath != "" {
-			g, err := LoadProjectGuest(ppath, home)
+			g, err := loadProjectGuest(ppath, home)
 			if err != nil {
 				c.Errors[filepath.Base(ppath)] = err
 			} else {
@@ -252,11 +252,11 @@ func LoadWithProject(dir, home, startDir string) (*Config, error) {
 	return c, nil
 }
 
-// LoadProjectGuest reads and validates a project-level antic.toml file.
+// loadProjectGuest reads and validates a project-level antic.toml file.
 // In project-level configs, "name" is strictly required, and relative paths
 // (e.g. for flake or shares) are resolved relative to the directory containing
 // antic.toml.
-func LoadProjectGuest(path, home string) (*Guest, error) {
+func loadProjectGuest(path, home string) (*Guest, error) {
 	var g Guest
 	md, err := toml.DecodeFile(path, &g)
 	if err != nil {
@@ -302,9 +302,9 @@ func findProjectConfig(start string) string {
 	return ""
 }
 
-// LoadGuest reads and validates a single global guest TOML file (~/.config/antic/guests/<name>.toml).
+// loadGuest reads and validates a single global guest TOML file (~/.config/antic/guests/<name>.toml).
 // In global guest files, paths must be absolute or start with ~/.
-func LoadGuest(path, name, home string) (*Guest, error) {
+func loadGuest(path, name, home string) (*Guest, error) {
 	var g Guest
 	md, err := toml.DecodeFile(path, &g)
 	if err != nil {
@@ -382,7 +382,7 @@ func (g *Guest) normalize(home string, baseDir ...string) []error {
 		g.Memory = "4G"
 		g.Spec.Memory = "4G"
 	}
-	if n, err := ParseSize(g.Memory); err != nil {
+	if n, err := parseSize(g.Memory); err != nil {
 		errs = append(errs, fmt.Errorf("spec.memory: %w", err))
 	} else if n < 256<<20 {
 		errs = append(errs, errors.New("spec.memory must be at least 256M"))
@@ -629,9 +629,9 @@ func (c *Config) Get(name string) (*Guest, error) {
 	return g, nil
 }
 
-// ParseSize parses sizes like "4G", "512M" or "2048K" (base 1024; a bare
+// parseSize parses sizes like "4G", "512M" or "2048K" (base 1024; a bare
 // number is bytes).
-func ParseSize(s string) (int64, error) {
+func parseSize(s string) (int64, error) {
 	if s == "" {
 		return 0, errors.New("empty size")
 	}

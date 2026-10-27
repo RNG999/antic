@@ -15,16 +15,16 @@ import (
 	"github.com/RNG999/antic/internal/host/egress"
 )
 
-// NetnsCmd is the hidden argv[1] that runs antic as the first process in a
+// netnsCmd is the hidden argv[1] that runs antic as the first process in a
 // guest's network namespace (pasta runs it; see guest.startNet).
-const NetnsCmd = egress.HelperCmd
+const netnsCmd = egress.HelperCmd
 
 // netnsMain loads the egress filter, starts the DNS filter if the guest has
 // an allow list, and runs passt. It exits when passt exits; if the DNS filter
 // fails, passt is stopped so the guest loses its network rather than its
 // filter.
 func netnsMain(args []string) int {
-	fs := flag.NewFlagSet(NetnsCmd, flag.ContinueOnError)
+	fs := flag.NewFlagSet(netnsCmd, flag.ContinueOnError)
 	nft := fs.String("nft", "", "nft binary")
 	rules := fs.String("rules", "", "nftables rules file")
 	var domains string
@@ -83,7 +83,7 @@ func netnsRun(nft, rules, domainsFile, denyFile, upstream string, argv []string)
 			Upstream: netip.AddrPortFrom(up, 53),
 			Allow:    allowList,
 			Deny:     denyList,
-			Nft:      nft,
+			NFT:      nft,
 			Log:      os.Stderr,
 		})
 		if err != nil {

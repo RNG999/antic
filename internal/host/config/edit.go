@@ -15,7 +15,7 @@ import (
 
 // Edits operate on a single guest's file (~/.config/antic/guests/<name>.toml),
 // preserving user comments and formatting, and validating the result with
-// LoadGuest before atomically replacing the file.
+// loadGuest before atomically replacing the file.
 
 // CreateGuest writes a new ~/.config/antic/guests/<name>.toml file.
 func (c *Config) CreateGuest(name string, g Guest, home string) error {
@@ -408,7 +408,7 @@ func writeGuestAtomic(real, name, home string, lines []string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if _, err := LoadGuest(tmp.Name(), name, home); err != nil {
+	if _, err := loadGuest(tmp.Name(), name, home); err != nil {
 		return fmt.Errorf("refusing to write %s, the result would not load: %w", real, err)
 	}
 	if fi, err := os.Stat(real); err == nil {

@@ -50,7 +50,7 @@ func (a *app) editGuestCmd(use string) *cobra.Command {
 func (a *app) versionCmd() *cobra.Command {
 	return &cobra.Command{
 		Use: "version", Short: "Print antic's version and guest protocol", Args: cobra.NoArgs,
-		Run: func(*cobra.Command, []string) { fmt.Printf("antic %s (guest protocol %d)\n", Version, proto.Version) },
+		Run: func(*cobra.Command, []string) { fmt.Printf("antic %s (guest protocol %d)\n", version, proto.Version) },
 	}
 }
 
@@ -74,7 +74,7 @@ func (a *app) doctorCmd() *cobra.Command {
 			}
 			check("/dev/kvm is usable", err)
 			b := guest.FindBinaries(a.dirs)
-			for _, p := range []string{b.CloudHypervisor, b.Virtiofsd, b.Passt, b.Pasta, b.Nft} {
+			for _, p := range []string{b.CloudHypervisor, b.Virtiofsd, b.Passt, b.Pasta, b.NFT} {
 				_, err := os.Stat(p)
 				if err == nil && !filepath.IsAbs(p) {
 					err = fmt.Errorf("not found")

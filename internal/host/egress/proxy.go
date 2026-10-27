@@ -48,7 +48,7 @@ type Config struct {
 	Upstream netip.AddrPort // the namespace's resolver address (pasta forwards it)
 	Allow    []string       // allowed domains (lowercase, no trailing dot; empty means allow all except Deny)
 	Deny     []string       // denied domains (lowercase, no trailing dot)
-	Nft      string         // nft binary
+	NFT      string         // nft binary
 	Log      io.Writer
 }
 
@@ -184,36 +184,36 @@ func writeTCPMsg(w io.Writer, msg []byte) error {
 // the answer's addresses are added to the nftables sets before the reply is
 // returned, and any failure on the way is SERVFAIL (fail closed).
 func (p *Proxy) domainAllowed(name string) bool {
-	if len(p.cfg.Deny) > 0 && Matches(name, p.cfg.Deny) {
+	if len(p.cfg.Deny) > 0 && matches(name, p.cfg.Deny) {
 		return false
 	}
-	if len(p.cfg.Allow) > 0 && !Matches(name, p.cfg.Allow) {
+	if len(p.cfg.Allow) > 0 && !matches(name, p.cfg.Allow) {
 		return false
 	}
 	return true
 }
 
 func (p *Proxy) handle(ctx context.Context, msg []byte, tcp bool) []byte {
-	q, err := ParseQuery(msg)
+	q, err := parseQuery(msg)
 	if err != nil {
-		return BuildFormErr(msg)
+		return buildFormErr(msg)
 	}
 	qq := q.Question
-	if qq.Class != ClassIN || !p.domainAllowed(qq.Name) {
+	if qq.Class != classIN || !p.domainAllowed(qq.Name) {
 		p.logRefused(qq.Name)
-		return BuildError(q.ID, qq, RcodeRefused)
+		return buildError(q.ID, qq, rcodeRefused)
 	}
-	if qq.Type != TypeA && qq.Type != TypeAAAA {
-		return BuildError(q.ID, qq, 0) // NODATA: only addresses are looked up
+	if qq.Type != typeA && qq.Type != typeAAAA {
+		return buildError(q.ID, qq, 0) // NODATA: only addresses are looked up
 	}
 	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
 	defer cancel()
 	id, err := randomID()
 	if err != nil {
-		return BuildError(q.ID, qq, RcodeServFail)
+		return buildError(q.ID, qq, rcodeServFail)
 	}
 	edns := q.EDNS && !tcp
-	req := BuildQuery(id, qq, edns, q.UDPSize)
+	req := buildQuery(id, qq, edns, q.UDPSize)
 	var resp []byte
 	if tcp {
 		resp, err = p.exchangeTCP(ctx, req)
@@ -222,29 +222,29 @@ func (p *Proxy) handle(ctx context.Context, msg []byte, tcp bool) []byte {
 	}
 	if err != nil {
 		p.logf("dns: %s: %v", qq.Name, err)
-		return BuildError(q.ID, qq, RcodeServFail)
+		return buildError(q.ID, qq, rcodeServFail)
 	}
-	r, err := ParseResponse(resp, id, qq)
+	r, err := parseResponse(resp, id, qq)
 	if err != nil {
 		p.logf("dns: %s: %v", qq.Name, err)
-		return BuildError(q.ID, qq, RcodeServFail)
+		return buildError(q.ID, qq, rcodeServFail)
 	}
 	if r.Truncated {
 		if tcp {
-			return BuildError(q.ID, qq, RcodeServFail)
+			return buildError(q.ID, qq, rcodeServFail)
 		}
-		return Truncated(q.ID, qq)
+		return truncated(q.ID, qq)
 	}
 	if len(p.cfg.Allow) > 0 {
 		if err := p.allow(ctx, r.Addrs); err != nil {
 			p.logf("dns: %s: allowing its addresses: %v", qq.Name, err)
-			return BuildError(q.ID, qq, RcodeServFail)
+			return buildError(q.ID, qq, rcodeServFail)
 		}
 	}
 	out := bytes.Clone(resp)
 	binary.BigEndian.PutUint16(out[0:2], q.ID)
 	if !tcp && len(out) > q.UDPSize {
-		return Truncated(q.ID, qq)
+		return truncated(q.ID, qq)
 	}
 	return out
 }
@@ -335,7 +335,7 @@ func timeoutFor(ttl uint32) time.Duration {
 
 // allow adds addresses to the nftables sets (or refreshes their timeouts),
 // in one atomic nft transaction.
-func (p *Proxy) allow(ctx context.Context, addrs []Answer) error {
+func (p *Proxy) allow(ctx context.Context, addrs []answer) error {
 	p.nftMu.Lock()
 	defer p.nftMu.Unlock()
 	now := time.Now()
@@ -369,7 +369,7 @@ func (p *Proxy) allow(ctx context.Context, addrs []Answer) error {
 	if len(upds) == 0 {
 		return nil
 	}
-	cmd := exec.CommandContext(ctx, p.cfg.Nft, "-f", "-")
+	cmd := exec.CommandContext(ctx, p.cfg.NFT, "-f", "-")
 	cmd.Stdin = strings.NewReader(script.String())
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("nft: %v: %s", err, strings.TrimSpace(string(out)))

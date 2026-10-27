@@ -54,7 +54,7 @@ func index(t *testing.T, rules, s string) int {
 	return i
 }
 
-func TestNftRulesInternet(t *testing.T) {
+func TestNFTRulesInternet(t *testing.T) {
 	g := &config.Guest{Network: config.NetworkConfig{Mode: config.NetworkInternet}, Ports: []config.Port{{Host: 8080, Guest: 80}}}
 	rules := nftRules(g, hostNets(t))
 	contains(t, rules,
@@ -69,14 +69,14 @@ func TestNftRulesInternet(t *testing.T) {
 	lacks(t, rules, "@dyn4", "meta mark", "    reject\n")
 }
 
-func TestNftRulesLAN(t *testing.T) {
+func TestNFTRulesLAN(t *testing.T) {
 	g := &config.Guest{Network: config.NetworkConfig{Mode: config.NetworkLAN}}
 	rules := nftRules(g, hostNets(t))
 	contains(t, rules, "169.254.0.0/16", "::ffff:0:0/96", "fe80::/10", "192.168.11.12", "2404:7a81:f80:4400:a578:cbae:3ab4:9bc9")
 	lacks(t, rules, "192.168.0.0/16", "192.168.11.0/24", "2404:7a81:f80:4400::/64")
 }
 
-func TestNftRulesAllowList(t *testing.T) {
+func TestNFTRulesAllowList(t *testing.T) {
 	g := &config.Guest{
 		Network: config.NetworkConfig{
 			Mode:  config.NetworkInternet,
@@ -112,7 +112,7 @@ func TestNftRulesAllowList(t *testing.T) {
 	}
 }
 
-func TestNftRulesDenyList(t *testing.T) {
+func TestNFTRulesDenyList(t *testing.T) {
 	g := &config.Guest{
 		Network: config.NetworkConfig{
 			Mode: config.NetworkInternet,

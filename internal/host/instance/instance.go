@@ -175,8 +175,8 @@ func (d Dirs) Orphans() ([]string, error) {
 }
 
 const (
-	DefaultLockTimeout     = 60 * time.Second
-	DefaultNixBuildTimeout = 20 * time.Minute
+	defaultLockTimeout     = 60 * time.Second
+	defaultNixBuildTimeout = 20 * time.Minute
 )
 
 func defaultTimeout(fallback time.Duration) time.Duration {
@@ -190,23 +190,23 @@ func defaultTimeout(fallback time.Duration) time.Duration {
 
 // Lock serializes lifecycle operations on guest name across antic
 // processes (AI agents run tools in parallel). Unlock by calling the
-// returned function. Times out after DefaultLockTimeout.
+// returned function. Times out after defaultLockTimeout.
 func (d Dirs) Lock(name string) (func(), error) {
-	return d.LockWithTimeout(name, fmt.Sprintf("guest %q", name), defaultTimeout(DefaultLockTimeout))
+	return d.LockWithTimeout(name, fmt.Sprintf("guest %q", name), defaultTimeout(defaultLockTimeout))
 }
 
 // LockNixBuild serializes Nix builds across antic processes so that
 // concurrent builds don't collide on the Nix eval-cache or store lock.
-// Times out after DefaultNixBuildTimeout.
+// Times out after defaultNixBuildTimeout.
 func (d Dirs) LockNixBuild() (func(), error) {
-	return d.LockWithTimeout("nixbuild", "Nix build", defaultTimeout(DefaultNixBuildTimeout))
+	return d.LockWithTimeout("nixbuild", "Nix build", defaultTimeout(defaultNixBuildTimeout))
 }
 
 // LockWithReason takes an exclusive lock under StateRoot/locks/.
 // If the lock is held by another process, it notifies the user on stderr
-// and waits until the lock is acquired or DefaultLockTimeout expires.
+// and waits until the lock is acquired or defaultLockTimeout expires.
 func (d Dirs) LockWithReason(name, description string) (func(), error) {
-	return d.LockWithTimeout(name, description, defaultTimeout(DefaultLockTimeout))
+	return d.LockWithTimeout(name, description, defaultTimeout(defaultLockTimeout))
 }
 
 // LockWithTimeout takes an exclusive lock under StateRoot/locks/, waiting up to timeout.

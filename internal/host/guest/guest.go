@@ -29,7 +29,7 @@ import (
 // Binaries are the host programs antic runs. Self is antic itself (it runs
 // as the first process of each guest's network namespace).
 type Binaries struct {
-	CloudHypervisor, Virtiofsd, Passt, Pasta, Nft, Self string
+	CloudHypervisor, Virtiofsd, Passt, Pasta, NFT, Self string
 }
 
 // FindBinaries locates them: helpers installed in antic's libexec
@@ -65,7 +65,7 @@ func FindBinaries(d instance.Dirs) Binaries {
 		Virtiofsd:       find("virtiofsd", "/usr/lib/virtiofsd", "/usr/libexec/virtiofsd"),
 		Passt:           find("passt"),
 		Pasta:           find("pasta"),
-		Nft:             find("nft", "/usr/sbin/nft"),
+		NFT:             find("nft", "/usr/sbin/nft"),
 		Self:            self,
 	}
 }

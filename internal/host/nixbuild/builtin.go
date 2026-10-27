@@ -11,24 +11,9 @@ import (
 	"github.com/RNG999/antic"
 )
 
-// WriteBuiltinFlake writes the embedded guest flake (configured for user and
-// packages) to a temporary directory and returns its path and cleanup function.
-func WriteBuiltinFlake(user string, packages []string) (string, func(), error) {
-	dir, err := os.MkdirTemp("", "antic-guest-*")
-	if err != nil {
-		return "", nil, err
-	}
-	cleanup := func() { _ = os.RemoveAll(dir) }
-	if err := WriteBuiltinFlakeTo(dir, user, packages); err != nil {
-		cleanup()
-		return "", nil, err
-	}
-	return dir, cleanup, nil
-}
-
-// WriteBuiltinFlakeTo writes the embedded guest flake (configured for user and
+// writeBuiltinFlakeTo writes the embedded guest flake (configured for user and
 // packages) into dir.
-func WriteBuiltinFlakeTo(dir, user string, packages []string) error {
+func writeBuiltinFlakeTo(dir, user string, packages []string) error {
 	sys, err := nixSystem()
 	if err != nil {
 		return err

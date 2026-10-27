@@ -96,7 +96,7 @@ func nftRules(g *config.Guest, hostNets []*net.IPNet) string {
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
 	set := func(family string, items []string) string { return family + " daddr { " + strings.Join(items, ", ") + " }" }
 
-	w("table inet antic {")
+	w("table %s {", egress.Table)
 	if allow {
 		w("  set %s { type ipv4_addr; flags timeout; size 65536; }", egress.Set4)
 		w("  set %s { type ipv6_addr; flags timeout; size 65536; }", egress.Set6)
@@ -184,7 +184,7 @@ func (g *Guest) startNet(ctx context.Context) (string, error) {
 		return "", err
 	}
 	dnsHost := nsDNS
-	helper := []string{g.m.Bins.Self, egress.HelperCmd, "--nft", g.m.Bins.Nft, "--rules", rules}
+	helper := []string{g.m.Bins.Self, egress.HelperCmd, "--nft", g.m.Bins.NFT, "--rules", rules}
 	if hasFilter(g.Cfg) {
 		if len(g.Cfg.AllowDomains) > 0 {
 			domains := filepath.Join(dir, "allow-domains")
@@ -249,7 +249,7 @@ func (g *Guest) startNet(ctx context.Context) (string, error) {
 	// No NoNewPrivileges: it stops passt from setting up its own user
 	// namespace inside pasta's. passt and pasta drop privileges and apply
 	// seccomp themselves.
-	props := g.m.confine([]string{dir}, []string{g.m.Bins.Pasta, g.m.Bins.Passt, g.m.Bins.Nft, g.m.Bins.Self})
+	props := g.m.confine([]string{dir}, []string{g.m.Bins.Pasta, g.m.Bins.Passt, g.m.Bins.NFT, g.m.Bins.Self})
 	return sock, g.helper(ctx, g.netUnit(), "antic network for "+g.Name(), props, sock, argv...)
 }
 

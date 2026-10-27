@@ -20,8 +20,8 @@ import (
 	"github.com/RNG999/antic/internal/host/guest"
 )
 
-// GuestStats holds resource metrics for a guest.
-type GuestStats struct {
+// guestStats holds resource metrics for a guest.
+type guestStats struct {
 	Name        string  `json:"name"`
 	State       string  `json:"state"`
 	Uptime      string  `json:"uptime"`
@@ -83,8 +83,8 @@ func readGuestSample(ctx context.Context, g *guest.Guest) sample {
 	return s
 }
 
-func computeStats(name string, prev, curr sample) GuestStats {
-	st := GuestStats{
+func computeStats(name string, prev, curr sample) guestStats {
+	st := guestStats{
 		Name:        name,
 		State:       curr.state,
 		Uptime:      curr.uptime,
@@ -123,7 +123,7 @@ func formatBytes(b int64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
-func printStatsTable(w io.Writer, stats []GuestStats) {
+func printStatsTable(w io.Writer, stats []guestStats) {
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
 	fmt.Fprintln(tw, "NAME\tSTATE\tCPUS\tCPU%\tMEM USAGE / LIMIT\tSESSIONS")
 	for _, s := range stats {
@@ -179,7 +179,7 @@ func (a *app) guestStats() *cobra.Command {
 					prev[g.Name()] = readGuestSample(c.Context(), g)
 				}
 				time.Sleep(150 * time.Millisecond)
-				var stats []GuestStats
+				var stats []guestStats
 				for _, g := range targets {
 					curr := readGuestSample(c.Context(), g)
 					stats = append(stats, computeStats(g.Name(), prev[g.Name()], curr))
@@ -208,7 +208,7 @@ func (a *app) guestStats() *cobra.Command {
 
 			// Print initial snapshot immediately
 			time.Sleep(100 * time.Millisecond)
-			var initialStats []GuestStats
+			var initialStats []guestStats
 			for _, g := range targets {
 				curr := readGuestSample(c.Context(), g)
 				initialStats = append(initialStats, computeStats(g.Name(), prev[g.Name()], curr))
@@ -229,7 +229,7 @@ func (a *app) guestStats() *cobra.Command {
 				case <-sigCh:
 					return nil
 				case <-ticker.C:
-					var stats []GuestStats
+					var stats []guestStats
 					for _, g := range targets {
 						curr := readGuestSample(c.Context(), g)
 						stats = append(stats, computeStats(g.Name(), prev[g.Name()], curr))

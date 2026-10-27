@@ -1,0 +1,145 @@
+version: "2"
+
+run:
+  timeout: 3m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - copyloopvar
+    - depguard
+    - errorlint
+    - exhaustive
+    - forbidigo
+    - gochecknoglobals
+    - gochecknoinits
+    - govet
+    - ineffassign
+    - misspell
+    - nilerr
+    - revive
+    - staticcheck
+    - unconvert
+    - unused
+
+  settings:
+    revive:
+      rules:
+        - name: var-naming
+        - name: receiver-naming
+        - name: unexported-return
+        - name: errorf
+        - name: indent-error-flow
+        - name: blank-imports
+        - name: context-as-argument
+        - name: dot-imports
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+
+    exhaustive:
+      default-signifies-exhaustive: false
+      check:
+        - switch
+        - map
+
+    depguard:
+      rules:
+        tea-pure:
+          files:
+            - "**/internal/tea/**/*.go"
+            - "!**/internal/tea/**/*_test.go"
+          allow:
+            - $gostd
+            - github.com/RNG999/antic/internal/proto
+            - github.com/RNG999/antic/internal/tea
+          deny:
+            - pkg: "os"
+              desc: "TEA pure packages must not perform OS/filesystem I/O"
+            - pkg: "os/exec"
+              desc: "TEA pure packages must not execute external commands"
+            - pkg: "io"
+              desc: "TEA pure packages must not perform stream I/O"
+            - pkg: "net"
+              desc: "TEA pure packages must not perform network I/O"
+            - pkg: "net/http"
+              desc: "TEA pure packages must not perform HTTP I/O"
+            - pkg: "syscall"
+              desc: "TEA pure packages must not invoke syscalls"
+            - pkg: "golang.org/x/sys"
+              desc: "TEA pure packages must not invoke system packages"
+            - pkg: "context"
+              desc: "TEA pure packages must be synchronous and deterministic"
+            - pkg: "sync"
+              desc: "TEA pure packages must not use concurrency or locks"
+            - pkg: "sync/atomic"
+              desc: "TEA pure packages must not use shared atomic state"
+            - pkg: "math/rand"
+              desc: "TEA pure packages must be deterministic (no randomness)"
+            - pkg: "crypto/rand"
+              desc: "TEA pure packages must be deterministic (no randomness)"
+            - pkg: "unsafe"
+              desc: "TEA pure packages must be memory-safe and verifiable"
+            - pkg: "reflect"
+              desc: "TEA pure packages must use static types for formal verification"
+            - pkg: "github.com/RNG999/antic/internal/host"
+              desc: "TEA pure packages must not depend on the host effect/runtime layer"
+            - pkg: "github.com/RNG999/antic/internal/guest"
+              desc: "TEA pure packages must not depend on the guest effect/runtime layer"
+
+        host-boundary:
+          files:
+            - "**/internal/host/**/*.go"
+          deny:
+            - pkg: "github.com/RNG999/antic/internal/guest"
+              desc: "host packages must not import guest-only packages"
+
+        guest-boundary:
+          files:
+            - "**/internal/guest/**/*.go"
+          deny:
+            - pkg: "github.com/RNG999/antic/internal/host"
+              desc: "guest packages must not import host-only packages"
+
+        infra-no-upward-deps:
+          files:
+            - "**/internal/host/chv/**/*.go"
+            - "**/internal/host/config/**/*.go"
+            - "**/internal/host/egress/**/*.go"
+            - "**/internal/host/instance/**/*.go"
+            - "**/internal/host/nixbuild/**/*.go"
+            - "**/internal/host/share/**/*.go"
+            - "**/internal/host/systemd/**/*.go"
+            - "**/internal/host/transport/**/*.go"
+          deny:
+            - pkg: "github.com/RNG999/antic/internal/host/guest"
+              desc: "lower-level host adapters must not import the guest orchestrator"
+            - pkg: "github.com/RNG999/antic/internal/host/cli"
+              desc: "lower-level host adapters must not import the CLI entrypoint"
+
+        orchestrator-no-cli:
+          files:
+            - "**/internal/host/guest/**/*.go"
+          deny:
+            - pkg: "github.com/RNG999/antic/internal/host/cli"
+              desc: "guest orchestrator must not import the CLI entrypoint"
+
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: ^time\.(Now|Since|Until|Sleep|After|Tick)$
+          msg: "do not call wall-clock or timer functions directly in pure code; pass timestamps via Msg"
+
+  exclusions:
+    rules:
+      # Enforce gochecknoglobals, gochecknoinits, and forbidigo strictly on pure TEA packages;
+      # allow CLI/effect packages to use time.Now, flags, and standard runtime constructs.
+      - path-except: "internal/tea/"
+        linters:
+          - forbidigo
+          - gochecknoglobals
+          - gochecknoinits
+      - path: "_test\\.go"
+        linters:
+          - gochecknoglobals

@@ -7,30 +7,30 @@ import (
 )
 
 func query(id uint16, labels []string, qtype uint16) []byte {
-	return BuildQuery(id, Question{Labels: labels, Type: qtype, Class: ClassIN}, false, 0)
+	return buildQuery(id, question{Labels: labels, Type: qtype, Class: classIN}, false, 0)
 }
 
 func TestParseQueryValid(t *testing.T) {
-	msg := query(7, []string{"API", "GitHub", "com"}, TypeA)
-	q, err := ParseQuery(msg)
+	msg := query(7, []string{"API", "GitHub", "com"}, typeA)
+	q, err := parseQuery(msg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if q.ID != 7 || q.Question.Name != "api.github.com" || q.Question.Type != TypeA || q.EDNS {
+	if q.ID != 7 || q.Question.Name != "api.github.com" || q.Question.Type != typeA || q.EDNS {
 		t.Fatalf("got %+v", q)
 	}
 	if q.Question.Labels[1] != "GitHub" {
 		t.Fatalf("case not preserved: %v", q.Question.Labels)
 	}
-	e := BuildQuery(8, q.Question, true, 4096)
-	q2, err := ParseQuery(e)
+	e := buildQuery(8, q.Question, true, 4096)
+	q2, err := parseQuery(e)
 	if err != nil || !q2.EDNS || q2.UDPSize != maxUDPSize {
 		t.Fatalf("edns: %+v %v", q2, err)
 	}
 }
 
 func TestParseQueryRejects(t *testing.T) {
-	good := query(1, []string{"github", "com"}, TypeA)
+	good := query(1, []string{"github", "com"}, typeA)
 	mut := func(f func(b []byte) []byte) []byte { return f(append([]byte{}, good...)) }
 	cases := map[string][]byte{
 		"short":    good[:5],
@@ -41,10 +41,10 @@ func TestParseQueryRejects(t *testing.T) {
 		"ns=1":     mut(func(b []byte) []byte { b[9] = 1; return b }),
 		"trailing": append(append([]byte{}, good...), 0),
 		// A label containing a dot: joined it would read "evil.github.com".
-		"dot in label": query(1, []string{"evil", "github.com"}, TypeA),
-		"nul in label": query(1, []string{"github\x00", "com"}, TypeA),
-		"space":        query(1, []string{"git hub", "com"}, TypeA),
-		"root":         query(1, nil, TypeA),
+		"dot in label": query(1, []string{"evil", "github.com"}, typeA),
+		"nul in label": query(1, []string{"github\x00", "com"}, typeA),
+		"space":        query(1, []string{"git hub", "com"}, typeA),
+		"root":         query(1, nil, typeA),
 		"pointer": func() []byte {
 			b := append([]byte{}, good[:headerLen]...)
 			b = append(b, 0xc0, 0x0c, 0, 1, 0, 1)
@@ -63,7 +63,7 @@ func TestParseQueryRejects(t *testing.T) {
 		}),
 	}
 	for name, msg := range cases {
-		if _, err := ParseQuery(msg); err == nil {
+		if _, err := parseQuery(msg); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
@@ -72,7 +72,7 @@ func TestParseQueryRejects(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		labels = append(labels, string(make63()))
 	}
-	if _, err := ParseQuery(query(1, labels, TypeA)); err == nil {
+	if _, err := parseQuery(query(1, labels, typeA)); err == nil {
 		t.Error("overlong name accepted")
 	}
 }
@@ -98,8 +98,8 @@ func TestMatches(t *testing.T) {
 		"registry.npmjs.org": false, // exact match does NOT match subdomain
 		"npmjs.org.evil":     false,
 	} {
-		if got := Matches(name, patterns); got != want {
-			t.Errorf("Matches(%q) = %v, want %v", name, got, want)
+		if got := matches(name, patterns); got != want {
+			t.Errorf("matches(%q) = %v, want %v", name, got, want)
 		}
 	}
 }
@@ -111,7 +111,7 @@ type rec struct {
 	rdata []byte
 }
 
-func response(id uint16, q Question, flags uint16, rrs ...rec) []byte {
+func response(id uint16, q question, flags uint16, rrs ...rec) []byte {
 	b := make([]byte, headerLen)
 	binary.BigEndian.PutUint16(b[0:2], id)
 	binary.BigEndian.PutUint16(b[2:4], 0x8180|flags)
@@ -123,7 +123,7 @@ func response(id uint16, q Question, flags uint16, rrs ...rec) []byte {
 	for _, r := range rrs {
 		b = append(b, r.owner...)
 		b = binary.BigEndian.AppendUint16(b, r.typ)
-		b = binary.BigEndian.AppendUint16(b, ClassIN)
+		b = binary.BigEndian.AppendUint16(b, classIN)
 		b = binary.BigEndian.AppendUint32(b, 60)
 		b = binary.BigEndian.AppendUint16(b, uint16(len(r.rdata)))
 		b = append(b, r.rdata...)
@@ -134,15 +134,15 @@ func response(id uint16, q Question, flags uint16, rrs ...rec) []byte {
 func wireName(labels ...string) []byte { return appendName(nil, labels) }
 
 func TestParseResponseChain(t *testing.T) {
-	q := Question{Labels: []string{"GitHub", "com"}, Name: "github.com", Type: TypeA, Class: ClassIN}
+	q := question{Labels: []string{"GitHub", "com"}, Name: "github.com", Type: typeA, Class: classIN}
 	ptr := []byte{0xc0, 0x0c} // points at the question name
 	msg := response(9, q, 0,
-		rec{ptr, TypeCNAME, wireName("edge", "cdn", "net")},
-		rec{wireName("edge", "cdn", "net"), TypeA, []byte{140, 82, 114, 6}},
+		rec{ptr, typeCNAME, wireName("edge", "cdn", "net")},
+		rec{wireName("edge", "cdn", "net"), typeA, []byte{140, 82, 114, 6}},
 		// Not in the chain: must be ignored.
-		rec{wireName("evil", "example"), TypeA, []byte{6, 6, 6, 6}},
+		rec{wireName("evil", "example"), typeA, []byte{6, 6, 6, 6}},
 	)
-	r, err := ParseResponse(msg, 9, q)
+	r, err := parseResponse(msg, 9, q)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,32 +152,32 @@ func TestParseResponseChain(t *testing.T) {
 }
 
 func TestParseResponseRejects(t *testing.T) {
-	q := Question{Labels: []string{"github", "com"}, Name: "github.com", Type: TypeA, Class: ClassIN}
-	ok := response(9, q, 0, rec{[]byte{0xc0, 0x0c}, TypeA, []byte{1, 2, 3, 4}})
-	if _, err := ParseResponse(ok, 10, q); err == nil {
+	q := question{Labels: []string{"github", "com"}, Name: "github.com", Type: typeA, Class: classIN}
+	ok := response(9, q, 0, rec{[]byte{0xc0, 0x0c}, typeA, []byte{1, 2, 3, 4}})
+	if _, err := parseResponse(ok, 10, q); err == nil {
 		t.Error("wrong ID accepted")
 	}
-	other := Question{Labels: []string{"evil", "com"}, Name: "evil.com", Type: TypeA, Class: ClassIN}
-	if _, err := ParseResponse(response(9, other, 0), 9, q); err == nil {
+	other := question{Labels: []string{"evil", "com"}, Name: "evil.com", Type: typeA, Class: classIN}
+	if _, err := parseResponse(response(9, other, 0), 9, q); err == nil {
 		t.Error("question mismatch accepted")
 	}
 	// Forward / self pointer (loop).
-	loop := response(9, q, 0, rec{[]byte{0xc0, 0xff}, TypeA, []byte{1, 2, 3, 4}})
-	if _, err := ParseResponse(loop, 9, q); err == nil {
+	loop := response(9, q, 0, rec{[]byte{0xc0, 0xff}, typeA, []byte{1, 2, 3, 4}})
+	if _, err := parseResponse(loop, 9, q); err == nil {
 		t.Error("forward pointer accepted")
 	}
 	// A record with wrong length.
-	bad := response(9, q, 0, rec{[]byte{0xc0, 0x0c}, TypeA, []byte{1, 2, 3}})
-	if _, err := ParseResponse(bad, 9, q); err == nil {
+	bad := response(9, q, 0, rec{[]byte{0xc0, 0x0c}, typeA, []byte{1, 2, 3}})
+	if _, err := parseResponse(bad, 9, q); err == nil {
 		t.Error("short A accepted")
 	}
 	// Truncated record.
-	if _, err := ParseResponse(ok[:len(ok)-2], 9, q); err == nil {
+	if _, err := parseResponse(ok[:len(ok)-2], 9, q); err == nil {
 		t.Error("truncated response accepted")
 	}
 	// Every prefix of a valid response must fail cleanly (no panic).
 	for i := 0; i < len(ok); i++ {
-		ParseResponse(ok[:i], 9, q)
+		parseResponse(ok[:i], 9, q)
 	}
 }
 
@@ -194,15 +194,15 @@ func TestUsable(t *testing.T) {
 }
 
 func FuzzParse(f *testing.F) {
-	f.Add(query(1, []string{"github", "com"}, TypeA))
+	f.Add(query(1, []string{"github", "com"}, typeA))
 	f.Fuzz(func(t *testing.T, b []byte) {
-		if q, err := ParseQuery(b); err == nil {
+		if q, err := parseQuery(b); err == nil {
 			for _, l := range q.Question.Labels {
 				if !validLabel([]byte(l)) {
 					t.Fatalf("invalid label accepted: %q", l)
 				}
 			}
-			ParseResponse(b, q.ID, q.Question)
+			parseResponse(b, q.ID, q.Question)
 		}
 	})
 }
