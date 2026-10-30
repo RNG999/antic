@@ -68,10 +68,13 @@ const (
 	FramePong   byte = 5 // guest -> host: keepalive reply
 )
 
+// Op is the closed enum of agent protocol operations.
+type Op string
+
 // Agent protocol: one JSON Request per connection, answered by a stream of
 // JSON Responses (one per line); the last one has Done set.
 type Request struct {
-	Op string `json:"op"` // see Op* constants
+	Op Op `json:"op"` // see Op* constants
 
 	// mount / unmount
 	Tag      string `json:"tag,omitempty"`
@@ -90,13 +93,13 @@ type Request struct {
 }
 
 const (
-	OpHello    = "hello"    // -> Hello
-	OpMount    = "mount"    // mount virtiofs Tag at Path (created as the guest user)
-	OpUnmount  = "unmount"  // unmount the mount made for Tag
-	OpApply    = "apply"    // switch to Toplevel; Lines carry its output
-	OpSessions = "sessions" // -> Sessions
-	OpKill     = "kill"     // stop Session
-	OpJournal  = "journal"  // the guest's journal (this boot); Lines carry it
+	OpHello    Op = "hello"    // -> Hello
+	OpMount    Op = "mount"    // mount virtiofs Tag at Path (created as the guest user)
+	OpUnmount  Op = "unmount"  // unmount the mount made for Tag
+	OpApply    Op = "apply"    // switch to Toplevel; Lines carry its output
+	OpSessions Op = "sessions" // -> Sessions
+	OpKill     Op = "kill"     // stop Session
+	OpJournal  Op = "journal"  // the guest's journal (this boot); Lines carry it
 )
 
 type Response struct {

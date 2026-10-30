@@ -16,6 +16,9 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/RNG999/antic/internal/domain"
+	teaegress "github.com/RNG999/antic/internal/tea/egress"
 )
 
 // Mark is the socket mark of the filter's upstream sockets. The egress filter
@@ -36,8 +39,6 @@ const (
 )
 
 const (
-	minTimeout   = 5 * time.Minute
-	maxTimeout   = 24 * time.Hour
 	queryTimeout = 8 * time.Second
 	maxInflight  = 64
 	maxTCPConns  = 16
@@ -52,17 +53,39 @@ type Config struct {
 	Log      io.Writer
 }
 
-// Proxy is a filtering DNS forwarder.
+// Proxy is a filtering DNS forwarder whose domain policy, refused-domain log,
+// and nftables set expiration state live in a single pure TEA teaegress.Model
+// (Single Source of Truth).
 type Proxy struct {
 	cfg Config
 	udp *net.UDPConn
 	tcp *net.TCPListener
 
-	nftMu sync.Mutex
-	known map[netip.Addr]time.Time // when each set element expires
+	mu    sync.Mutex
+	model teaegress.Model
+	inited bool
+}
 
-	logMu  sync.Mutex
-	logged map[string]bool
+func initModel(cfg Config) teaegress.Model {
+	var allow, deny []domain.DomainPattern
+	for _, s := range cfg.Allow {
+		if p, err := domain.ParseDomainPattern(s); err == nil {
+			allow = append(allow, p)
+		}
+	}
+	for _, s := range cfg.Deny {
+		if p, err := domain.ParseDomainPattern(s); err == nil {
+			deny = append(deny, p)
+		}
+	}
+	return teaegress.Init(allow, deny)
+}
+
+func (p *Proxy) ensureModel() {
+	if !p.inited {
+		p.model = initModel(p.cfg)
+		p.inited = true
+	}
 }
 
 // New binds the proxy's UDP and TCP sockets on Listen.
@@ -76,7 +99,13 @@ func New(cfg Config) (*Proxy, error) {
 		udp.Close()
 		return nil, err
 	}
-	return &Proxy{cfg: cfg, udp: udp, tcp: tcp, known: map[netip.Addr]time.Time{}, logged: map[string]bool{}}, nil
+	return &Proxy{
+		cfg:    cfg,
+		udp:    udp,
+		tcp:    tcp,
+		model:  initModel(cfg),
+		inited: true,
+	}, nil
 }
 
 // Serve answers queries until ctx is done or a socket fails.
@@ -180,17 +209,17 @@ func writeTCPMsg(w io.Writer, msg []byte) error {
 	return err
 }
 
-// handle answers one client message. Allowed A/AAAA queries are forwarded;
-// the answer's addresses are added to the nftables sets before the reply is
-// returned, and any failure on the way is SERVFAIL (fail closed).
+// domainAllowed delegates domain policy evaluation to the pure TEA teaegress.Model (SSOT).
 func (p *Proxy) domainAllowed(name string) bool {
-	if len(p.cfg.Deny) > 0 && matches(name, p.cfg.Deny) {
+	p.mu.Lock()
+	p.ensureModel()
+	m := p.model
+	p.mu.Unlock()
+	d, err := domain.ParseDomainName(name)
+	if err != nil {
 		return false
 	}
-	if len(p.cfg.Allow) > 0 && !matches(name, p.cfg.Allow) {
-		return false
-	}
-	return true
+	return m.DomainAllowed(d)
 }
 
 func (p *Proxy) handle(ctx context.Context, msg []byte, tcp bool) []byte {
@@ -199,13 +228,35 @@ func (p *Proxy) handle(ctx context.Context, msg []byte, tcp bool) []byte {
 		return buildFormErr(msg)
 	}
 	qq := q.Question
-	if qq.Class != classIN || !p.domainAllowed(qq.Name) {
-		p.logRefused(qq.Name)
-		return buildError(q.ID, qq, rcodeRefused)
+	dom, _ := domain.ParseDomainName(qq.Name)
+	kind := teaegress.QueryTypeAddress
+	if qq.Class != classIN {
+		kind = teaegress.QueryClassNonIN
+	} else if qq.Type != typeA && qq.Type != typeAAAA {
+		kind = teaegress.QueryTypeOtherIN
 	}
-	if qq.Type != typeA && qq.Type != typeAAAA {
-		return buildError(q.ID, qq, 0) // NODATA: only addresses are looked up
+
+	p.mu.Lock()
+	p.ensureModel()
+	next, effects := teaegress.Update(p.model, teaegress.MsgEvaluateQuery{
+		Domain: dom,
+		Kind:   kind,
+	})
+	p.model = next
+	p.mu.Unlock()
+
+	for _, eff := range effects {
+		switch e := eff.(type) {
+		case teaegress.EffectLogRefused:
+			p.logf("dns: refused %s (not in allow)", e.Domain.Get())
+		case teaegress.EffectReplyImmediate:
+			if e.Code == teaegress.ReplyNoData {
+				return buildError(q.ID, qq, 0)
+			}
+			return buildError(q.ID, qq, rcodeRefused)
+		}
 	}
+
 	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
 	defer cancel()
 	id, err := randomID()
@@ -319,84 +370,64 @@ func (p *Proxy) exchangeTCP(ctx context.Context, req []byte) ([]byte, error) {
 	return readTCPMsg(c)
 }
 
-// usable reports whether an answer address may be added to the sets at all.
-// The egress filter rejects loopback, link-local, host and (in "internet"
-// mode) LAN addresses before it looks at the sets; this is a second line.
+// usable reports whether an answer address satisfies the SSOT UsableAddr refinement.
 func usable(a netip.Addr) bool {
-	return a.IsValid() && !a.Is4In6() && !a.IsUnspecified() && !a.IsLoopback() &&
-		!a.IsMulticast() && !a.IsLinkLocalUnicast() && !a.IsLinkLocalMulticast() &&
-		!a.IsInterfaceLocalMulticast()
-}
-
-func timeoutFor(ttl uint32) time.Duration {
-	t := time.Duration(ttl) * time.Second
-	return min(max(t, minTimeout), maxTimeout) + time.Minute
+	_, err := domain.ParseUsableAddr(a)
+	return err == nil
 }
 
 // allow adds addresses to the nftables sets (or refreshes their timeouts),
-// in one atomic nft transaction.
+// in one atomic nft transaction driven by pure teaegress.Update.
 func (p *Proxy) allow(ctx context.Context, addrs []answer) error {
-	p.nftMu.Lock()
-	defer p.nftMu.Unlock()
-	now := time.Now()
-	var script strings.Builder
-	type upd struct {
-		a   netip.Addr
-		exp time.Time
-	}
-	var upds []upd
+	var candidates []teaegress.AnswerCandidate
 	for _, ans := range addrs {
-		a := ans.Addr
-		if !usable(a) {
+		ua, err := domain.ParseUsableAddr(ans.Addr)
+		if err != nil {
 			continue
 		}
-		t := timeoutFor(ans.TTL)
-		if exp, ok := p.known[a]; ok && exp.Sub(now) > t/2 {
-			continue
-		}
-		set := Set4
-		if a.Is6() {
-			set = Set6
-		}
-		secs := int(t / time.Second)
-		// add (no-op if present), delete, add: refreshes the timeout of an
-		// existing element without a moment where it is missing.
-		fmt.Fprintf(&script, "add element %s %s { %s timeout %ds }\n", Table, set, a, secs)
-		fmt.Fprintf(&script, "delete element %s %s { %s }\n", Table, set, a)
-		fmt.Fprintf(&script, "add element %s %s { %s timeout %ds }\n", Table, set, a, secs)
-		upds = append(upds, upd{a, now.Add(t)})
+		candidates = append(candidates, teaegress.AnswerCandidate{
+			Addr:    ua,
+			Timeout: domain.TimeoutFromTTL(ans.TTL),
+		})
 	}
-	if len(upds) == 0 {
+	if len(candidates) == 0 {
 		return nil
 	}
-	cmd := exec.CommandContext(ctx, p.cfg.NFT, "-f", "-")
-	cmd.Stdin = strings.NewReader(script.String())
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("nft: %v: %s", err, strings.TrimSpace(string(out)))
-	}
-	for _, u := range upds {
-		p.known[u.a] = u.exp
-	}
-	if len(p.known) > 4096 {
-		for a, exp := range p.known {
-			if exp.Before(now) {
-				delete(p.known, a)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ensureModel()
+	next, effects := teaegress.Update(p.model, teaegress.MsgRecordAnswers{
+		Now:     domain.NewUnixSec(time.Now().Unix()),
+		Answers: candidates,
+	})
+	for _, eff := range effects {
+		updEff, ok := eff.(teaegress.EffectUpdateNFTSet)
+		if !ok {
+			continue
+		}
+		var script strings.Builder
+		for _, u := range updEff.Updates.Slice() {
+			a := u.Addr.Get()
+			secs := u.Timeout.Get()
+			set := Set4
+			if a.Is6() {
+				set = Set6
 			}
+			// add (no-op if present), delete, add: refreshes the timeout of an
+			// existing element without a moment where it is missing.
+			fmt.Fprintf(&script, "add element %s %s { %s timeout %ds }\n", Table, set, a, secs)
+			fmt.Fprintf(&script, "delete element %s %s { %s }\n", Table, set, a)
+			fmt.Fprintf(&script, "add element %s %s { %s timeout %ds }\n", Table, set, a, secs)
+		}
+		cmd := exec.CommandContext(ctx, p.cfg.NFT, "-f", "-")
+		cmd.Stdin = strings.NewReader(script.String())
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("nft: %v: %s", err, strings.TrimSpace(string(out)))
 		}
 	}
+	p.model = next
 	return nil
-}
-
-func (p *Proxy) logRefused(name string) {
-	p.logMu.Lock()
-	first := !p.logged[name] && len(p.logged) < 1024
-	if first {
-		p.logged[name] = true
-	}
-	p.logMu.Unlock()
-	if first {
-		p.logf("dns: refused %s (not in allow)", name)
-	}
 }
 
 func (p *Proxy) logf(format string, args ...any) {

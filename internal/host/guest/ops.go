@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/RNG999/antic/internal/domain"
 	"github.com/RNG999/antic/internal/host/chv"
 	"github.com/RNG999/antic/internal/host/config"
 	"github.com/RNG999/antic/internal/host/instance"
@@ -16,7 +17,103 @@ import (
 	"github.com/RNG999/antic/internal/host/share"
 	"github.com/RNG999/antic/internal/host/transport"
 	"github.com/RNG999/antic/internal/proto"
+	"github.com/RNG999/antic/internal/tea/lifecycle"
+	"github.com/RNG999/antic/internal/types"
 )
+
+// lifecycleModel reconstructs the pure TEA lifecycle.Model from the host's
+// current configuration, instance store, and boot state.
+func (g *Guest) lifecycleModel(ctx context.Context) (lifecycle.Model, *boot) {
+	name, _ := domain.ParseGuestName(g.Name())
+	m := lifecycle.Init(name)
+	var bt *boot
+	if g.Created {
+		installed, _ := g.store().Current()
+		if instPath, err := domain.ParseStorePath(installed); err == nil {
+			m.Installed = types.Some(types.NewIndexed[domain.StorePath, domain.InstalledState](instPath))
+			if b, err := g.readBoot(ctx); err == nil {
+				if bootSys, err := domain.ParseStorePath(b.System); err == nil {
+					bt = b
+					m.Boot = types.Some(lifecycle.BootedVM{
+						System:    bootSys,
+						KernelSig: g.kernelSignature(b.System),
+					})
+				}
+			}
+		}
+	}
+
+	byPath := map[string]lifecycle.Share{}
+	for _, s := range g.Cfg.Shares {
+		p := s.Path
+		if real, err := filepath.EvalSymlinks(p); err == nil {
+			p = real
+		}
+		absPath, err := domain.ParseAbsPath(p)
+		if err != nil {
+			continue
+		}
+		tag, err := domain.ParseShareTag(share.Tag(p))
+		if err != nil {
+			continue
+		}
+		byPath[p] = lifecycle.Share{
+			Path:     absPath,
+			Tag:      tag,
+			Mount:    lifecycle.MountNone,
+			ReadOnly: s.ReadOnly,
+		}
+	}
+	if bt != nil {
+		for _, bs := range bt.Shares {
+			absPath, err := domain.ParseAbsPath(bs.Path)
+			if err != nil {
+				continue
+			}
+			rawTag := bs.Tag
+			if rawTag == "" {
+				rawTag = share.Tag(bs.Path)
+			}
+			tag, err := domain.ParseShareTag(rawTag)
+			if err != nil {
+				continue
+			}
+			sh, ok := byPath[bs.Path]
+			if !ok {
+				sh = lifecycle.Share{
+					Path:     absPath,
+					Tag:      tag,
+					ReadOnly: bs.ReadOnly,
+				}
+			}
+			if bs.Runtime {
+				sh.Mount = lifecycle.MountRuntime
+			} else {
+				sh.Mount = lifecycle.MountBoot
+			}
+			byPath[bs.Path] = sh
+		}
+	}
+	var shares []lifecycle.Share
+	for _, sh := range byPath {
+		shares = append(shares, sh)
+	}
+	m.Shares = types.BuildSet[lifecycle.Share, domain.AbsPath, lifecycle.ShareByPath](shares)
+	return m, bt
+}
+
+// kernelSignature returns a deterministic signature of a NixOS system's kernel,
+// initrd, and kernel-params so the pure TEA model can compare kernel identity.
+func (g *Guest) kernelSignature(system string) domain.KernelSig {
+	if system == "" {
+		return domain.NewKernelSig("")
+	}
+	s := g.store()
+	kern, _ := os.Readlink(s.Real(system + "/kernel"))
+	initrd, _ := os.Readlink(s.Real(system + "/initrd"))
+	params, _ := os.ReadFile(s.Real(system + "/kernel-params"))
+	return domain.NewKernelSig(kern + "\x00" + initrd + "\x00" + string(params))
+}
 
 // Apply builds the guest's system on the host, installs it into the guest's
 // store and, if the guest is running, switches it there. A guest without an
@@ -60,87 +157,106 @@ func (g *Guest) Apply(ctx context.Context) error {
 			g.m.logf("using cached guest %s (%s): %s", g.Name(), g.osDesc(), system)
 		}
 	}
-	if !g.Created {
-		inst, err := g.m.Dirs.Assign(g.Name())
-		if err != nil {
-			return err
-		}
-		g.Inst, g.Created = inst, true
-		g.m.logf("guest %s has ID %s", g.Name(), inst.ID)
-	}
-	// Record config origin
-	_ = os.WriteFile(g.Inst.OriginFile(), []byte(g.Cfg.Path+"\n"), 0o600)
-	if cur, _ := g.store().Current(); cur != system {
-		g.m.logf("installing %s into the guest store...", system)
-		if err := nix.Install(ctx, g.store(), system); err != nil {
-			return err
-		}
-	}
-	bt, err := g.readBoot(ctx)
+
+	sysPath, err := domain.ParseStorePath(system)
 	if err != nil {
-		g.m.logf("%s is ready; it boots on the next \"antic guest start %s\"", system, g.Name())
-		return nil
+		return err
 	}
-	if bt.System == system {
-		return nil
+	m, bt := g.lifecycleModel(ctx)
+	m, effects := lifecycle.Update(m, lifecycle.MsgApplyBuilt{
+		System:    sysPath,
+		KernelSig: g.kernelSignature(system),
+	})
+
+	for _, eff := range effects {
+		switch e := eff.(type) {
+		case lifecycle.EffectAssignInstance:
+			inst, err := g.m.Dirs.Assign(e.Guest.Get())
+			if err != nil {
+				return err
+			}
+			g.Inst, g.Created = inst, true
+			g.m.logf("guest %s has ID %s", g.Name(), inst.ID)
+			_ = os.WriteFile(g.Inst.OriginFile(), []byte(g.Cfg.Path+"\n"), 0o600)
+
+		case lifecycle.EffectInstallStore:
+			_ = os.WriteFile(g.Inst.OriginFile(), []byte(g.Cfg.Path+"\n"), 0o600)
+			g.m.logf("installing %s into the guest store...", e.System.Get().Get())
+			if err := nix.Install(ctx, g.store(), e.System.Get().Get()); err != nil {
+				return err
+			}
+
+		case lifecycle.EffectLog:
+			g.m.logf("%s", e.Message.Get())
+
+		case lifecycle.EffectAgentSwitch:
+			if err := g.execSwitch(ctx, m, bt, e.Toplevel); err != nil {
+				return err
+			}
+		}
 	}
-	oldSystem := bt.System
+	if g.Created {
+		_ = os.WriteFile(g.Inst.OriginFile(), []byte(g.Cfg.Path+"\n"), 0o600)
+	}
+	return nil
+}
+
+func (g *Guest) execSwitch(ctx context.Context, m lifecycle.Model, bt *boot, system domain.StorePath) error {
+	var oldSystem string
+	if bvm, ok := m.Boot.Get(); ok {
+		oldSystem = bvm.System.Get()
+	}
 	g.m.logf("switching the running guest...")
-	err = g.vsock().Agent(ctx, proto.Request{Op: proto.OpApply, Toplevel: system}, func(r proto.Response) {
+	err := g.vsock().Agent(ctx, proto.Request{Op: proto.OpApply, Toplevel: system.Get()}, func(r proto.Response) {
 		if r.Line != "" {
 			fmt.Fprintln(g.m.Log, r.Line)
 		}
 	})
 	if err != nil {
-		if oldSystem != "" && oldSystem != system {
-			g.m.logf("switch failed (%v); rolling back to %s...", err, oldSystem)
+		_, rbEffects := lifecycle.Update(m, lifecycle.MsgSwitchFailed{Reason: domain.NewText(err.Error())})
+		for _, eff := range rbEffects {
+			sw, ok := eff.(lifecycle.EffectAgentSwitch)
+			if !ok || sw.Mode != lifecycle.SwitchRollback || !sw.Toplevel.Valid() || sw.Toplevel == system {
+				continue
+			}
+			g.m.logf("switch failed (%v); rolling back to %s...", err, sw.Toplevel.Get())
 			rbCtx, rbCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer rbCancel()
-			rbErr := g.vsock().Agent(rbCtx, proto.Request{Op: proto.OpApply, Toplevel: oldSystem}, func(r proto.Response) {
+			rbErr := g.vsock().Agent(rbCtx, proto.Request{Op: proto.OpApply, Toplevel: sw.Toplevel.Get()}, func(r proto.Response) {
 				if r.Line != "" {
 					fmt.Fprintln(g.m.Log, r.Line)
 				}
 			})
 			if rbErr != nil {
-				return fmt.Errorf("switch failed: %w (rollback to %s also failed: %v)", err, oldSystem, rbErr)
+				return fmt.Errorf("switch failed: %w (rollback to %s also failed: %v)", err, sw.Toplevel.Get(), rbErr)
 			}
-			g.m.logf("successfully rolled back to %s", oldSystem)
-			return fmt.Errorf("switch to configuration failed (rolled back to %s): %w", oldSystem, err)
+			g.m.logf("successfully rolled back to %s", sw.Toplevel.Get())
+			return fmt.Errorf("switch to configuration failed (rolled back to %s): %w", sw.Toplevel.Get(), err)
 		}
 		return err
 	}
-	if same(g.store(), bt.System, system, "kernel", "initrd", "kernel-params") {
-		bt.System = system
-		if err := g.writeBoot(bt); err != nil {
-			if oldSystem != "" && oldSystem != system {
-				g.m.logf("recording boot configuration failed (%v); rolling back to %s...", err, oldSystem)
-				_ = g.vsock().Agent(context.Background(), proto.Request{Op: proto.OpApply, Toplevel: oldSystem}, nil)
-			}
-			return fmt.Errorf("failed to record boot configuration: %w", err)
-		}
-		return nil
-	}
-	g.m.logf("the kernel changed; restart the guest to boot it (antic guest restart %s)", g.Name())
-	return nil
-}
 
-// same reports whether two systems have the same targets for links.
-func same(s nixbuild.GuestStore, a, b string, links ...string) bool {
-	for _, l := range links {
-		ta, ea := os.Readlink(s.Real(a + "/" + l))
-		tb, eb := os.Readlink(s.Real(b + "/" + l))
-		if ea != nil || eb != nil || ta != tb {
-			if l == "kernel-params" { // a file, not a link
-				ca, _ := os.ReadFile(s.Real(a + "/" + l))
-				cb, _ := os.ReadFile(s.Real(b + "/" + l))
-				if string(ca) == string(cb) {
-					continue
+	_, okEffects := lifecycle.Update(m, lifecycle.MsgSwitchSucceeded{
+		KernelSig: g.kernelSignature(system.Get()),
+	})
+	for _, eff := range okEffects {
+		switch e := eff.(type) {
+		case lifecycle.EffectWriteBoot:
+			if bt != nil {
+				bt.System = e.System.Get()
+				if err := g.writeBoot(bt); err != nil {
+					if oldSystem != "" && oldSystem != system.Get() {
+						g.m.logf("recording boot configuration failed (%v); rolling back to %s...", err, oldSystem)
+						_ = g.vsock().Agent(context.Background(), proto.Request{Op: proto.OpApply, Toplevel: oldSystem}, nil)
+					}
+					return fmt.Errorf("failed to record boot configuration: %w", err)
 				}
 			}
-			return false
+		case lifecycle.EffectLog:
+			g.m.logf("%s", e.Message.Get())
 		}
 	}
-	return true
+	return nil
 }
 
 func (m *Manager) allSharePaths() []string {
@@ -298,31 +414,15 @@ type ShareInfo struct {
 
 // Shares lists configured and runtime shares.
 func (g *Guest) Shares(ctx context.Context) []ShareInfo {
+	m, _ := g.lifecycleModel(ctx)
 	var out []ShareInfo
-	mounted := map[string]bool{}
-	seen := map[string]bool{}
-	bt, err := g.readBoot(ctx)
-	if err == nil {
-		for _, s := range bt.Shares {
-			mounted[s.Path] = true
-		}
+	for _, s := range m.Shares.All() {
+		out = append(out, ShareInfo{
+			Path:     s.Path.Get(),
+			ReadOnly: s.ReadOnly,
+			Mounted:  s.Mounted(),
+		})
 	}
-	for _, s := range g.Cfg.Shares {
-		p := s.Path
-		if real, err := filepath.EvalSymlinks(p); err == nil {
-			p = real
-		}
-		seen[p] = true
-		out = append(out, ShareInfo{p, s.ReadOnly, mounted[p]})
-	}
-	if err == nil {
-		for _, s := range bt.Shares {
-			if !seen[s.Path] {
-				out = append(out, ShareInfo{s.Path, s.ReadOnly, true})
-			}
-		}
-	}
-	slices.SortFunc(out, func(a, b ShareInfo) int { return strings.Compare(a.Path, b.Path) })
 	return out
 }
 
@@ -333,24 +433,36 @@ func (g *Guest) AddShare(ctx context.Context, path string, ro bool) (string, err
 	if err != nil {
 		return "", err
 	}
+	absPath, err := domain.ParseAbsPath(real)
+	if err != nil {
+		return "", err
+	}
+	tag, err := domain.ParseShareTag(share.Tag(real))
+	if err != nil {
+		return "", err
+	}
 	unlock, err := g.lock()
 	if err != nil {
 		return "", err
 	}
 	defer unlock()
-	if bt, err := g.readBoot(ctx); err == nil {
-		alreadyMounted := false
+
+	m, bt := g.lifecycleModel(ctx)
+	if bt != nil {
 		for _, s := range bt.Shares {
-			if s.Path == real {
-				alreadyMounted = true
-				break
-			}
-			if within(real, s.Path) || within(s.Path, real) {
+			if s.Path != real && (within(real, s.Path) || within(s.Path, real)) {
 				return "", fmt.Errorf("%s overlaps share %s", real, s.Path)
 			}
 		}
-		if !alreadyMounted {
-			if err := g.hotplug(ctx, bt, real, ro); err != nil {
+	}
+	_, effects := lifecycle.Update(m, lifecycle.MsgMountShare{
+		Path:     absPath,
+		Tag:      tag,
+		ReadOnly: ro,
+	})
+	for _, eff := range effects {
+		if hp, ok := eff.(lifecycle.EffectHotplugShare); ok && bt != nil {
+			if err := g.hotplug(ctx, bt, hp.Path.Get(), hp.ReadOnly); err != nil {
 				return "", err
 			}
 		}
@@ -403,40 +515,47 @@ func (g *Guest) RemoveShare(ctx context.Context, path string) error {
 		return err
 	}
 	defer unlock()
+
+	m, bt := g.lifecycleModel(ctx)
+	var effects []lifecycle.Effect
+	if absPath, err := domain.ParseAbsPath(real); err == nil {
+		_, effects = lifecycle.Update(m, lifecycle.MsgUnmountShare{Path: absPath})
+	}
 	removedRuntime := false
-	bootMounted := false
-	if bt, err := g.readBoot(ctx); err == nil {
-		for i, s := range bt.Shares {
-			if s.Path != real {
+	for _, eff := range effects {
+		switch e := eff.(type) {
+		case lifecycle.EffectHotunplugShare:
+			if bt == nil {
 				continue
 			}
-			if !s.Runtime {
-				bootMounted = true
-				break
-			}
-			if err := g.vsock().Agent(ctx, proto.Request{Op: proto.OpUnmount, Tag: s.Tag}, nil); err != nil {
+			tagStr := e.Tag.Get()
+			pathStr := e.Path.Get()
+			if err := g.vsock().Agent(ctx, proto.Request{Op: proto.OpUnmount, Tag: tagStr}, nil); err != nil {
 				return err
 			}
-			if err := g.api().RemoveDevice(ctx, "fs-"+s.Tag); err != nil {
+			if err := g.api().RemoveDevice(ctx, "fs-"+tagStr); err != nil {
 				return err
 			}
 			time.Sleep(2 * time.Second) // see hotplug
-			if err := g.m.Units.Stop(ctx, g.shareUnit(s.Tag)); err != nil {
+			if err := g.m.Units.Stop(ctx, g.shareUnit(tagStr)); err != nil {
 				return err
 			}
-			bt.Shares = slices.Delete(bt.Shares, i, i+1)
+			for i, s := range bt.Shares {
+				if s.Path == pathStr {
+					bt.Shares = slices.Delete(bt.Shares, i, i+1)
+					break
+				}
+			}
 			if err := g.writeBoot(bt); err != nil {
 				return err
 			}
 			removedRuntime = true
-			break
+		case lifecycle.EffectLog:
+			defer g.m.logf("%s", e.Message.Get())
 		}
 	}
 	if err := g.m.Config.RemoveShare(g.Name(), real, g.m.Dirs.Home); err != nil && !removedRuntime {
 		return err
-	}
-	if bootMounted {
-		g.m.logf("removed %s from %s.toml; restart guest %s to unmount it", real, g.Name(), g.Name())
 	}
 	return nil
 }
@@ -475,7 +594,7 @@ type Info struct {
 func (g *Guest) Inspect(ctx context.Context) (Info, error) {
 	i := Info{
 		Name: g.Name(), ID: g.Inst.ID,
-		Description: g.Cfg.Description, State: "-",
+		Description: g.Cfg.Description, State: lifecycle.PhaseUncreated.String(),
 		OS: g.osDesc(), Packages: g.Cfg.Packages,
 		CPUs: g.Cfg.CPUs, Memory: g.Cfg.Memory, Network: g.Cfg.Network.Mode, Ports: g.Cfg.Ports,
 		Shares: g.Shares(ctx),
@@ -483,14 +602,14 @@ func (g *Guest) Inspect(ctx context.Context) (Info, error) {
 	if !g.Created {
 		return i, nil
 	}
-	i.State = "stopped"
+	i.State = lifecycle.PhaseStopped.String()
 	i.System, _ = g.store().Current()
 	st, err := g.m.Units.State(ctx, g.vmUnit())
 	if err != nil {
 		return i, err
 	}
 	if st.Running() {
-		i.State, i.Since = "running", &st.Since
+		i.State, i.Since = lifecycle.PhaseRunning.String(), &st.Since
 		if bt, err := g.readBoot(ctx); err == nil {
 			i.System = bt.System
 		}

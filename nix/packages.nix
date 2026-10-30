@@ -24,8 +24,11 @@ let
       ../go.mod
       ../go.sum
       ../cmd/antic-agent
+      ../internal/domain
       ../internal/guest
       ../internal/proto
+      ../internal/tea
+      ../internal/types
       ./proto.json
     ];
   };

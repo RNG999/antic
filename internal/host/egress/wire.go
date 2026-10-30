@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/netip"
 	"strings"
+
+	"github.com/RNG999/antic/internal/domain"
 )
 
 // DNS constants used here.
@@ -382,21 +384,16 @@ func parseResponse(msg []byte, id uint16, q question) (dnsResponse, error) {
 	return r, nil
 }
 
-// matches reports whether name (lowercase, no trailing dot) matches any of the
-// pattern domains. A pattern starting with "*." (e.g. "*.example.com") matches
-// both the apex "example.com" and any subdomain (e.g. "api.example.com").
-// A pattern without "*." matches only the exact domain name.
+// matches reports whether name matches any of the pattern domains using the
+// SSOT domain.DomainMatches implementation.
 func matches(name string, patterns []string) bool {
-	for _, p := range patterns {
-		if strings.HasPrefix(p, "*.") {
-			base := strings.TrimPrefix(p, "*.")
-			if name == base || strings.HasSuffix(name, "."+base) {
-				return true
-			}
-		} else {
-			if name == p {
-				return true
-			}
+	d, err := domain.ParseDomainName(name)
+	if err != nil {
+		return false
+	}
+	for _, rawP := range patterns {
+		if p, err := domain.ParseDomainPattern(rawP); err == nil && domain.DomainMatches(d, p) {
+			return true
 		}
 	}
 	return false

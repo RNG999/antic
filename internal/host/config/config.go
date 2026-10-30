@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/RNG999/antic/internal/domain"
 )
 
 // Config holds all loaded guest configurations from ~/.config/antic/guests.
@@ -188,13 +189,13 @@ func parseEntry(raw string) (netip.Prefix, string, error) {
 	return netip.Prefix{}, d, nil
 }
 
-var (
-	nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
-	pkgRE  = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.+-]*$`)
-)
+var pkgRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.+-]*$`)
 
-// ValidName reports whether s can name a guest.
-func ValidName(s string) bool { return nameRE.MatchString(s) }
+// ValidName reports whether s can name a guest (delegates to SSOT domain.ParseGuestName).
+func ValidName(s string) bool {
+	_, err := domain.ParseGuestName(s)
+	return err == nil
+}
 
 // ValidPackage reports whether s is a valid nixpkgs attribute name.
 func ValidPackage(s string) bool { return pkgRE.MatchString(s) }

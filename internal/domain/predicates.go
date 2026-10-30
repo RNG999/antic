@@ -1,0 +1,392 @@
+package domain
+
+import (
+	"errors"
+	"fmt"
+	"net/netip"
+	"path"
+	"strings"
+
+	"github.com/RNG999/antic/internal/types"
+)
+
+// GuestNamePred refines string to valid guest names: ^[a-z0-9][a-z0-9-]{0,31}$.
+type GuestNamePred struct{}
+
+// Check validates a guest name.
+func (GuestNamePred) Check(s string) error {
+	if len(s) == 0 || len(s) > 32 {
+		return fmt.Errorf("invalid guest name %q (a-z, 0-9 and -, up to 32 characters)", s)
+	}
+	for i, c := range s {
+		if i == 0 && c == '-' {
+			return fmt.Errorf("invalid guest name %q (a-z, 0-9 and -, up to 32 characters)", s)
+		}
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+			return fmt.Errorf("invalid guest name %q (a-z, 0-9 and -, up to 32 characters)", s)
+		}
+	}
+	return nil
+}
+
+// GuestName is the refinement type { s : string | GuestNamePred(s) }.
+type GuestName = types.Refined[string, GuestNamePred]
+
+// ParseGuestName validates and constructs a GuestName.
+func ParseGuestName(s string) (GuestName, error) {
+	return types.Parse[string, GuestNamePred](s)
+}
+
+// StorePathPred refines string to top-level Nix store paths: ^/nix/store/[0-9a-z]{32}-[^/]+$.
+type StorePathPred struct{}
+
+// Check validates a Nix store path.
+func (StorePathPred) Check(s string) error {
+	const prefix = "/nix/store/"
+	if !strings.HasPrefix(s, prefix) {
+		return fmt.Errorf("invalid system path %q", s)
+	}
+	rest := s[len(prefix):]
+	if len(rest) < 34 || rest[32] != '-' {
+		return fmt.Errorf("invalid system path %q", s)
+	}
+	for _, c := range rest[:32] {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z')) {
+			return fmt.Errorf("invalid system path %q", s)
+		}
+	}
+	name := rest[33:]
+	if len(name) == 0 || strings.Contains(name, "/") {
+		return fmt.Errorf("invalid system path %q", s)
+	}
+	return nil
+}
+
+// StorePath is the refinement type { s : string | StorePathPred(s) }.
+type StorePath = types.Refined[string, StorePathPred]
+
+// ParseStorePath validates and constructs a StorePath.
+func ParseStorePath(s string) (StorePath, error) {
+	return types.Parse[string, StorePathPred](s)
+}
+
+// ShareTagPred refines string to virtiofs share tags: ^s-[0-9a-f]{12}$.
+type ShareTagPred struct{}
+
+// Check validates a virtiofs share tag.
+func (ShareTagPred) Check(s string) error {
+	if len(s) != 14 || !strings.HasPrefix(s, "s-") {
+		return fmt.Errorf("invalid share tag %q", s)
+	}
+	for _, c := range s[2:] {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return fmt.Errorf("invalid share tag %q", s)
+		}
+	}
+	return nil
+}
+
+// ShareTag is the refinement type { s : string | ShareTagPred(s) }.
+type ShareTag = types.Refined[string, ShareTagPred]
+
+// ParseShareTag validates and constructs a ShareTag.
+func ParseShareTag(s string) (ShareTag, error) {
+	return types.Parse[string, ShareTagPred](s)
+}
+
+// AbsPathPred refines string to canonical absolute paths strictly below root ("/").
+type AbsPathPred struct{}
+
+// Check validates a canonical absolute path.
+func (AbsPathPred) Check(s string) error {
+	if s == "" || s == "/" || !strings.HasPrefix(s, "/") || path.Clean(s) != s {
+		return fmt.Errorf("invalid canonical absolute path %q", s)
+	}
+	return nil
+}
+
+// AbsPath is the refinement type { s : string | AbsPathPred(s) }.
+type AbsPath = types.Refined[string, AbsPathPred]
+
+// ParseAbsPath validates and constructs an AbsPath.
+func ParseAbsPath(s string) (AbsPath, error) {
+	return types.Parse[string, AbsPathPred](s)
+}
+
+// WithinSubtree reports whether child lies strictly beneath parent.
+func WithinSubtree(parent, child AbsPath) bool {
+	if !parent.Valid() || !child.Valid() {
+		return false
+	}
+	return strings.HasPrefix(child.Get(), parent.Get()+"/")
+}
+
+// PathsOverlap reports whether a and b are equal or one lies inside the other.
+func PathsOverlap(a, b AbsPath) bool {
+	if !a.Valid() || !b.Valid() {
+		return false
+	}
+	return a.Get() == b.Get() || WithinSubtree(a, b) || WithinSubtree(b, a)
+}
+
+// UserNamePred refines string to valid POSIX login names without slashes.
+type UserNamePred struct{}
+
+// Check validates a user name.
+func (UserNamePred) Check(s string) error {
+	if s == "" || s == "." || s == ".." || strings.ContainsAny(s, "/:\x00 \t\n") {
+		return fmt.Errorf("invalid user name %q", s)
+	}
+	return nil
+}
+
+// UserName is the refinement type { s : string | UserNamePred(s) }.
+type UserName = types.Refined[string, UserNamePred]
+
+// ParseUserName validates and constructs a UserName.
+func ParseUserName(s string) (UserName, error) {
+	return types.Parse[string, UserNamePred](s)
+}
+
+// HomeDir returns the canonical /home/<user> AbsPath for a validated UserName.
+func HomeDir(u UserName) (AbsPath, error) {
+	if !u.Valid() {
+		return AbsPath{}, errors.New("invalid UserName for HomeDir")
+	}
+	return ParseAbsPath("/home/" + u.Get())
+}
+
+// SessionUnitPred refines string to session systemd units: ^antic-session@[A-Za-z0-9:_.\-]+\.service$.
+type SessionUnitPred struct{}
+
+// Check validates a session unit name.
+func (SessionUnitPred) Check(s string) error {
+	const (
+		prefix = "antic-session@"
+		suffix = ".service"
+	)
+	if !strings.HasPrefix(s, prefix) || !strings.HasSuffix(s, suffix) {
+		return fmt.Errorf("invalid session %q", s)
+	}
+	inst := s[len(prefix) : len(s)-len(suffix)]
+	if len(inst) == 0 {
+		return fmt.Errorf("invalid session %q", s)
+	}
+	for _, c := range inst {
+		if !isUnitChar(c, false) {
+			return fmt.Errorf("invalid session %q", s)
+		}
+	}
+	return nil
+}
+
+// SessionUnit is the refinement type { s : string | SessionUnitPred(s) }.
+type SessionUnit = types.Refined[string, SessionUnitPred]
+
+// ParseSessionUnit validates and constructs a SessionUnit.
+func ParseSessionUnit(s string) (SessionUnit, error) {
+	return types.Parse[string, SessionUnitPred](s)
+}
+
+// UnitNamePred refines string to systemd unit names: ^[A-Za-z0-9:_.@\\-]+$.
+type UnitNamePred struct{}
+
+// Check validates a systemd unit name.
+func (UnitNamePred) Check(s string) error {
+	if len(s) == 0 {
+		return fmt.Errorf("invalid unit %q", s)
+	}
+	for _, c := range s {
+		if !isUnitChar(c, true) {
+			return fmt.Errorf("invalid unit %q", s)
+		}
+	}
+	return nil
+}
+
+// UnitName is the refinement type { s : string | UnitNamePred(s) }.
+type UnitName = types.Refined[string, UnitNamePred]
+
+// ParseUnitName validates and constructs a UnitName.
+func ParseUnitName(s string) (UnitName, error) {
+	return types.Parse[string, UnitNamePred](s)
+}
+
+// JournalLinesPred refines int to positive line counts: 1 <= n <= 100000.
+type JournalLinesPred struct{}
+
+// Check validates a journal line count.
+func (JournalLinesPred) Check(n int) error {
+	if n <= 0 || n > 100000 {
+		return fmt.Errorf("invalid journal line count %d", n)
+	}
+	return nil
+}
+
+// JournalLines is the refinement type { n : int | 1 <= n <= 100000 }.
+type JournalLines = types.Refined[int, JournalLinesPred]
+
+// ParseJournalLines normalizes (<= 0 defaults to 200) and validates a line count.
+func ParseJournalLines(n int) (JournalLines, error) {
+	if n <= 0 {
+		n = 200
+	}
+	return types.Parse[int, JournalLinesPred](n)
+}
+
+// MountFDPred refines int to non-negative file descriptors: fd >= 0.
+type MountFDPred struct{}
+
+// Check validates a file descriptor.
+func (MountFDPred) Check(fd int) error {
+	if fd < 0 {
+		return fmt.Errorf("invalid negative file descriptor %d", fd)
+	}
+	return nil
+}
+
+// MountFD is the refinement type { fd : int | fd >= 0 }.
+type MountFD = types.Refined[int, MountFDPred]
+
+// ParseMountFD validates and constructs a MountFD.
+func ParseMountFD(fd int) (MountFD, error) {
+	return types.Parse[int, MountFDPred](fd)
+}
+
+// UsableAddrPred refines netip.Addr to routable unicast addresses (excluding
+// unspecified, loopback, link-local, multicast, and IPv4-mapped IPv6 addresses,
+// preventing DNS rebinding against local/metadata services).
+type UsableAddrPred struct{}
+
+// Check validates that a is a usable unicast address.
+func (UsableAddrPred) Check(a netip.Addr) error {
+	if !a.IsValid() || a.IsUnspecified() || a.IsLoopback() || a.IsMulticast() ||
+		a.IsLinkLocalUnicast() || a.IsLinkLocalMulticast() || a.Is4In6() {
+		return fmt.Errorf("unusable or reserved IP address %s", a)
+	}
+	return nil
+}
+
+// UsableAddr is the refinement type { a : netip.Addr | UsableAddrPred(a) }.
+type UsableAddr = types.Refined[netip.Addr, UsableAddrPred]
+
+// ParseUsableAddr validates and constructs a UsableAddr.
+func ParseUsableAddr(a netip.Addr) (UsableAddr, error) {
+	return types.Parse[netip.Addr, UsableAddrPred](a)
+}
+
+// DomainNamePred refines string to canonical lowercase DNS domain names without trailing dot.
+type DomainNamePred struct{}
+
+// Check validates a lowercase domain name.
+func (DomainNamePred) Check(s string) error {
+	if len(s) == 0 || len(s) > 253 || strings.HasPrefix(s, ".") || strings.HasSuffix(s, ".") {
+		return fmt.Errorf("invalid domain name %q", s)
+	}
+	for _, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.') {
+			return fmt.Errorf("invalid domain name %q", s)
+		}
+	}
+	return nil
+}
+
+// DomainName is the Quotient/Refinement type { s : string | DomainNamePred(s) }.
+type DomainName = types.Refined[string, DomainNamePred]
+
+// ParseDomainName projects s to its canonical lowercase representative and validates it.
+func ParseDomainName(s string) (DomainName, error) {
+	return types.Parse[string, DomainNamePred](strings.ToLower(s))
+}
+
+// DomainNameOrder orders DomainName values lexicographically for SortedSet.
+type DomainNameOrder struct{}
+
+// Key returns the DomainName itself as its unique key.
+func (DomainNameOrder) Key(d DomainName) DomainName { return d }
+
+// Less orders two DomainNames lexicographically.
+func (DomainNameOrder) Less(a, b DomainName) bool { return a.Get() < b.Get() }
+
+// DomainPatternPred refines string to domain match patterns (exact or "*.suffix").
+type DomainPatternPred struct{}
+
+// Check validates a domain match pattern.
+func (DomainPatternPred) Check(s string) error {
+	rest := strings.TrimPrefix(s, "*.")
+	return (DomainNamePred{}).Check(rest)
+}
+
+// DomainPattern is the Quotient/Refinement type { s : string | DomainPatternPred(s) }.
+type DomainPattern = types.Refined[string, DomainPatternPred]
+
+// ParseDomainPattern normalizes and validates a domain pattern.
+func ParseDomainPattern(s string) (DomainPattern, error) {
+	return types.Parse[string, DomainPatternPred](strings.ToLower(s))
+}
+
+// DomainPatternOrder orders DomainPattern values lexicographically for SortedSet.
+type DomainPatternOrder struct{}
+
+// Key returns the DomainPattern itself as its unique key.
+func (DomainPatternOrder) Key(p DomainPattern) DomainPattern { return p }
+
+// Less orders two DomainPatterns lexicographically.
+func (DomainPatternOrder) Less(a, b DomainPattern) bool { return a.Get() < b.Get() }
+
+// DomainMatches reports whether domain matches pattern (exact or "*.base").
+func DomainMatches(domain DomainName, pattern DomainPattern) bool {
+	if !domain.Valid() || !pattern.Valid() {
+		return false
+	}
+	d := domain.Get()
+	p := pattern.Get()
+	if strings.HasPrefix(p, "*.") {
+		base := strings.TrimPrefix(p, "*.")
+		return d == base || strings.HasSuffix(d, "."+base)
+	}
+	return d == p
+}
+
+// BoundedTimeoutPred refines int to bounded nftables element timeouts in seconds:
+// 360 <= secs <= 86460 (5m+1m to 24h+1m).
+type BoundedTimeoutPred struct{}
+
+// Check validates an nftables timeout in seconds.
+func (BoundedTimeoutPred) Check(secs int) error {
+	if secs < 360 || secs > 86460 {
+		return fmt.Errorf("timeout %ds out of bounds [360, 86460]", secs)
+	}
+	return nil
+}
+
+// BoundedTimeout is the refinement type { secs : int | 360 <= secs <= 86460 }.
+type BoundedTimeout = types.Refined[int, BoundedTimeoutPred]
+
+// TimeoutFromTTL computes the bounded nftables timeout in seconds for a DNS TTL:
+// clamp(ttl, 300, 86400) + 60.
+func TimeoutFromTTL(ttl uint32) BoundedTimeout {
+	secs := int(ttl)
+	if secs < 300 {
+		secs = 300
+	}
+	if secs > 86400 {
+		secs = 86400
+	}
+	b, _ := types.Parse[int, BoundedTimeoutPred](secs + 60)
+	return b
+}
+
+func isUnitChar(c rune, allowAtAndSlash bool) bool {
+	if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+		return true
+	}
+	switch c {
+	case ':', '_', '.', '-':
+		return true
+	case '@', '\\':
+		return allowAtAndSlash
+	default:
+		return false
+	}
+}

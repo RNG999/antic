@@ -7,25 +7,23 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
+	"github.com/RNG999/antic/internal/domain"
 	"github.com/RNG999/antic/internal/proto"
 )
 
-var storePath = regexp.MustCompile(`^/nix/store/[0-9a-z]{32}-[^/]+$`)
-
-// apply switches the running system to toplevel, a NixOS system the host
-// built and copied into the guest's read-only store. Output lines go to
-// line.
-func apply(toplevel string, line func(string)) error {
-	if !storePath.MatchString(toplevel) {
+// apply switches the running system to toplevel, a validated NixOS system
+// store path that the host built and copied into the guest's read-only store.
+// Output lines go to line.
+func apply(toplevel domain.StorePath, line func(string)) error {
+	if !toplevel.Valid() {
 		return fmt.Errorf("invalid system path %q", toplevel)
 	}
-	stc := filepath.Join(toplevel, "bin/switch-to-configuration")
+	stc := filepath.Join(toplevel.Get(), "bin/switch-to-configuration")
 	if _, err := os.Stat(stc); err != nil {
-		return fmt.Errorf("%s is not a NixOS system: %w", toplevel, err)
+		return fmt.Errorf("%s is not a NixOS system: %w", toplevel.Get(), err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -49,9 +47,6 @@ func apply(toplevel string, line func(string)) error {
 	return nil
 }
 
-// Session units: one antic-agent session instance per "antic run" (see nix/module.nix).
-var sessionUnit = regexp.MustCompile(`^antic-session@[A-Za-z0-9:_.\-]+\.service$`)
-
 // sessions lists running session units with their command and processes.
 func sessions() ([]proto.Session, error) {
 	var out []proto.Session
@@ -64,7 +59,7 @@ func sessions() ([]proto.Session, error) {
 	}
 	for _, d := range dirs {
 		unit := filepath.Base(d)
-		if !sessionUnit.MatchString(unit) {
+		if _, err := domain.ParseSessionUnit(unit); err != nil {
 			continue
 		}
 		s := proto.Session{Unit: unit}
@@ -91,31 +86,27 @@ func sessions() ([]proto.Session, error) {
 	return out, nil
 }
 
-// kill stops a session unit.
-func kill(unit string) error {
-	if !sessionUnit.MatchString(unit) {
+// kill stops a validated session unit.
+func kill(unit domain.SessionUnit) error {
+	if !unit.Valid() {
 		return fmt.Errorf("invalid session %q", unit)
 	}
-	cmd := exec.Command("systemctl", "stop", "--no-block", unit)
+	cmd := exec.Command("systemctl", "stop", "--no-block", unit.Get())
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("stop %s: %v: %s", unit, err, out)
+		return fmt.Errorf("stop %s: %v: %s", unit.Get(), err, out)
 	}
 	return nil
 }
 
-var unitName = regexp.MustCompile(`^[A-Za-z0-9:_.@\\-]+$`)
-
-// journal streams the guest's journal for this boot.
-func journal(units []string, lines int, line func(string)) error {
-	if lines <= 0 {
-		lines = 200
-	}
-	args := []string{"-b", "--no-pager", "-o", "short-monotonic", "-n", fmt.Sprint(lines)}
+// journal streams the guest's journal for this boot using refined UnitNames
+// and JournalLines.
+func journal(units []domain.UnitName, lines domain.JournalLines, line func(string)) error {
+	args := []string{"-b", "--no-pager", "-o", "short-monotonic", "-n", fmt.Sprint(lines.Get())}
 	for _, u := range units {
-		if !unitName.MatchString(u) {
+		if !u.Valid() {
 			return fmt.Errorf("invalid unit %q", u)
 		}
-		args = append(args, "-u", u)
+		args = append(args, "-u", u.Get())
 	}
 	cmd := exec.Command("journalctl", args...)
 	out, err := cmd.StdoutPipe()

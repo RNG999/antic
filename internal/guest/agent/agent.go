@@ -3,13 +3,19 @@
 // proto.HostCID): mounting hot-plugged shares, switching the system to a
 // host-built configuration, and listing or stopping sessions. The guest user
 // has no way to ask it for anything.
+//
+// All authorization, path validation, and state transitions are decided by the
+// pure Sans-I/O & TEA core in internal/tea/control using Refinement Types
+// and Ghosts of Departed Proofs from internal/domain.
 package agent
 
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"os/user"
@@ -18,18 +24,20 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/RNG999/antic/internal/guest/sd"
+	"github.com/RNG999/antic/internal/domain"
 	"github.com/RNG999/antic/internal/proto"
+	"github.com/RNG999/antic/internal/tea/control"
 )
 
-// Agent serves the host's requests.
+// Agent serves the host's requests, holding the pure TEA control.Model as
+// the Single Source of Truth (SSOT) for user/home/mount state alongside open
+// O_PATH mount file descriptors.
 type Agent struct {
-	user     *user.User
 	uid, gid int
-	home     string
 
-	mu     sync.Mutex // serializes mount, unmount and apply
-	mounts map[string]*mount
+	mu    sync.Mutex // serializes state transitions, mount, unmount, and apply
+	model control.Model
+	files map[domain.ShareTag]*os.File
 }
 
 // New returns an agent acting for the guest login user.
@@ -38,9 +46,18 @@ func New(userName string) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
+	rUser, err := domain.ParseUserName(u.Username)
+	if err != nil {
+		return nil, err
+	}
 	uid, _ := strconv.Atoi(u.Uid)
 	gid, _ := strconv.Atoi(u.Gid)
-	return &Agent{user: u, uid: uid, gid: gid, home: u.HomeDir, mounts: map[string]*mount{}}, nil
+	return &Agent{
+		uid:   uid,
+		gid:   gid,
+		model: control.Init(rUser),
+		files: map[domain.ShareTag]*os.File{},
+	}, nil
 }
 
 // Serve accepts connections on the agent port until an error occurs.
@@ -55,7 +72,7 @@ func (a *Agent) Serve() error {
 	if err := unix.Listen(fd, 16); err != nil {
 		return err
 	}
-	sd.NotifyReady()
+	notifyReady()
 	for {
 		cfd, sa, err := unix.Accept4(fd, unix.SOCK_CLOEXEC)
 		if err != nil {
@@ -67,17 +84,18 @@ func (a *Agent) Serve() error {
 		c := os.NewFile(uintptr(cfd), "agent-conn")
 		// The guest kernel sets the peer CID, so guest processes (CID 1 via
 		// loopback, or the guest's own CID) cannot pretend to be the host.
-		if vm, ok := sa.(*unix.SockaddrVM); !ok || vm.CID != proto.HostCID {
+		vm, ok := sa.(*unix.SockaddrVM)
+		if !ok || vm.CID != proto.HostCID {
 			log.Printf("refused agent connection from %v", sa)
 			c.Close()
 			continue
 		}
-		go a.handle(c)
+		go a.handle(c, vm.CID)
 	}
 }
 
 // handle serves one request from the host.
-func (a *Agent) handle(c *os.File) {
+func (a *Agent) handle(c *os.File, peerCID uint32) {
 	defer c.Close()
 	var req proto.Request
 	if err := json.NewDecoder(bufio.NewReader(c)).Decode(&req); err != nil {
@@ -85,7 +103,7 @@ func (a *Agent) handle(c *os.File) {
 	}
 	enc := json.NewEncoder(c)
 	send := func(r proto.Response) { enc.Encode(r) }
-	if err := a.dispatch(req, send); err != nil {
+	if err := a.dispatch(peerCID, req, send); err != nil {
 		log.Printf("%s: %v", req.Op, err)
 		send(proto.Response{Error: err.Error(), Done: true})
 		return
@@ -93,35 +111,86 @@ func (a *Agent) handle(c *os.File) {
 	send(proto.Response{Done: true})
 }
 
-func (a *Agent) dispatch(req proto.Request, send func(proto.Response)) error {
-	switch req.Op {
-	case proto.OpHello:
-		ready := exec.Command("systemctl", "is-active", "--quiet", "antic-ready.target").Run() == nil
-		send(proto.Response{Hello: &proto.Hello{Protocol: proto.Version, User: a.user.Username, Ready: ready}})
-		return nil
-	case proto.OpMount:
+func (a *Agent) dispatch(peerCID uint32, req proto.Request, send func(proto.Response)) error {
+	needLock := req.Op == proto.OpMount || req.Op == proto.OpUnmount || req.Op == proto.OpApply
+	if needLock {
 		a.mu.Lock()
 		defer a.mu.Unlock()
-		return a.mount(req.Tag, req.Path, req.ReadOnly)
-	case proto.OpUnmount:
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		return a.unmount(req.Tag)
-	case proto.OpApply:
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		return apply(req.Toplevel, func(line string) { send(proto.Response{Line: line}) })
-	case proto.OpSessions:
-		s, err := sessions()
-		if err != nil {
-			return err
-		}
-		send(proto.Response{Sessions: s})
-		return nil
-	case proto.OpKill:
-		return kill(req.Session)
-	case proto.OpJournal:
-		return journal(req.Units, req.Lines, func(line string) { send(proto.Response{Line: line}) })
 	}
-	return fmt.Errorf("unknown op %q", req.Op)
+
+	var inMountinfo bool
+	if req.Op == proto.OpMount {
+		mounted, err := tagMounted(req.Tag)
+		inMountinfo = err != nil || mounted
+	}
+
+	msg := control.ParseRequest(peerCID, req, inMountinfo)
+	if !needLock {
+		a.mu.Lock()
+	}
+	next, effects := control.Update(a.model, msg)
+	a.model = next
+	if !needLock {
+		a.mu.Unlock()
+	}
+
+	for _, eff := range effects {
+		switch e := eff.(type) {
+		case control.EffectReject:
+			return errors.New(e.Reason.Get())
+
+		case control.EffectReplyHello:
+			ready := exec.Command("systemctl", "is-active", "--quiet", "antic-ready.target").Run() == nil
+			send(proto.Response{Hello: &proto.Hello{Protocol: proto.Version, User: e.User.Get(), Ready: ready}})
+
+		case control.EffectMountVirtiofs:
+			if err := a.mount(e.Tag, e.Path, e.ReadOnly); err != nil {
+				return err
+			}
+
+		case control.EffectUnmountVirtiofs:
+			if err := a.unmount(e.Tag, e.Path, e.FD); err != nil {
+				return err
+			}
+
+		case control.EffectExecSwitch:
+			if err := apply(e.Toplevel, func(line string) { send(proto.Response{Line: line}) }); err != nil {
+				return err
+			}
+
+		case control.EffectListSessions:
+			s, err := sessions()
+			if err != nil {
+				return err
+			}
+			send(proto.Response{Sessions: s})
+
+		case control.EffectStopSession:
+			if err := kill(e.Unit); err != nil {
+				return err
+			}
+
+		case control.EffectStreamJournal:
+			if err := journal(e.Units, e.Lines, func(line string) { send(proto.Response{Line: line}) }); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
+
+// notifyReady tells systemd (Type=notify) that antic-agent is ready to accept vsock connections.
+func notifyReady() {
+	addr := os.Getenv("NOTIFY_SOCKET")
+	if addr == "" {
+		return
+	}
+	if addr[0] == '@' {
+		addr = "\x00" + addr[1:]
+	}
+	if c, err := net.DialUnix("unixgram", nil, &net.UnixAddr{Name: addr, Net: "unixgram"}); err == nil {
+		_, _ = c.Write([]byte("READY=1"))
+		_ = c.Close()
+	}
+}
+

@@ -2,31 +2,34 @@
 // state machine for an antic guest VM's lifecycle, configuration switching, and
 // hot-plugged virtiofs shares.
 //
-// Design references:
-//   - Sans-I/O protocol pattern (Benfield): pure state machine isolated from sockets/processes/timers.
-//   - Functional Core, Imperative Shell (Bernhardt) & TEA: Update(Model, Msg) -> (Model, []Effect).
-//   - IronFleet (Hawblitzel et al., SOSP 2015) & Verdi (Wilcox et al., PLDI 2015):
-//     separates verified state-machine transitions (Init, Invariant, StepValid, Update)
-//     from the untrusted I/O runtime shim.
+// All fields in Model, Msg, and Effect use formal type-theory combinators from
+// internal/typetheory and domain vocabulary types from internal/domain (SSOT):
+//   - Refinement Types (domain.GuestName, domain.StorePath, domain.AbsPath, domain.ShareTag)
+//   - Typestate-Indexed Types (domain.InstalledStorePath, domain.CandidateStorePath)
+//   - Phantom Types (domain.KernelSig, domain.Text)
+//   - Canonical Quotient Containers (types.SortedSet[Share, domain.AbsPath, ShareByPath])
 package lifecycle
 
 import (
 	"errors"
 	"fmt"
 	"slices"
+
+	"github.com/RNG999/antic/internal/domain"
+	"github.com/RNG999/antic/internal/types"
 )
 
-// Phase represents the lifecycle state of a guest VM.
+// Phase is the derived lifecycle state of a guest VM.
 type Phase uint8
 
 const (
-	// PhaseUncreated means the guest exists only in configuration (no instance ID or store).
+	// PhaseUncreated means the guest exists only in configuration (no installed system).
 	PhaseUncreated Phase = iota
-	// PhaseStopped means the guest has an instance ID and installed system, but the VM is not running.
+	// PhaseStopped means the guest has an installed system, but the VM is not booted.
 	PhaseStopped
-	// PhaseRunning means the VM is booted and running BootSystem.
+	// PhaseRunning means the VM is booted and running Boot.System.
 	PhaseRunning
-	// PhaseSwitching means the running VM is currently switching to CandidateSystem.
+	// PhaseSwitching means the running VM is currently switching to Candidate.
 	PhaseSwitching
 )
 
@@ -45,85 +48,165 @@ func (p Phase) String() string {
 	}
 }
 
-// Share describes a configured or mounted host directory share.
+// MountState represents the single source of truth for a share's mount status,
+// eliminating the illegal state combination (Mounted=false, Runtime=true).
+type MountState uint8
+
+const (
+	// MountNone means the share is configured on disk but not currently mounted.
+	MountNone MountState = iota
+	// MountBoot means the share was mounted when the VM booted.
+	MountBoot
+	// MountRuntime means the share was hot-plugged while the VM was running.
+	MountRuntime
+)
+
+// BootedVM holds the active boot state of a running VM.
+type BootedVM struct {
+	System    domain.StorePath
+	KernelSig domain.KernelSig
+}
+
+// Share describes a configured or mounted host directory share using refined types
+// and a normalized MountState enum (SSOT).
 type Share struct {
-	Path     string
-	Tag      string
+	Path     domain.AbsPath
+	Tag      domain.ShareTag
+	Mount    MountState
 	ReadOnly bool
-	Mounted  bool
-	Runtime  bool // true if hot-plugged while running
 }
 
-// Model is the complete, immutable state of one guest's lifecycle.
-// All fields use decidable value types and sorted slices (never maps, floats,
-// or pointers) to guarantee deterministic state transitions and canonical equality.
+// Mounted reports whether the share is currently mounted in the guest.
+func (s Share) Mounted() bool {
+	return s.Mount == MountBoot || s.Mount == MountRuntime
+}
+
+// ShareByPath defines the canonical total order on Share by its unique AbsPath key.
+type ShareByPath struct{}
+
+// Key extracts the unique AbsPath key of a Share.
+func (ShareByPath) Key(s Share) domain.AbsPath { return s.Path }
+
+// Less orders two AbsPath keys lexicographically.
+func (ShareByPath) Less(a, b domain.AbsPath) bool { return a.Get() < b.Get() }
+
+// ShareSet is a canonical SortedSet of Shares keyed and strictly ordered by Path.
+type ShareSet = types.SortedSet[Share, domain.AbsPath, ShareByPath]
+
+// Model is the complete, immutable, normalized (SSOT) state of one guest's lifecycle.
+// Phase is derived from (Installed, Boot, Candidate) rather than stored redundantly,
+// and Installed / Candidate carry distinct Typestate indices (InstalledState vs CandidateState).
 type Model struct {
-	Name            string
-	Phase           Phase
-	InstalledSystem string
-	BootSystem      string
-	CandidateSystem string
-	BootKernelHash  string
-	Shares          []Share // strictly sorted by Path
+	Name      domain.GuestName
+	Installed types.Option[domain.InstalledStorePath]
+	Boot      types.Option[BootedVM]
+	Candidate types.Option[domain.CandidateStorePath]
+	Shares    ShareSet
 }
 
-// Init constructs the canonical initial state for a named guest.
-func Init(name string) Model {
+// Phase derives the guest's current lifecycle Phase from the normalized Model state (SSOT).
+func (m Model) Phase() Phase {
+	if !m.Installed.IsSome() {
+		return PhaseUncreated
+	}
+	if !m.Boot.IsSome() {
+		return PhaseStopped
+	}
+	if !m.Candidate.IsSome() {
+		return PhaseRunning
+	}
+	return PhaseSwitching
+}
+
+// Init constructs the canonical initial state for a validated GuestName.
+func Init(name domain.GuestName) Model {
 	return Model{
-		Name:  name,
-		Phase: PhaseUncreated,
+		Name: name,
 	}
 }
 
-// Invariant checks the inductive state invariants I(s) of Model.
-// Formal verification and bounded model checking assert:
-//  1. Base case:      ∀ name != "": Invariant(Init(name)) == nil
-//  2. Inductive step: ∀ s, msg: Invariant(s) == nil => Invariant(Update(s, msg).Model) == nil
+// Invariant checks the inductive state invariants I(s) of Model, including all
+// refinement predicates, typestate consistency, and canonical SortedSet invariants.
 func Invariant(m Model) error {
-	if m.Name == "" {
-		return errors.New("invariant violation: guest Name must not be empty")
+	if !m.Name.Valid() {
+		return errors.New("invariant violation: guest Name is not a valid GuestName")
 	}
-	switch m.Phase {
-	case PhaseUncreated:
-		if m.InstalledSystem != "" || m.BootSystem != "" || m.CandidateSystem != "" {
-			return errors.New("invariant violation: uncreated guest cannot have installed, boot, or candidate system")
+	if inst, ok := m.Installed.Get(); ok {
+		if !inst.Get().Valid() {
+			return errors.New("invariant violation: Installed system is not a valid StorePath")
 		}
-	case PhaseStopped:
-		if m.InstalledSystem == "" {
-			return errors.New("invariant violation: stopped guest must have an InstalledSystem")
+	} else {
+		if m.Boot.IsSome() || m.Candidate.IsSome() {
+			return errors.New("invariant violation: uncreated guest cannot have Boot or Candidate state")
 		}
-		if m.BootSystem != "" || m.CandidateSystem != "" {
-			return errors.New("invariant violation: stopped guest cannot have active BootSystem or CandidateSystem")
+	}
+	if bt, ok := m.Boot.Get(); ok {
+		if !bt.System.Valid() {
+			return errors.New("invariant violation: Boot.System is not a valid StorePath")
 		}
-	case PhaseRunning:
-		if m.InstalledSystem == "" || m.BootSystem == "" {
-			return errors.New("invariant violation: running guest must have InstalledSystem and BootSystem")
+	} else if m.Candidate.IsSome() {
+		return errors.New("invariant violation: stopped guest cannot have Candidate system")
+	}
+	if cand, ok := m.Candidate.Get(); ok {
+		if !cand.Get().Valid() {
+			return errors.New("invariant violation: Candidate is not a valid StorePath")
 		}
-		if m.CandidateSystem != "" {
-			return errors.New("invariant violation: running guest outside switching phase cannot have CandidateSystem")
-		}
-	case PhaseSwitching:
-		if m.InstalledSystem == "" || m.BootSystem == "" || m.CandidateSystem == "" {
-			return errors.New("invariant violation: switching guest must have InstalledSystem, BootSystem, and CandidateSystem")
-		}
-	default:
-		return fmt.Errorf("invariant violation: invalid phase %d", m.Phase)
+	}
+	if !m.Shares.Canonical() {
+		return errors.New("invariant violation: Shares SortedSet is not in canonical order")
 	}
 
-	for i, s := range m.Shares {
-		if s.Path == "" || s.Tag == "" {
-			return errors.New("invariant violation: share Path and Tag must not be empty")
+	phase := m.Phase()
+	allShares := m.Shares.All()
+	for i, s := range allShares {
+		if !s.Path.Valid() || !s.Tag.Valid() {
+			return errors.New("invariant violation: share Path or Tag does not satisfy refinement predicate")
 		}
-		if i > 0 && m.Shares[i-1].Path >= s.Path {
-			return fmt.Errorf("invariant violation: shares not strictly sorted at %q", s.Path)
+		if s.Mount > MountRuntime {
+			return fmt.Errorf("invariant violation: invalid MountState %d", s.Mount)
 		}
-		if m.Phase != PhaseRunning && m.Phase != PhaseSwitching {
-			if s.Mounted || s.Runtime {
-				return fmt.Errorf("invariant violation: share %q is mounted/runtime while guest is in phase %s", s.Path, m.Phase)
+		if phase != PhaseRunning && phase != PhaseSwitching && s.Mounted() {
+			return fmt.Errorf("invariant violation: share %q is mounted while guest is in phase %s", s.Path.Get(), phase)
+		}
+		// Separation Logic (Separating Conjunction S_i * S_j): distinct shares
+		// must have disjoint path subtrees and distinct virtiofs tags.
+		for _, other := range allShares[i+1:] {
+			if domain.PathsOverlap(s.Path, other.Path) {
+				return fmt.Errorf("separation violation: shares %q and %q overlap", s.Path, other.Path)
+			}
+			if s.Tag == other.Tag {
+				return fmt.Errorf("separation violation: shares %q and %q share tag %q", s.Path, other.Path, s.Tag)
 			}
 		}
-		if s.Runtime && !s.Mounted {
-			return fmt.Errorf("invariant violation: runtime hot-plugged share %q must be mounted", s.Path)
+	}
+	return nil
+}
+
+// FrameValid enforces the Separation Logic Frame Rule ({P} C {Q} => {P * R} C {Q * R}):
+// every Msg transition may only modify its designated state footprint, leaving
+// the orthogonal frame R untouched.
+func FrameValid(prev Model, msg Msg, next Model) error {
+	if prev.Name != next.Name {
+		return errors.New("frame violation: guest Name is immutable")
+	}
+	switch msg.(type) {
+	case MsgApplyBuilt, MsgSwitchSucceeded, MsgSwitchFailed:
+		// Configuration build/switch footprint: (Installed, Boot, Candidate).
+		// Frame: Shares must remain unchanged.
+		if !slices.Equal(prev.Shares.All(), next.Shares.All()) {
+			return fmt.Errorf("frame violation: %T modified Shares frame", msg)
+		}
+	case MsgStart, MsgStop:
+		// VM power footprint: (Boot, Candidate, Share.Mount).
+		// Frame: Installed system must remain unchanged.
+		if prev.Installed != next.Installed {
+			return fmt.Errorf("frame violation: %T modified Installed frame", msg)
+		}
+	case MsgMountShare, MsgUnmountShare:
+		// Share hotplug footprint: (Shares).
+		// Frame: (Installed, Boot, Candidate) must remain unchanged.
+		if prev.Installed != next.Installed || prev.Boot != next.Boot || prev.Candidate != next.Candidate {
+			return fmt.Errorf("frame violation: %T modified VM system/boot frame", msg)
 		}
 	}
 	return nil
@@ -132,23 +215,20 @@ func Invariant(m Model) error {
 // StepValid checks the IronFleet / TLA+ action invariant Next(prev, msg, next, effects)
 // across a single state transition (prev, msg) -> (next, effects).
 func StepValid(prev Model, msg Msg, next Model, effects []Effect) error {
-	// Guest identity is immutable across all transitions.
 	if prev.Name != next.Name {
 		return fmt.Errorf("step violation: guest Name changed from %q to %q", prev.Name, next.Name)
 	}
-	// Once a guest is created (Phase != PhaseUncreated), it never reverts to PhaseUncreated.
-	if prev.Phase != PhaseUncreated && next.Phase == PhaseUncreated {
+	if prev.Phase() != PhaseUncreated && next.Phase() == PhaseUncreated {
 		return errors.New("step violation: created guest reverted to PhaseUncreated")
 	}
-	// IfMsgSwitchFailed occurred in PhaseSwitching, a rollback EffectAgentSwitch must be emitted
-	// and InstalledSystem must equal BootSystem.
-	if _, ok := msg.(MsgSwitchFailed); ok && prev.Phase == PhaseSwitching {
-		if next.InstalledSystem != prev.BootSystem {
-			return errors.New("step violation: failed switch must restore InstalledSystem to BootSystem")
+	if _, ok := msg.(MsgSwitchFailed); ok && prev.Phase() == PhaseSwitching {
+		bt := prev.Boot.Value()
+		if next.Installed.Value().Get() != bt.System {
+			return errors.New("step violation: failed switch must restore Installed to Boot.System")
 		}
 		hasRollback := false
 		for _, eff := range effects {
-			if sw, ok := eff.(EffectAgentSwitch); ok && sw.Rollback && sw.Toplevel == prev.BootSystem {
+			if sw, ok := eff.(EffectAgentSwitch); ok && sw.Mode == SwitchRollback && sw.Toplevel == bt.System {
 				hasRollback = true
 			}
 		}
@@ -159,6 +239,16 @@ func StepValid(prev Model, msg Msg, next Model, effects []Effect) error {
 	return nil
 }
 
+// SwitchMode distinguishes normal activation from rollback in EffectAgentSwitch.
+type SwitchMode uint8
+
+const (
+	// SwitchActivate activates a newly built configuration.
+	SwitchActivate SwitchMode = iota
+	// SwitchRollback rolls back to the previous working boot configuration.
+	SwitchRollback
+)
+
 // Msg is the closed sum type of events/inputs driving the guest state machine.
 type Msg interface {
 	isMsg()
@@ -167,29 +257,29 @@ type Msg interface {
 // MsgApplyBuilt reports that a NixOS system closure has been built and requests
 // installing it into the guest store and switching to it if running.
 type MsgApplyBuilt struct {
-	System     string
-	KernelHash string
+	System    domain.StorePath
+	KernelSig domain.KernelSig
 }
 
 func (MsgApplyBuilt) isMsg() {}
 
-// MsgSwitchSucceeded reports that the guest agent succeeded in switching to CandidateSystem.
+// MsgSwitchSucceeded reports that the guest agent succeeded in switching to Candidate.
 type MsgSwitchSucceeded struct {
-	KernelHash string
+	KernelSig domain.KernelSig
 }
 
 func (MsgSwitchSucceeded) isMsg() {}
 
-// MsgSwitchFailed reports that switching to CandidateSystem failed in the guest agent.
+// MsgSwitchFailed reports that switching to Candidate failed in the guest agent.
 type MsgSwitchFailed struct {
-	Reason string
+	Reason domain.Text
 }
 
 func (MsgSwitchFailed) isMsg() {}
 
-// MsgStart reports that the VM is being booted with InstalledSystem.
+// MsgStart reports that the VM is being booted with Installed.
 type MsgStart struct {
-	KernelHash string
+	KernelSig domain.KernelSig
 }
 
 func (MsgStart) isMsg() {}
@@ -201,8 +291,8 @@ func (MsgStop) isMsg() {}
 
 // MsgMountShare requests mounting a share (hot-plugging if running).
 type MsgMountShare struct {
-	Path     string
-	Tag      string
+	Path     domain.AbsPath
+	Tag      domain.ShareTag
 	ReadOnly bool
 }
 
@@ -210,7 +300,7 @@ func (MsgMountShare) isMsg() {}
 
 // MsgUnmountShare requests removing a share (hot-unplugging if runtime-mounted).
 type MsgUnmountShare struct {
-	Path string
+	Path domain.AbsPath
 }
 
 func (MsgUnmountShare) isMsg() {}
@@ -222,36 +312,36 @@ type Effect interface {
 
 // EffectAssignInstance instructs the runtime to allocate a new guest instance ID.
 type EffectAssignInstance struct {
-	Guest string
+	Guest domain.GuestName
 }
 
 func (EffectAssignInstance) isEffect() {}
 
 // EffectInstallStore instructs the runtime to copy System into the guest's Nix store.
 type EffectInstallStore struct {
-	System string
+	System domain.InstalledStorePath
 }
 
 func (EffectInstallStore) isEffect() {}
 
 // EffectAgentSwitch instructs the runtime to ask antic-agent to activate Toplevel.
 type EffectAgentSwitch struct {
-	Toplevel string
-	Rollback bool
+	Toplevel domain.StorePath
+	Mode     SwitchMode
 }
 
 func (EffectAgentSwitch) isEffect() {}
 
 // EffectWriteBoot instructs the runtime to persist boot.json for the running VM.
 type EffectWriteBoot struct {
-	System string
+	System domain.StorePath
 }
 
 func (EffectWriteBoot) isEffect() {}
 
 // EffectStartVM instructs the runtime to start the systemd units and boot the VM.
 type EffectStartVM struct {
-	System string
+	System domain.StorePath
 }
 
 func (EffectStartVM) isEffect() {}
@@ -264,8 +354,8 @@ func (EffectStopVM) isEffect() {}
 // EffectHotplugShare instructs the runtime to start virtiofsd, attach the device
 // to cloud-hypervisor, and mount it in the guest.
 type EffectHotplugShare struct {
-	Path     string
-	Tag      string
+	Path     domain.AbsPath
+	Tag      domain.ShareTag
 	ReadOnly bool
 }
 
@@ -274,15 +364,15 @@ func (EffectHotplugShare) isEffect() {}
 // EffectHotunplugShare instructs the runtime to unmount the share in the guest,
 // detach the device from cloud-hypervisor, and stop the virtiofsd unit.
 type EffectHotunplugShare struct {
-	Path string
-	Tag  string
+	Path domain.AbsPath
+	Tag  domain.ShareTag
 }
 
 func (EffectHotunplugShare) isEffect() {}
 
 // EffectLog emits an informational message to the user.
 type EffectLog struct {
-	Message string
+	Message domain.Text
 }
 
 func (EffectLog) isEffect() {}
@@ -290,158 +380,150 @@ func (EffectLog) isEffect() {}
 // Update is the pure, total, deterministic Sans-I/O & TEA transition function:
 // (Model, Msg) -> (Model, []Effect).
 func Update(m Model, msg Msg) (Model, []Effect) {
-	next := cloneModel(m)
+	next := m
+	next.Shares = m.Shares.Clone()
 	var effects []Effect
 
 	switch ev := msg.(type) {
 	case MsgApplyBuilt:
-		if ev.System == "" {
+		if !ev.System.Valid() {
 			return next, nil
 		}
-		if next.Phase == PhaseUncreated {
+		wasUncreated := next.Phase() == PhaseUncreated
+		if wasUncreated {
 			effects = append(effects, EffectAssignInstance{Guest: next.Name})
-			next.Phase = PhaseStopped
 		}
-		if next.InstalledSystem != ev.System {
-			effects = append(effects, EffectInstallStore{System: ev.System})
-			next.InstalledSystem = ev.System
+		instSys := types.NewIndexed[domain.StorePath, domain.InstalledState](ev.System)
+		if cur, ok := next.Installed.Get(); !ok || cur != instSys {
+			effects = append(effects, EffectInstallStore{System: instSys})
+			next.Installed = types.Some(instSys)
 		}
-		if next.Phase == PhaseRunning && next.BootSystem != ev.System {
-			next.Phase = PhaseSwitching
-			next.CandidateSystem = ev.System
-			effects = append(effects, EffectAgentSwitch{Toplevel: ev.System, Rollback: false})
+		switch next.Phase() {
+		case PhaseStopped:
+			effects = append(effects, EffectLog{
+				Message: domain.NewText(fmt.Sprintf("%s is ready; it boots on the next \"antic guest start %s\"", ev.System.Get(), next.Name.Get())),
+			})
+		case PhaseRunning:
+			bt := next.Boot.Value()
+			if bt.System != ev.System {
+				candSys := types.TransitionIndexed[domain.StorePath, domain.InstalledState, domain.CandidateState](instSys)
+				next.Candidate = types.Some(candSys)
+				effects = append(effects, EffectAgentSwitch{Toplevel: candSys.Get(), Mode: SwitchActivate})
+			}
 		}
 
 	case MsgSwitchSucceeded:
-		if next.Phase != PhaseSwitching {
+		if next.Phase() != PhaseSwitching {
 			return next, nil
 		}
-		cand := next.CandidateSystem
-		next.CandidateSystem = ""
-		next.Phase = PhaseRunning
-		if next.BootKernelHash == ev.KernelHash {
-			next.BootSystem = cand
+		cand := next.Candidate.Value().Get()
+		bt := next.Boot.Value()
+		next.Candidate = types.None[domain.CandidateStorePath]()
+		if bt.KernelSig == ev.KernelSig {
+			next.Boot = types.Some(BootedVM{System: cand, KernelSig: ev.KernelSig})
 			effects = append(effects, EffectWriteBoot{System: cand})
 		} else {
 			effects = append(effects, EffectLog{
-				Message: fmt.Sprintf("the kernel changed; restart the guest to boot it (antic guest restart %s)", next.Name),
+				Message: domain.NewText(fmt.Sprintf("the kernel changed; restart the guest to boot it (antic guest restart %s)", next.Name.Get())),
 			})
 		}
 
 	case MsgSwitchFailed:
-		if next.Phase != PhaseSwitching {
+		if next.Phase() != PhaseSwitching {
 			return next, nil
 		}
-		old := next.BootSystem
-		next.InstalledSystem = old
-		next.CandidateSystem = ""
-		next.Phase = PhaseRunning
-		effects = append(effects, EffectAgentSwitch{Toplevel: old, Rollback: true})
+		bt := next.Boot.Value()
+		next.Installed = types.Some(types.NewIndexed[domain.StorePath, domain.InstalledState](bt.System))
+		next.Candidate = types.None[domain.CandidateStorePath]()
+		effects = append(effects, EffectAgentSwitch{Toplevel: bt.System, Mode: SwitchRollback})
 
 	case MsgStart:
-		if next.Phase != PhaseStopped || next.InstalledSystem == "" {
+		if next.Phase() != PhaseStopped {
 			return next, nil
 		}
-		next.Phase = PhaseRunning
-		next.BootSystem = next.InstalledSystem
-		next.BootKernelHash = ev.KernelHash
-		for i := range next.Shares {
-			next.Shares[i].Mounted = true
-			next.Shares[i].Runtime = false
+		inst := next.Installed.Value().Get()
+		next.Boot = types.Some(BootedVM{System: inst, KernelSig: ev.KernelSig})
+		var updated []Share
+		for _, s := range next.Shares.All() {
+			s.Mount = MountBoot
+			updated = append(updated, s)
 		}
+		next.Shares = types.BuildSet[Share, domain.AbsPath, ShareByPath](updated)
 		effects = append(effects,
-			EffectStartVM{System: next.BootSystem},
-			EffectWriteBoot{System: next.BootSystem},
+			EffectStartVM{System: inst},
+			EffectWriteBoot{System: inst},
 		)
 
 	case MsgStop:
-		if next.Phase != PhaseRunning && next.Phase != PhaseSwitching {
+		if next.Phase() != PhaseRunning && next.Phase() != PhaseSwitching {
 			return next, nil
 		}
-		next.Phase = PhaseStopped
-		next.BootSystem = ""
-		next.CandidateSystem = ""
-		next.BootKernelHash = ""
-		var kept []Share
-		for _, s := range next.Shares {
-			s.Mounted = false
-			s.Runtime = false
-			kept = append(kept, s)
+		next.Boot = types.None[BootedVM]()
+		next.Candidate = types.None[domain.CandidateStorePath]()
+		var updated []Share
+		for _, s := range next.Shares.All() {
+			s.Mount = MountNone
+			updated = append(updated, s)
 		}
-		next.Shares = kept
+		next.Shares = types.BuildSet[Share, domain.AbsPath, ShareByPath](updated)
 		effects = append(effects, EffectStopVM{})
 
 	case MsgMountShare:
-		if ev.Path == "" || ev.Tag == "" {
+		if !ev.Path.Valid() || !ev.Tag.Valid() {
 			return next, nil
 		}
-		idx := findShare(next.Shares, ev.Path)
-		running := next.Phase == PhaseRunning || next.Phase == PhaseSwitching
-		if idx >= 0 {
-			next.Shares[idx].ReadOnly = ev.ReadOnly
-			if running && !next.Shares[idx].Mounted {
-				next.Shares[idx].Mounted = true
-				next.Shares[idx].Runtime = true
+		running := next.Phase() == PhaseRunning || next.Phase() == PhaseSwitching
+		if existing, ok := next.Shares.Lookup(ev.Path); ok {
+			if existing.Tag != ev.Tag {
+				return next, nil
+			}
+			existing.ReadOnly = ev.ReadOnly
+			if running && !existing.Mounted() {
+				existing.Mount = MountRuntime
 				effects = append(effects, EffectHotplugShare{Path: ev.Path, Tag: ev.Tag, ReadOnly: ev.ReadOnly})
 			}
+			next.Shares = next.Shares.Upsert(existing)
 			return next, effects
 		}
-		sh := Share{
+		for _, other := range next.Shares.All() {
+			if domain.PathsOverlap(ev.Path, other.Path) || other.Tag == ev.Tag {
+				return next, nil
+			}
+		}
+		mnt := MountNone
+		if running {
+			mnt = MountRuntime
+		}
+		next.Shares = next.Shares.Upsert(Share{
 			Path:     ev.Path,
 			Tag:      ev.Tag,
+			Mount:    mnt,
 			ReadOnly: ev.ReadOnly,
-			Mounted:  running,
-			Runtime:  running,
-		}
-		next.Shares = insertShareSorted(next.Shares, sh)
+		})
 		if running {
 			effects = append(effects, EffectHotplugShare{Path: ev.Path, Tag: ev.Tag, ReadOnly: ev.ReadOnly})
 		}
 
 	case MsgUnmountShare:
-		idx := findShare(next.Shares, ev.Path)
-		if idx < 0 {
+		if !ev.Path.Valid() {
 			return next, nil
 		}
-		sh := next.Shares[idx]
-		next.Shares = slices.Delete(next.Shares, idx, idx+1)
-		if (next.Phase == PhaseRunning || next.Phase == PhaseSwitching) && sh.Mounted && sh.Runtime {
-			effects = append(effects, EffectHotunplugShare{Path: sh.Path, Tag: sh.Tag})
+		sh, ok := next.Shares.Lookup(ev.Path)
+		if !ok {
+			return next, nil
+		}
+		next.Shares = next.Shares.Remove(ev.Path)
+		if next.Phase() == PhaseRunning || next.Phase() == PhaseSwitching {
+			switch sh.Mount {
+			case MountRuntime:
+				effects = append(effects, EffectHotunplugShare{Path: sh.Path, Tag: sh.Tag})
+			case MountBoot:
+				effects = append(effects, EffectLog{
+					Message: domain.NewText(fmt.Sprintf("removed %s from %s.toml; restart guest %s to unmount it", sh.Path.Get(), next.Name.Get(), next.Name.Get())),
+				})
+			}
 		}
 	}
 
 	return next, effects
-}
-
-func cloneModel(m Model) Model {
-	out := m
-	if len(m.Shares) > 0 {
-		out.Shares = slices.Clone(m.Shares)
-	}
-	return out
-}
-
-func findShare(shares []Share, path string) int {
-	for i, s := range shares {
-		if s.Path == path {
-			return i
-		}
-	}
-	return -1
-}
-
-func insertShareSorted(shares []Share, sh Share) []Share {
-	out := make([]Share, 0, len(shares)+1)
-	inserted := false
-	for _, s := range shares {
-		if !inserted && sh.Path < s.Path {
-			out = append(out, sh)
-			inserted = true
-		}
-		out = append(out, s)
-	}
-	if !inserted {
-		out = append(out, sh)
-	}
-	return out
 }
