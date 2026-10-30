@@ -189,16 +189,17 @@ func parseEntry(raw string) (netip.Prefix, string, error) {
 	return netip.Prefix{}, d, nil
 }
 
-var pkgRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.+-]*$`)
-
 // ValidName reports whether s can name a guest (delegates to SSOT domain.ParseGuestName).
 func ValidName(s string) bool {
 	_, err := domain.ParseGuestName(s)
 	return err == nil
 }
 
-// ValidPackage reports whether s is a valid nixpkgs attribute name.
-func ValidPackage(s string) bool { return pkgRE.MatchString(s) }
+// ValidPackage reports whether s is a valid nixpkgs attribute name (delegates to SSOT domain.ParsePackageName).
+func ValidPackage(s string) bool {
+	_, err := domain.ParsePackageName(s)
+	return err == nil
+}
 
 // Load reads and validates all *.toml guest files in dir. If dir does not
 // exist yet, an empty Config is returned without error.
@@ -366,7 +367,7 @@ func (g *Guest) normalize(home string, baseDir ...string) []error {
 		}
 	}
 	for _, p := range g.Packages {
-		if !pkgRE.MatchString(p) {
+		if !ValidPackage(p) {
 			errs = append(errs, fmt.Errorf("packages: invalid package attribute %q", p))
 		}
 	}

@@ -1,0 +1,469 @@
+# E2E トップレベル仕様とテストオラクル 設計（第 2 版ドラフト）
+
+背景調査: `reports/状態遷移仕様 E2Eテスト オラクル 文献調査.md`
+
+## 0. 方針
+
+- 仕様は**望ましい振る舞い**を書く。実装との差分は不具合として扱い、§9 に記録する。
+- テストは**実環境だけ**で行う。このホスト、普段のユーザー、実物の systemd --user / KVM / Nix / cloud-hypervisor を使い、モックは使わない。
+- 仕様は純粋な Go の状態遷移モデル `World` として書く。オラクルも仕様の一部とする。
+  - `Post`：コマンドを実行したときに許容される結果の集合
+  - α_obs：実機の観測を `World` に写す抽象化関数
+  - プローブ：各状態成分の観測関数
+
+### 対象コマンド（フェーズ 1）
+
+- `guest create / apply / install / uninstall / start / stop / restart / rm`
+- `guest set / forward / unforward`
+- `guest mount / unmount`
+- `guest edit`（ネットワークポリシー `mode` / `default` / `allow` / `deny` の変更に使う。§3.1）
+- `run`（プローブにも使う）
+
+### フェーズ 2 以降
+
+- `ps` / `kill`
+- flake ゲスト（カーネル変更を伴うもの）
+- 並行実行
+- 故障注入
+
+### 対象外
+
+`doctor`、`update`、`completion`、`skill`、`cache`、`logs`、`shell`
+
+## 1. 仕様全体を貫く原則
+
+**P1 失敗時の原子性（例外なし）**
+各コマンドは、対象要素（ゲストまたは引数）ごとに原子的である。成功すれば `Post` が定める状態になる。失敗すれば exit 125 で、その要素については `World` が変わらない。
+
+- 仕様に例外は設けない。ロールバックにも失敗して旧状態に戻せなかった場合、それは**仕様違反**であり、許容される結果ではない。テストは不合格になる。
+- この原則から、実装には **prepare → commit** の 2 相構造が要求される。決定的に失敗しうる検査を、すべて旧状態を壊す前に済ませる。対象は、設定の検証、ビルド、host port の空き、VM 設定の生成など。commit 後に起こりうる失敗は環境要因だけに限られるようにする。
+- 実装側で必要になる作業:
+  - 設定ファイルの書き戻し
+  - システムプロファイルのロールバック
+  - 起動していたゲストを旧設定で再起動すること
+
+**P2 複数引数**
+要素が互いに独立した複数引数コマンド（`start` / `stop` / `restart` / `rm` の NAME...、`mount` / `unmount` の DIR...）は、要素を先頭から順に処理し、最初の失敗で中断する。それより前の要素は成功したまま残り、それより後の要素は処理しない。
+
+`install` / `uninstall` の PKG... と `forward` / `unforward` の PORT... は、要素ごとには分けない。コマンド全体を 1 つの原子的な要素として扱う（ビルドも再起動も 1 回だけ行う）。
+
+**P3 嘘をつかない**
+exit 0 で返すのは、要求どおりの状態になったときだけである。要求と違う状態のまま成功を報告してはならない（D2 がこれに当たる）。
+
+**P4 冪等性**
+目標状態にすでにある場合は exit 0 で何もしない。対象は `start`（Running）、`stop`（Off または未作成）、同じ mode での `mount`、`install`（パッケージ導入済み）である。
+
+**P5 フレーム条件**
+コマンドは引数で指定したゲスト以外の状態を変えない。ユーザーの既存ゲストも、ここでいう「それ以外のゲスト」に含まれる。
+
+## 2. パッケージ構成
+
+| パッケージ | 純粋性 | 内容 | import 制約 |
+|---|---|---|---|
+| `internal/spec` | 純粋 | `World`、`Cmd`、`Post`、`Invariant` | `internal/types` と `internal/domain` のみ。`internal/tea/*` と `internal/host/*` は禁止（arch linter に登録し、トートロジーを防ぐ） |
+| `internal/spec/refine`（テストのみ） | 純粋 | α_model と、L1a の refinement 検査 | `spec` と `tea/operation`、`tea/egress` |
+| `internal/tea/operation`（新設、§11） | 純粋 | コマンド単位の saga コア（実装側の設計） | `spec` は import しない |
+| `e2e/`（build tag `e2e`） | I/O | ドライバ、α_obs、プローブ、rapid の状態機械 | `spec` のみ。antic は**ビルド済みバイナリ**として実行する |
+
+## 3. 状態 `World`
+
+```go
+type World struct {
+    Guests   map[Name]Guest   // キーが存在する ⇔ 設定 TOML が存在する
+    External map[Name]Opaque  // 実行開始時に存在した利用者のゲスト。不変（P5）
+}
+
+type Guest struct {
+    Config Config
+    Inst   Option[Inst]       // None ⇔ 未作成（STATE "-"）
+}
+
+// 永続化されている「望ましい状態」
+type Config struct {
+    Packages Set[Pkg]
+    Shares   Map[Path, Mode]  // Mode = RO | RW。Path は symlink 解決後の値
+    Res      Resources
+    Ports    Set[Port]        // Port = {Host, Guest uint16; Proto TCP|UDP|Both}
+}
+type Resources struct {
+    CPUs    int
+    Memory  Size
+    Net     NetPolicy        // §3.1
+}
+
+type Inst struct {
+    Installed Sys             // 次回起動で使われるシステム
+    Power     Power
+}
+type Off struct{}
+type Running struct {
+    Booted Sys                // いま動いているシステム
+    Res    Resources          // 起動時の設定値
+    Ports  Set[Port]          // 起動時の転送設定
+    Mounts Map[Path, Mount]
+}
+type Mount struct { Mode Mode; Origin Boot | Runtime }
+
+type Sys struct { Packages Set[Pkg] }  // ストアパスの同値類
+```
+
+### 3.1 ネットワークポリシー（案 B：直交化した意味論）
+
+現状は `allow` に「例外として穴を開ける」と「許可リスト方式に切り替える」の 2 つの意味が重なっている。案 B ではこれを分け、各設定の役割を次のように 1 つずつに限る。
+
+- `mode`：基本の到達集合を決める
+- `default`：既定で許可するか拒否するかを決める
+- `allow` / `deny`：例外を足す・引く
+
+```go
+type NetPolicy struct {
+    Mode    Internet | LAN | None
+    Default Open | Closed            // TOML: default = "allow" | "deny"
+    Allow   Set[Entry]               // 例外（追加）
+    Deny    Set[Entry]               // 例外（除外）
+}
+type Entry = CIDR | Domain | Wildcard   // "10.0.0.0/8" | "example.com" | "*.example.com"
+```
+
+#### 到達可能性 `Reach`
+
+`Reach` は、起動時のホストネットワーク `H`（ホストのアドレスと on-link サブネット）に対する相対的な述語である。
+
+```
+Never(d)        = d ∈ neverAllowed ∪ H.Addrs        -- loopback, link-local, multicast, ホスト自身…
+Private(d)      = d ∈ 私設レンジ ∪ H.OnLink          -- RFC1918, CGNAT, ULA, NAT64, on-link
+Base(m, d)      = m = LAN ∨ (m = Internet ∧ ¬Private(d))
+Learned(d)      = d は、Allow のドメインを、TTL 内に DNS フィルタ経由で解決して得た IP
+
+Reach(p, d) = p.Mode ≠ None
+            ∧ ¬Never(d)
+            ∧ d ∉ p.Deny.CIDRs
+            ∧ ( d ∈ p.Allow.CIDRs                                   -- 静的例外は Base より強い
+              ∨ ( Base(p.Mode, d)                                    -- DNS で得た IP は Base を越えない（rebinding 対策）
+                ∧ (p.Default = Open ∨ Learned(d)) ) )
+
+Resolve(p, n)   = n が p.Deny のドメインに一致する ⇒ 解決を拒否する
+                  p.Default = Closed ∧ n が p.Allow のドメインに一致しない ⇒ 解決を拒否する
+                  それ以外 ⇒ 上流の DNS に従う
+```
+
+#### 設計判断
+
+- **`lan` は糖衣構文として残す（暫定）。** `lan` は `internet` に `allow = [私設レンジ, on-link]` を足したものと等価である。ただし on-link は起動時に動的に決まり、静的な CIDR では書けない。そのため mode として残す方が素直である。
+- **`default = "allow"` のときの domain allow は設定エラーにする**（P3）。この組み合わせでは、IP 層での効果がない。public の宛先は最初から届き、private の宛先は rebinding 対策で開かないためである。効果のない設定が成功してしまうと、利用者に誤解を与える。
+- **移行規則**：`allow` が空でないのに `default` が省略されている設定は、設定エラーにする。現行の意味（許可リスト方式）と B の意味（Open に例外を足す）が食い違うためである。黙って B として解釈すると、**到達範囲が知らないうちに広がる**。セキュリティ上、それは許されない。エラーメッセージで `default = "deny"` の明記を促す。
+- **deny のドメインは DNS 層の性質である。** IP を直接指定した接続までは防げない。この限界は README の Caveats に書かれている CDN 共有 IP の問題と同じ種類であり、仕様にも明記する。
+
+`Invariant` への追加:
+
+7. `Running.Res.Net` は起動時の値を保持し、`Reach` は起動時の `H` を使って評価する。
+
+### 設計判断
+
+- **3 層に分ける。** `Config`（望ましい状態）、`Installed`（次回起動するもの）、`Running`（いま動いているもの）を分けて持つ。こうすると、未 apply、再起動待ち、unmount したが boot 時のマウントがまだ残っている、といった状態を区別できる。
+- **`Running.Res` と `Running.Ports` は起動時の値を持つ。** P1 から、Running 中の `set` や `forward` が成功した直後は `Running.Res == Config.Res` が成り立つ。それでも両者を分けて持つのは、プローブ（`nproc` など）の検査対象が `Running` 側だからである。
+- **`Switching` は持たない。** `apply` は原子的な遷移として扱う。
+
+### Invariant(World)
+
+1. `Config.Shares` のパス同士は重ならない。`Running.Mounts` のパス同士も重ならない。
+2. Runtime マウントは、必ず `Config.Shares` に同じ mode で載っている。
+3. 全ゲストの `Config.Ports` の間で、同じ host port と同じ proto の組が重複しない（ゲストをまたいで検査する。D7）。
+4. `Running.Ports == Config.Ports` かつ `Running.Res == Config.Res`。これは P1 と、`set` / `forward` が即時に再起動することから導かれる。
+5. `External` は実行開始時の値から変わらない。
+6. RW でマウントされた共有の中でも、ホスト側に既に存在する保護パス（`.git`、`CLAUDE.md` など。README が列挙しているもの）は、ゲストから書き込めない。
+
+## 4. コマンドと Post
+
+```go
+type Outcome struct { World World; Exit ExitClass }  // ExitClass = Ok | Fail | Cmd(n)
+func Post(w World, c Cmd) []Outcome
+```
+
+P1 により、失敗時の結果は常に「`World` 不変かつ `Fail`」である。そのため `Post` は、ほとんどのコマンドで高々 2 要素の集合になる。
+
+- 事前条件が偽：`{(w, Fail)}`
+- 事前条件が真：`{(w', Ok)}`。環境要因の失敗もありうるので、`(w, Fail)` も許容する
+
+ただし、故障を注入していない実行で `(w, Fail)` になった場合は**要調査**として記録する。`Ok` の側を通った割合を網羅の指標として扱う。
+
+表記: `g = w.Guests[n]`、`cls(C) = Sys{C.Packages}`、`boot(C) = Running{cls(C), C.Res, C.Ports, C.Shares をすべて Boot で}`
+
+| コマンド | Reject 条件 | 成功時の World' |
+|---|---|---|
+| `create n [-p P] [--cpus/--memory/--network/--port]` | 名前が不正 / `g.Inst` が Some / **設定は既にあるのにフラグを指定した**（D3） | 設定がなければ既定値と P で作る（P が空なら `{git}`）。続けて `Inst{cls, boot(Config)}` |
+| `apply n` | 未定義 | `Installed := cls(Config)`（未作成なら Off で作成する）。Running のときは `Booted := cls(Config)` |
+| `install n P…` / `uninstall n P…` | 未定義 / flake ゲスト / パッケージ名が不正 | `Config.Packages ∪= P`（`uninstall` は `−= P`）。続けて `apply` と同じ遷移 |
+| `set n flags` | 未定義 / フラグがない / 値が不正（cpus < 1、memory の書式、未知の network mode） | `Config.Res` を更新する。Running なら `boot(Config)` で再起動する（Runtime マウントは Boot に変わる） |
+| `edit n`（`EDITOR` に、決めておいた内容を書き込むスクリプトを渡す） | 未定義 / 編集後の設定が不正（§3.1 の検証を含む） | 設定を新しい内容に置き換える。Running なら、`set` と同じく `boot(Config)` で再起動する。パッケージが変わった場合は `apply` も行う（D9） |
+| `forward n PORT… [-p proto]` | 未定義 / 書式が不正 / 同じゲストまたは**他のゲスト**と host port と proto が衝突する | `Config.Ports ∪= {p}`。Running なら `boot(Config)` で再起動する |
+| `unforward n PORT…` | 未定義 / 設定されていない | `Config.Ports −= {p}`。Running なら再起動する |
+| `start n…` | 未定義 / 未作成 | Off なら `boot(Config)`。Running なら何もしない |
+| `stop n…` | 未定義 | Running なら Off。Off や未作成なら何もしない |
+| `restart n…` | 未定義 / 未作成 | `boot(Config)` |
+| `rm -y n…` | 未定義 / 端末がなく `-y` もない | `delete(Guests, n)` |
+| `mount n [--ro] d…` | 未定義 / ポリシー違反（ディレクトリでない、`$HOME` の外、`$HOME` そのもの、deny 対象と重なる）/ 他の共有と重なる / **同じパスに別の mode で設定済み**（D2） | 既に同じ mode なら何もしない。新規なら `Config.Shares[d] = m`。Running なら `Mounts[d] = {m, Runtime}` |
+| `unmount n d…` | 未定義 / 設定されていない | `delete(Config.Shares, d)`。Running のとき、Runtime マウントなら `delete(Mounts, d)`。Boot マウントなら Mounts は残す（再起動まで有効） |
+| `run n -- cmd` | 未定義 / 未作成 | Off なら先に `boot(Config)`。`Exit = Cmd(cmd の終了コード)` |
+
+### 再起動を伴うコマンドの失敗
+
+対象は `set`、`forward`、`unforward`、Running 中の `apply` である。新しい設定での再起動に失敗した場合は、P1 に従い、旧設定と旧システムで再起動し直して `(w, Fail)` にする。旧状態に戻せなかった場合に許容される結果はなく、不合格になる。
+
+## 5. 観測と α_obs
+
+### 構造の観測（CLI の出力）
+
+| 観測 | 対象 | 写像 |
+|---|---|---|
+| `antic guest ls --json` | 全ゲスト | `state` の `"-"` / `"stopped"` / `"running"` を、それぞれ未作成 / Off / Running に写す。`"error"` は不合格とする。`External` は、名前と state が変わっていないことだけを見る |
+| `antic guest show n --json` | 管理しているゲスト | `packages` / `cpus` / `memory` / `network` / `ports` は `Config` に写す。`system` は、Off なら `Installed`、Running なら `Booted` に写す（対応表で同値類に戻す）。`shares[]` は `Config.Shares ∪ Mounts` に、`mounted` は `Mounts` に写す |
+| ホスト側の systemd 状態 | 常時 | `systemctl --user list-units --all --output=json 'antic-*'` で、Off / 未作成 / rm 済みのゲストのユニットが残っていないことを確かめる |
+
+### ゲスト内プローブ（意味の観測）
+
+#### ツール選定の方針
+
+1. **ベースシステムのツールだけを使う。** 実機で確認したところ、標準のゲスト（`builtin [git]`）には NixOS の requiredPackages が入っている。具体的には bash、coreutils、util-linux、iproute2、curl、libressl の `nc`、`getent`、`timeout` である。プローブのためにパッケージを足すと `Packages` のオラクルが汚れるので、追加はしない（`socat` も不要）。
+2. **可能な限り、カーネルのインタフェース（`/proc`、`/sys`）を直接読む。** 読んだ内容は、ホスト側の Go コードで解析する。ツールの出力形式やバージョンに依存しないようにするためである。
+3. **ホスト側は Go の標準ライブラリだけを使う**（`net.Dial`、`net.Listen`）。外部コマンドは使わない。
+4. **前提検査**：系列を始める前に、使うツールがあるかを `command -v` で確かめる。ない場合は不合格にする（暗黙のオラクル）。nixpkgs の更新で requiredPackages が変わったときに、それを検出するためである。
+
+#### プローブ一覧
+
+| 成分 | プローブ | 使うもの | 選んだ理由 |
+|---|---|---|---|
+| `p ∈ Booted.Packages` | `command -v <bin>` | bash の組み込みコマンド | 追加のツールが要らない。パッケージ名から実行ファイル名への対応表（`jq` → `jq`）を fixture に持つ |
+| `Res.CPUs` | `cat /sys/devices/system/cpu/online` を Go で範囲解析する | `/sys` | `nproc` は affinity や cgroup の影響を受け、VM に割り当てた vCPU の数と一致しない場合がある |
+| `Res.Memory` | `cat /proc/meminfo` の `MemTotal` | `/proc` | 許容範囲は `[0.85·M, M]`。カーネルの予約分を差し引くため |
+| `Mounts`（存在、mode、種別） | `cat /proc/self/mountinfo` を Go で解析する | `/proc` | `findmnt` の表示形式に依存しない。マウント位置、`ro`/`rw`、fstype `virtiofs`、タグを一度に取れる |
+| RW であることの確認 | 一意な名前のファイルを `touch` して `rm` する | coreutils | 実際に書き込めるかを見る。RO の共有では `EROFS` で失敗することを確かめる |
+| 保護パスが読み取り専用であること | RW 共有の fixture に `.git/` と `CLAUDE.md` を置いておき、`touch .git/x` と `sh -c ': >> CLAUDE.md'` が失敗することを確かめる | coreutils と sh | README が保証している性質。Invariant に追加する |
+| NIC の有無 | `ls /sys/class/net` | `/sys` | `None` なら `lo` だけになる |
+| egress（TCP） | `nc -z -w 3 <ip> <port>` | libressl の nc | ベースシステムにある。`-z` / `-w` は OpenBSD 系 nc の標準オプションで、接続できたかどうかが終了コードで分かる。curl は HTTP 層まで巻き込むので使わない |
+| ホストの loopback に到達できないこと | ホスト側で Go が `127.0.0.1:R` を listen し、ゲストから既定ゲートウェイの `:R` に `nc -z` する。全モードで失敗することを確かめる | nc と Go | passt が loopback をゲートウェイのアドレスに写すかどうかによらず、ホスト側の待ち受けで確実に判定できる |
+| port forward（TCP） | ゲストで `timeout 15 nc -l -N <guest port>` に token を流し込んでおき、ホストの Go が `127.0.0.1:H` から token を読む | nc と Go | 双方向の到達性を token で確認できる。listener の準備ができるまで、ホスト側で再試行する |
+| port forward（UDP） | ゲストで `timeout 15 nc -u -l <guest port>` を動かし、ホストの Go が token を送る。`run` の stdout に token が出ることを確かめる | nc と Go | UDP は応答を前提にできないので、受信側の出力で判定する |
+| forward していないポート | ゲストで listen したまま、ホストから `127.0.0.1:X` に接続して届かないことを確かめる | nc と Go | 反例側の観測 |
+
+### ネットワークのオラクル（`Reach` の同値類ごと）
+
+宛先は、`Reach` の各項が区別する同値類ごとに、代表を 1 つずつ用意する。プローブは「代表 `d` への `nc -z` の成否 == `Reach(Running.Res.Net, d)`」を判定する。
+
+| 同値類 | 代表 | 用意の仕方 |
+|---|---|---|
+| Never（ホストの loopback） | ゲストの既定ゲートウェイの `:R` | ホストの Go が `127.0.0.1:R` で listen する |
+| Never（ホスト自身） | ホストの LAN アドレスの `:R2` | ホストの Go が listen する |
+| Private（LAN） | 既定ゲートウェイ（ルーター）の開いているポート | 開始時に、ホストから TCP 53/80/443 を試して自動検出する。見つからなければ「未検査」と報告する |
+| public | `1.1.1.1:443` | 固定 |
+| Allow の CIDR で例外にしたもの | 上の LAN 代表と public 代表の `/32` | 設定に書く |
+| Deny の CIDR で除外したもの | public 代表の `/32` | 設定に書く |
+| Allow / Deny のドメイン | `one.one.one.one`（1.1.1.1 に解決される） | `getent hosts` で解決し、その場で `nc -z` を打つ（Learned の窓の中で検査するため） |
+
+生成する設定の組み合わせは `Mode × Default × (Allow ⊆ 代表集合) × (Deny ⊆ 代表集合)` から選ぶ。設定は `guest edit` で入れる。`EDITOR` には、内容を書き込むスクリプトを渡す。これは利用者が実際に使う経路そのものである。
+
+### 部分観測
+
+- α_obs は部分関数とする。
+- Running 中の `Installed` は直接観測できない。Off になったときに遅延検査する。
+- Off のゲストには `run` プローブを打たない（打つと start の副作用が起きる）。
+- プローブが共有に作ったファイルは、その場で消す。消えたことはホスト側から確かめる。
+
+## 6. 1 ステップの検査手順
+
+```
+1. outcomes := spec.Post(model, cmd)
+2. 実機で cmd を実行し、exit を得る。タイムアウト T を超えたら不合格
+3. O0: panic していないこと、JSON がパースできること
+4. O1: exit が outcomes のどれかの Exit と一致すること
+5. O2: α_obs(ls, show) に一致する o が outcomes の中にあること
+6. O3: o.World で変化した成分をプローブで確かめる（遅延検査の分も含む）
+7. Invariant(o.World) とホスト側の確認
+8. model := o.World
+```
+
+## 7. 生成と網羅
+
+- 生成には rapid の状態機械を使う。約 20% は Reject 条件を満たす入力を意図的に生成する。
+- 宇宙は小さく固定する。
+  - ゲスト名：`e2e-a`、`e2e-b`
+  - パッケージ集合：`{git}` と `{git, jq}`
+  - ディレクトリ：`$HOME/e2e-work/` の下に、`A`（`.git/` と `CLAUDE.md` を置く）、`B`、`A/sub`、`B` を指す symlink を用意する。deny の対象として `~/.ssh` も使う
+  - ポート：ほかと衝突しにくい高位番号を 2 つ
+- 網羅の目安として、`(Phase × Cmd)` の遷移ペアを記録する。
+- 失敗した系列は rapid で縮小し、txtar（testscript）形式で回帰テストとして固定する。
+- **L1**：`spec` の性質テストと、§8 の refinement 検査。KVM なしで動く。
+- **L2**：実機で動かす。1 系列の長さは 10〜20 とする。
+
+## 8. 実装モデルとの関係（L1a）
+
+§11 のコマンド単位コア `tea/operation` を作った後は、α_model の定義域は `operation.Model` になる。`operation.Model` は `Config` と lifecycle を内包するので、`World` 全体に写せる。以下は、`lifecycle` 部分の射影である。
+
+α_model は `lifecycle.Model` を `Inst` に射影する。`Installed` は `Installed` に、`Boot` は Running / Off に写す（`Candidate` は無視する）。`Shares[].Mount` は `Mounts` に写す。
+
+この射影のもとで、次を検査する。
+
+`α_model(next) == α_model(prev) ∨ α_model(next) ∈ Post(α_model(prev), cmd)`
+
+## 9. 望ましい仕様と現状の差分（実装側の課題）
+
+| # | 現状 | 望ましい仕様 | 根拠 |
+|---|---|---|---|
+| D1 | switch に失敗してロールバックした後も、システムプロファイルは新しい構成のまま残る | P1：`Installed` も元に戻す | `ops.go:204`、`nixbuild.go:121` |
+| D2 | 既存の rw 共有に `mount --ro` しても何も変わらず、exit 0 で「shared … (ro)」と表示する | Reject する（P3） | `edit.go:118` |
+| D3 | 設定が既にある状態で `create` にフラグを渡すと、フラグを黙って無視する | Reject する（P3） | `ops.go` の `Manager.Create` |
+| D4 | lifecycle の Model から、boot 時にマウントした共有が消える | lifecycle 側で `Config` と `Mounts` を分ける | `MsgUnmountShare` |
+| D5 | `install`、`set`、`forward` が失敗しても、設定ファイルの変更は残る | P1：設定ファイルを書き戻す。再起動に失敗したら、旧設定で再起動し直す（例外なし）。2 相（prepare → commit）の構造に改める | `pkg.go`、`port.go`、`guestcmd.go` の `set` |
+| D6 | 未作成ゲストへの `stop` は成功する | 望ましい仕様と同じ（P4） | — |
+| D7 | 他のゲストと host port が衝突しても、`forward` の時点では検出しない | Reject する（Invariant 3） | `edit.go` の `AddPort`。`start` の時点で検出しているかは要確認 |
+| D8 | `start` / `stop` / `restart` は全ゲストを処理してからエラーを返し、`mount` / `rm` は最初の失敗で中断する | P2：すべて最初の失敗で中断する | `guestcmd.go` の `eachGuest` |
+| D9 | `guest edit` は、Running 中でも再起動しない。新しい設定は次回の start まで反映されず、`Config` と `Running` が食い違ったままになる | `set` と同じく、即時に反映する（Invariant 4 を守る） | `misc.go:19` |
+| D10 | `guest edit` で不正な設定を保存すると、ファイルは不正なまま残り、exit 125 になる | P1：元の内容に書き戻す | `misc.go:19` |
+| D12 | `EDITOR` に引数付きの値（例: `omarchy-launch-editor --inline`）が入っていると、値全体を 1 つの実行ファイル名として扱い、起動に失敗する | git などと同じ慣習に合わせ、`sh -c '$EDITOR "$@"' sh <path>` の形で起動する（`VISUAL` も考慮する） | `misc.go:38` の `exec.Command(editor, g.Path)` |
+| D11 | `allow` が 1 件でもあると、許可リスト方式になる（2 つの意味が重なっている） | 案 B：`default` を明示させる。省略して `allow` を書いた設定は、移行エラーにする | `network.go` の `nftRules` |
+
+## 10. 実行基盤
+
+- このホストで、普段のユーザーのまま、実際の antic バイナリを実行する。
+- テストで作るゲストは `e2e-` で始まる名前に限る。既存のゲストは `External` として不変であることを検査する。
+- テスト用ディレクトリは `$HOME/e2e-work/` に置き、`antic.toml` のないディレクトリから実行する。
+- `stop --all` は系列生成から外す。
+- テストの開始時と終了時に、`e2e-*` で始まるゲストを掃除する。
+- egress のプローブで使う LAN の代表は、既定ゲートウェイを自動で検出して決める（§5）。見つからない場合や、テスト中にホストのネットワークが変わった場合（`H` の変化として検出する）は「未検査」と報告し、合格扱いにはしない。
+
+## 11. 実装側のアーキテクチャ：コマンド単位の Sans-I/O コア
+
+### 11.1 現状と問題
+
+| 部分 | 純粋なコアの使われ方 |
+|---|---|
+| `tea/control`（ゲストエージェント） | Model を保持し、すべての判断を effect として実行している（十分） |
+| `tea/egress`（DNS プロキシ） | 同上（十分） |
+| `tea/lifecycle`（ホストでのゲスト操作） | `apply` / `mount` / `unmount` の一部でしか使っていない。`MsgStart` / `MsgStop` は未使用。`create` / `rm` / `set` / `forward` / `edit` と設定の書き込みはモデル化されていない。`Update` が返した Model は捨てられ、毎回ディスクから組み立て直している。重なりの検査やロールバックの判断は殻（シェル）側に残っている |
+| `nftRules` | 純粋な関数だが `host/guest` に置かれており、仕様と照合されていない |
+
+D1〜D12 のほとんどは、判断が殻側に漏れていることから生じている。
+
+### 11.2 方針
+
+ホスト側の 1 コマンドを、純粋なコア上の **saga（補償つきトランザクション）** として表す。殻は effect を実行して結果を返すだけの**汎用インタプリタ**にする。
+
+```
+internal/tea/operation   （仮称。arch linter には rank 0 の純粋層として登録する）
+
+Model = {
+    Snap    : 観測した現状。Config、lifecycle.Model、ホストの網 H、ホストのポート使用状況
+    Plan    : 実行中のコマンドの計画
+    Stage   : Prepare | Commit | Compensate | Finalize | Done(Ok|Fail)
+    Undo    : commit 済みステップの逆操作のスタック
+}
+
+Msg    = MsgCommand{Cmd}                   -- CLI から
+       | MsgResult{Step, Ok(data) | Err}   -- effect の結果（ビルドしたシステム、割り当てた ID など）
+
+Effect = Prepare 系   : Resolve(path) / Build(cfg) / CheckPorts / RenderVMConfig / RunEditor(tmp) / Validate
+       | Commit 系    : WriteConfig / SetProfile / AssignInstance / StopVM / StartVM / Hotplug /
+                        AgentSwitch / AgentMount / WriteBoot ...
+       | Finalize 系  : GC / DeleteTrash  （取り消せない操作は、ここに限る）
+       | Report       : Log / Exit(code)
+```
+
+#### 規則
+
+1. **Prepare**：決定的に失敗しうる検査とビルドを、すべてここで済ませる。この段階では、観測できる状態を一切変えない（P1 の prepare → commit）。
+2. **Commit**：各ステップは、成功したら逆操作を `Undo` に積む。ステップ k で失敗したら Compensate に移り、`Undo` を逆順に実行する。
+3. **Compensate**：補償に失敗した場合の扱いは**定義しない**。`Stage = Broken` は到達不能でなければならない（P1 に例外を設けないため）。補償は冪等で再試行可能にし、Commit の順序は取り消しにくい操作ほど後ろに置く。この性質は L1a で検査する。
+4. **Finalize**：取り消せない操作（GC、古い世代の削除、ゴミ箱の削除）は、全ステップの commit が成功した後にだけ行う。ここでの失敗は World に影響しないので、ログを出すだけにする。
+5. **P2**：複数引数のコマンドは、要素ごとに独立した saga を順に流し、最初の Fail で止める。
+6. **殻の制約**：`host/guest` は effect の型で分岐して実行するだけにし、Model を見て判断してはならない。arch linter では「`host/guest` は `tea/operation` の Model のフィールドを参照しない」という検査を入れる。
+
+### 11.3 コマンドごとの計画（例）
+
+| コマンド | Prepare | Commit（逆操作） | Finalize | 解消する差分 |
+|---|---|---|---|---|
+| `apply`（Running） | `Build(cfg)` → sys | `SetProfile(sys)`（`SetProfile(old)`）→ `AgentSwitch(sys)`（`AgentSwitch(old)`）→ `WriteBoot(sys)`（`WriteBoot(old)`） | GC | D1 |
+| `install` / `uninstall` | 新しい設定を**メモリ上で**作り、`Validate` と `Build` を済ませる | `WriteConfig(new)`（`WriteConfig(old)`）→ 以降は `apply` と同じ | GC | D5 |
+| `set` / `forward` / `unforward`（Running） | `Validate`、`CheckPorts`（他ゲストとの衝突も見る）、`RenderVMConfig(new)` | `WriteConfig(new)`（`WriteConfig(old)`）→ `StopVM`（`StartVM(old)` のあと Runtime マウントを `Hotplug` で**付け直す**）→ `StartVM(new)`（`StopVM`） | — | D5、D7 |
+| `edit` | `RunEditor(一時コピー)` → `Validate`（§3.1 の移行規則も含む）→ 差分から計画を作る（`set` や `apply` の合成） | 差分に応じて `set` と `apply` の commit 列を並べる | GC | D9、D10、D12（エディタは `sh -c` で起動する） |
+| `mount` | `Resolve`、ポリシーと重なりの検査、mode の一致検査 | `WriteConfig`（戻す）→ Running なら `StartVirtiofsd`（停止）→ `AddDevice`（`RemoveDevice`）→ `AgentMount`（`AgentUnmount`）→ `WriteBoot`（戻す） | — | D2 |
+| `create` | 名前と設定の検査（既に設定があるのにフラグを渡したら Reject）、`Build` | `WriteConfig`（削除）→ `AssignInstance`（ディレクトリを削除）→ `SetProfile` → `StartVM`（`StopVM`） | — | D3 |
+| `rm` | — | `StopVM`（`StartVM`）→ 設定とインスタンスディレクトリを**ゴミ箱へ rename**（rename で戻す） | ゴミ箱を削除 | （P1 を rm にも適用） |
+
+`set` の逆操作を「旧設定での再起動」だけで済ませると、Runtime マウントが Boot マウントに変わってしまう。これは `Mount.Origin` という観測できる違いになるので、補償では付け直しまで行う。こうした点は、コアを書くことで曖昧さなく決まる。
+
+### 11.4 egress のルール
+
+`nftRules` を、`tea/egress` 内の**ルール中間表現**（順序付きの `match → verdict` 列）の生成と、`host` 側の nft テキストへの単純な印字とに分ける。
+
+- 中間表現は純粋に評価できる。そのため L1b で、代表宛先の全同値類について `Eval(IR, d) == spec.Reach(p, d)` を検査できる。
+- 印字が正しいかどうかは、L2 の実機プローブで確かめる。
+
+### 11.5 検証の層（改訂）
+
+| 層 | 対象 | 方法 | KVM |
+|---|---|---|---|
+| L0 | `spec` 単体 | `Invariant` が保存されること、`Post` が空にならないこと | 不要 |
+| L1a | `tea/operation` と `spec` | rapid でコマンド列を生成する。各 effect の結果を ok と err で**網羅的に故障注入**し、最終的な α_model(Model) が `Post` に含まれること（P1）と、`Broken` に到達しないことを検査する | 不要 |
+| L1b | egress の中間表現と `spec.Reach` | 同値類ごとに評価して照合する | 不要 |
+| L1c | `tea/lifecycle` と `tea/control` の既存の性質 | 既存のテスト | 不要 |
+| L2 | 実機の E2E | §5〜§7 | 要 |
+
+`spec` は `tea` を import しない。コアと仕様は独立に書き、L1a で突き合わせる（トートロジーを避けるため）。
+
+### 11.6 フェーズ 2 で扱うこと：クラッシュ時の一貫性
+
+antic が commit の途中で kill された場合に備え、`Undo` を各 commit ステップの前にジャーナルとして永続化する（`EffectPersistJournal`）。次にロックを取ったとき、ジャーナルをコアに渡して補償を再開する。この再開は L1a で、「任意のステップで中断してから再開しても、`Post` に含まれる状態になる」ことを検査する。
+
+## 12. 段階計画（改訂）
+
+1. **仕様**：`internal/spec`（`World`、`Post`、`Reach`、`Invariant`）と L0。arch linter に登録し、`tea` と `host` の import を禁止する。
+2. **E2E の最小版**：`e2e/` のドライバ、α_obs、O0〜O2 を作り、**現状の実装に対して流す**。D1〜D12 を既知の失敗として記録し、書き換え前の安全網と、後退の検出に使う。
+3. **コマンド単位のコア**：`internal/tea/operation` の Model、Msg、Effect と saga を作り、§11.3 の計画を実装する。L1a で故障注入つきの検査をする（殻にはまだ手を入れない）。
+4. **egress**：ルール中間表現への分離と L1b。
+5. **殻の書き換え**：`host/guest` を effect インタプリタにし、CLI の全コマンドをコア経由にする。lifecycle は D4 を直したうえでコアに組み込む。手順 2 の既知の失敗が、すべて通るようになることを確かめる。
+6. **E2E の完成**：O3 のプローブ（ネットワークを含む）、rapid による系列生成と縮小、txtar での回帰固定。
+7. **フェーズ 2**：クラッシュ時の一貫性（§11.6）、`ps` / `kill`、flake とカーネル変更、並行実行。
+
+## 13. 実装状況
+
+### 段階 1：`internal/spec`（完了）
+
+| ファイル | 内容 |
+|---|---|
+| `world.go` | `World`、`Guest`、`Config`、`NetPolicy` とそれぞれの正準集合（`SortedSet`） |
+| `config.go` | `Env`（ホストの事実）と `RawConfig`、設定の検証（案 B の移行規則を含む） |
+| `reach.go` | `Reach`、`Resolvable`（§3.1） |
+| `cmd.go` | フェーズ 1 の 15 コマンド。引数は CLI に渡す生の値のまま持つ |
+| `post.go` | `Post(World, Env, Cmd) []Outcome`。P2 の畳み込みは `fold` で書いた |
+| `invariant.go` | `Invariant(World)` |
+| `spec_test.go` | L0 の検査（下記） |
+
+#### L0 の検査
+
+- 幅優先探索を深さ 4 まで行い、1,875 状態・20,033 遷移について次を確かめる。
+  - `Post` が空でない
+  - 遷移後の World が `Invariant` を満たす
+  - P1（単一要素のコマンドが失敗したら World は不変）
+  - P5（外部ゲストと、名指ししていないゲストは変わらない）
+  - Reject が最終の結果であること、失敗時の exit が 125 であること
+- D2、D3、D6、D7、D9、D10、D11、P2、`run` の exit 伝播について、シナリオテストを置いた。
+- `Reach` と `Resolvable` を真理値表で確かめる。
+- ミュータント 3 種（停止時にマウントを残す、rm で外部ゲストを消す、Reject で状態を進める）が、いずれも検出されることを確認した。
+
+#### arch linter
+
+- `internal/spec` を純粋層（rank 0）として登録した。`checkPureFiles` の対象にも加えた。
+- `spec` から `tea` への import を禁止した。
+- テスト以外のパッケージが `spec` を import することも禁止した。
+
+#### domain
+
+- `PackageName`、`PortNumber`、`CPUCount`、`MemorySize` を追加した。
+- `config.ValidPackage` は `domain.ParsePackageName` に委譲するよう改めた（SSOT）。
+
+#### 設計からの変更点
+
+- **`Installed`、`Booted`、`Running.Res`、`Running.Ports` を `World` から外した。** 望ましい意味論（P1 と即時反映）のもとでは、作成済みのゲストのこれらの値は常に `Config` と一致するためである。`Config` と食い違いうる実行時の状態は、`Mounts`（boot 時のマウントが残留するもの）だけである。カーネルを変える apply で再起動待ちの状態が生じるフェーズ 2 で、改めて分離する。
+- **`PhaseUncreated` には、コマンドだけでは到達できない。** 設定ファイルが手書きで置かれた、という初期状態からしか生じないためである。E2E では、事前準備（フィクスチャ）として TOML を直接置くことで、この状態を作る。
+- **`edit` の扱い**：実行中のゲストでマウント中の共有の mode を変える場合と、残留しているマウントと重なる場合は、再起動の経路に回す。CLI の `mount` で mode を変えようとした場合は、Reject のままにする（D2）。
+- **外部ゲストを名指しするコマンドは、モデルの外とする。** 名前を省略した結果、外部ゲストが選ばれる場合も含む。`Post` は `nil` を返し、生成器はこうしたコマンドを出さない。

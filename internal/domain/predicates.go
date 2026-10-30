@@ -377,6 +377,97 @@ func TimeoutFromTTL(ttl uint32) BoundedTimeout {
 	return b
 }
 
+// PackageNamePred refines string to nixpkgs attribute names: ^[A-Za-z0-9_][A-Za-z0-9_.+-]*$.
+type PackageNamePred struct{}
+
+// Check validates a nixpkgs attribute name.
+func (PackageNamePred) Check(s string) error {
+	if s == "" {
+		return errors.New("empty package attribute")
+	}
+	for i, c := range s {
+		word := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+		if !word && (i == 0 || (c != '.' && c != '+' && c != '-')) {
+			return fmt.Errorf("invalid package attribute %q", s)
+		}
+	}
+	return nil
+}
+
+// PackageName is the refinement type { s : string | PackageNamePred(s) }.
+type PackageName = types.Refined[string, PackageNamePred]
+
+// ParsePackageName validates and constructs a PackageName.
+func ParsePackageName(s string) (PackageName, error) {
+	return types.Parse[string, PackageNamePred](s)
+}
+
+// PackageNameOrder orders PackageName values lexicographically for SortedSet.
+type PackageNameOrder struct{}
+
+// Key returns the PackageName itself as its unique key.
+func (PackageNameOrder) Key(p PackageName) PackageName { return p }
+
+// Less orders two PackageNames lexicographically.
+func (PackageNameOrder) Less(a, b PackageName) bool { return a.Get() < b.Get() }
+
+// PortNumberPred refines int to TCP/UDP port numbers: 1 <= n <= 65535.
+type PortNumberPred struct{}
+
+// Check validates a port number.
+func (PortNumberPred) Check(n int) error {
+	if n < 1 || n > 65535 {
+		return fmt.Errorf("port %d out of range 1..65535", n)
+	}
+	return nil
+}
+
+// PortNumber is the refinement type { n : int | 1 <= n <= 65535 }.
+type PortNumber = types.Refined[int, PortNumberPred]
+
+// ParsePortNumber validates and constructs a PortNumber.
+func ParsePortNumber(n int) (PortNumber, error) {
+	return types.Parse[int, PortNumberPred](n)
+}
+
+// CPUCountPred refines int to guest vCPU counts: 1 <= n <= 256.
+type CPUCountPred struct{}
+
+// Check validates a vCPU count.
+func (CPUCountPred) Check(n int) error {
+	if n < 1 || n > 256 {
+		return errors.New("cpus must be between 1 and 256")
+	}
+	return nil
+}
+
+// CPUCount is the refinement type { n : int | 1 <= n <= 256 }.
+type CPUCount = types.Refined[int, CPUCountPred]
+
+// ParseCPUCount validates and constructs a CPUCount.
+func ParseCPUCount(n int) (CPUCount, error) {
+	return types.Parse[int, CPUCountPred](n)
+}
+
+// MemorySizePred refines int64 to guest memory sizes in bytes: at least 256 MiB.
+type MemorySizePred struct{}
+
+// Check validates a guest memory size.
+func (MemorySizePred) Check(n int64) error {
+	if n < 256<<20 {
+		return errors.New("memory must be at least 256M")
+	}
+	return nil
+}
+
+// MemorySize is the refinement type { n : int64 | n >= 256 MiB }.
+type MemorySize = types.Refined[int64, MemorySizePred]
+
+// ParseMemorySize validates and constructs a MemorySize.
+func ParseMemorySize(n int64) (MemorySize, error) {
+	return types.Parse[int64, MemorySizePred](n)
+}
+
 func isUnitChar(c rune, allowAtAndSlash bool) bool {
 	if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
 		return true

@@ -45,6 +45,7 @@ var allowedPureStdlib = map[string]bool{
 //	Rank -2 (pure types):  internal/types
 //	Rank -1 (pure domain): internal/proto, internal/domain
 //	Rank 0  (pure TEA):    internal/tea/*
+//	Rank 0  (pure spec):   internal/spec (top-level specification; test oracle only)
 //	Rank 1  (host domain): internal/host/config, internal/host/share
 //	Rank 2  (host infra):  internal/host/chv, internal/host/systemd, internal/host/transport,
 //	                       internal/host/egress, internal/host/instance, internal/host/nixbuild
@@ -59,6 +60,8 @@ func packageLayerRank(relPkg string) (domain string, rank int, ok bool) {
 	case relPkg == "internal/domain":
 		return "pure", -1, true
 	case strings.HasPrefix(relPkg, "internal/tea/"):
+		return "pure", 0, true
+	case relPkg == "internal/spec":
 		return "pure", 0, true
 	case relPkg == "internal/host/config" || relPkg == "internal/host/share":
 		return "host", 1, true
@@ -125,6 +128,17 @@ func TestLayerDependencies(t *testing.T) {
 					continue
 				}
 				targetRel := strings.TrimPrefix(impPath, modulePrefix+"/")
+				// The specification is written independently of the implementation
+				// so that it can be its oracle: it may not import internal/tea, and
+				// no implementation package may import it (only tests do).
+				if relPkg == "internal/spec" && strings.HasPrefix(targetRel, "internal/tea/") {
+					t.Errorf("independence violation: internal/spec imports implementation model %s", targetRel)
+					continue
+				}
+				if targetRel == "internal/spec" {
+					t.Errorf("independence violation: %s imports internal/spec (only tests may use the specification)", relPkg)
+					continue
+				}
 				targetDom, targetRank, ok := packageLayerRank(targetRel)
 				if !ok {
 					t.Errorf("%s imports unclassified package %s", relPkg, targetRel)
@@ -171,6 +185,9 @@ func TestTEAPurityAndFormalConstraints(t *testing.T) {
 	})
 	t.Run("internal/domain", func(t *testing.T) {
 		checkDomainPackage(t, root)
+	})
+	t.Run("internal/spec", func(t *testing.T) {
+		checkPureFiles(t, root, "internal/spec")
 	})
 
 	for _, relPkg := range teaPkgs {
@@ -993,7 +1010,7 @@ func TestNamingAndExportConventions(t *testing.T) {
 		files := parseNonTestFiles(t, fset, filepath.Join(root, relPkg))
 		testFiles := parseTestFiles(t, fset, filepath.Join(root, relPkg))
 
-		isPureSpec := strings.HasPrefix(relPkg, "internal/tea/") || relPkg == "internal/proto" || relPkg == "internal/types" || relPkg == "internal/domain"
+		isPureSpec := strings.HasPrefix(relPkg, "internal/tea/") || relPkg == "internal/proto" || relPkg == "internal/types" || relPkg == "internal/domain" || relPkg == "internal/spec"
 		refsInOtherPkgs := markTransitiveExportedTypes(files, externalRefs[relPkg])
 
 		receiverNames := map[string]string{}           // typeName -> first receiver ident
