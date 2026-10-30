@@ -67,22 +67,46 @@ func cidrs(es EntrySet) []netip.Prefix {
 	return out
 }
 
-// never reports whether d is unreachable whatever the policy.
-func never(h HostNet, d netip.Addr) bool {
-	if inAny(d, neverPrefixes()) {
-		return true
-	}
-	for _, a := range h.Addrs {
-		if a == d {
-			return true
-		}
-	}
-	return false
+// ReachShape is Reach in normal form, as data: every set it consults and
+// how they combine. Reach evaluates it, and verification tools translate it
+// (internal/spec/refine proves the egress rules equal it with Z3):
+//
+//	Reach(d) = Enabled ∧ d ∉ Never ∧ d ∉ Deny
+//	         ∧ ( d ∈ Allow ∨ ( d ∉ Private ∧ (¬Closed ∨ learned) ) )
+type ReachShape struct {
+	// Enabled is false for mode "none".
+	Enabled bool
+	// Never are destinations no policy reaches, including the host's own
+	// addresses (as single-address prefixes).
+	Never []netip.Prefix
+	// Deny and Allow are the policy's CIDR entries.
+	Deny  []netip.Prefix
+	Allow []netip.Prefix
+	// Private is what the mode's base set excludes: LAN-like ranges and
+	// on-link subnets for "internet", nothing for "lan".
+	Private []netip.Prefix
+	// Closed is default "deny": the base set needs a learned address.
+	Closed bool
 }
 
-// private reports whether d is a LAN-like destination.
-func private(h HostNet, d netip.Addr) bool {
-	return inAny(d, privatePrefixes()) || inAny(d, h.OnLink)
+// Shape returns the normal form of Reach for policy p on host network h.
+func Shape(p NetPolicy, h HostNet) ReachShape {
+	never := neverPrefixes()
+	for _, a := range h.Addrs {
+		never = append(never, netip.PrefixFrom(a.Unmap(), a.Unmap().BitLen()))
+	}
+	var private []netip.Prefix
+	if p.Mode == NetInternet {
+		private = append(privatePrefixes(), h.OnLink...)
+	}
+	return ReachShape{
+		Enabled: p.Mode != NetNone,
+		Never:   never,
+		Deny:    cidrs(p.Deny),
+		Allow:   cidrs(p.Allow),
+		Private: private,
+		Closed:  p.Default == DefaultDeny,
+	}
 }
 
 // Reach reports whether a guest running with policy p on host network h can
@@ -93,15 +117,15 @@ func private(h HostNet, d netip.Addr) bool {
 //	      ∧ ( d ∈ Allow.CIDRs                                  -- static exceptions override the mode
 //	        ∨ ( Base(Mode, d) ∧ (Default = allow ∨ learned) ) ) -- DNS answers never exceed the mode
 func Reach(p NetPolicy, h HostNet, d netip.Addr, learned bool) bool {
+	s := Shape(p, h)
 	d = d.Unmap()
-	if p.Mode == NetNone || never(h, d) || inAny(d, cidrs(p.Deny)) {
+	if !s.Enabled || inAny(d, s.Never) || inAny(d, s.Deny) {
 		return false
 	}
-	if inAny(d, cidrs(p.Allow)) {
+	if inAny(d, s.Allow) {
 		return true
 	}
-	base := p.Mode == NetLAN || !private(h, d)
-	return base && (p.Default == DefaultAllow || learned)
+	return !inAny(d, s.Private) && (!s.Closed || learned)
 }
 
 // Resolvable reports whether the guest's DNS filter answers queries for name.

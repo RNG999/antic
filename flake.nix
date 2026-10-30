@@ -26,6 +26,10 @@
           packages = [
             pkgs.go
             pkgs.golangci-lint
+            # Formal verification: Z3 proves the egress rules equal the
+            # specification; TLC model-checks the command saga (formal/).
+            pkgs.z3
+            pkgs.tlaplus
           ];
         };
       });
