@@ -468,6 +468,43 @@ func ParseMemorySize(n int64) (MemorySize, error) {
 	return types.Parse[int64, MemorySizePred](n)
 }
 
+// StepIndexPred refines int to positions in an operation plan: 0 <= n <= 64.
+type StepIndexPred struct{}
+
+// Check validates a plan position (64 is the position after a full plan).
+func (StepIndexPred) Check(n int) error {
+	if n < 0 || n > 64 {
+		return fmt.Errorf("plan position %d out of range 0..64", n)
+	}
+	return nil
+}
+
+// StepIndex is the refinement type { n : int | 0 <= n <= 64 }.
+type StepIndex = types.Refined[int, StepIndexPred]
+
+// ParseStepIndex validates and constructs a StepIndex.
+func ParseStepIndex(n int) (StepIndex, error) {
+	return types.Parse[int, StepIndexPred](n)
+}
+
+// StepIndexOrder orders StepIndex values numerically for SortedSet.
+type StepIndexOrder struct{}
+
+// Key returns the StepIndex itself as its unique key.
+func (StepIndexOrder) Key(i StepIndex) StepIndex { return i }
+
+// Less orders two StepIndex values numerically.
+func (StepIndexOrder) Less(a, b StepIndex) bool { return a.Get() < b.Get() }
+
+// AbsPathOrder orders AbsPath values lexicographically for SortedSet.
+type AbsPathOrder struct{}
+
+// Key returns the AbsPath itself as its unique key.
+func (AbsPathOrder) Key(p AbsPath) AbsPath { return p }
+
+// Less orders two AbsPaths lexicographically.
+func (AbsPathOrder) Less(a, b AbsPath) bool { return a.Get() < b.Get() }
+
 func isUnitChar(c rune, allowAtAndSlash bool) bool {
 	if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
 		return true

@@ -63,6 +63,9 @@ func packageLayerRank(relPkg string) (domain string, rank int, ok bool) {
 		return "pure", 0, true
 	case relPkg == "internal/spec":
 		return "pure", 0, true
+	case relPkg == "internal/spec/refine":
+		// Test-only: checks that internal/tea/operation refines internal/spec.
+		return "pure", 0, true
 	case relPkg == "internal/host/config" || relPkg == "internal/host/share":
 		return "host", 1, true
 	case relPkg == "internal/host/chv",

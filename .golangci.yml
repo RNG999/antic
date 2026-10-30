@@ -54,6 +54,8 @@ linters:
             - $gostd
             - github.com/RNG999/antic/internal/proto
             - github.com/RNG999/antic/internal/tea
+            - github.com/RNG999/antic/internal/domain
+            - github.com/RNG999/antic/internal/types
           deny:
             - pkg: "os"
               desc: "TEA pure packages must not perform OS/filesystem I/O"

@@ -514,3 +514,47 @@ cd e2e && ANTIC_E2E_BIN=~/.cache/antic-e2e/bin/antic ~/.cache/antic-e2e/e2e.test
 - rapid による系列生成と縮小、txtar での回帰固定
 - D1（switch 失敗の再現に故障注入が要る）
 - D4（lifecycle モデル内部の問題で、E2E では観測できない）
+
+### 段階 3：コマンド単位の Sans-I/O コア（完了）
+
+`internal/tea/operation` を新設した（§11 の saga コア）。TEA の規約（Model / Msg / Effect、`Invariant`、`FrameValid`、`StepValid`）に従い、arch linter を通っている。
+
+#### 設計
+
+- コアは設定の中身を扱わない。扱うのは、コマンドが触る**資源**とその**版**だけである。
+  - 資源：設定ファイル、インスタンス、システムプロファイル、実行中システム、電源、ホットプラグした個々のマウント
+  - 版：Old、Mid（再起動の途中で停止した状態）、New
+- 資源の版は `Plan` と `Pos` から導出し、Model には持たない（SSOT）。
+- 入力 `Op` は次の 4 つからなる。
+  - コマンドの形：`OpChangeConfig` / `OpCreate` / `OpStart` / `OpStop` / `OpRestart` / `OpRemove`
+  - 開始時のフェーズ
+  - 変更内容 `Change`：設定、システム、再起動の要否、追加・取り外しする共有
+  - ホットプラグ済みの共有
+- apply / install / uninstall / set / forward / unforward / mount / unmount / edit は、すべて `OpChangeConfig` として扱う。`run` は `OpStart` の後に実行する。
+- フェーズだけで決まる拒否は、コアが Prepare より前に行う。未作成のゲストへの start / restart と、作成済みのゲストへの create がこれに当たる。
+
+#### シェルへの要求（段階 5 で実装する）
+
+1. **複合 effect の原子性**：`StartVM`、`StopVM`、`Hotplug`、`Hotunplug`、`Switch` は、失敗した場合に何も変えてはならない。
+2. **`EffectStartVM{Config: v}` は版 v の設定とシステムで起動する**：プロファイルからは起動しない。再起動を補償するときは、プロファイルを戻すより先に旧システムを起動する。そのため、シェルは旧システムのパスを保持しておく必要がある。この点は、L1a のテストで影の状態を設計する過程で判明した。
+3. **`Change` は、シェルが旧設定と新設定の差分から求める**：この差分計算は純粋な処理なので、コアか spec の隣に純粋関数として置く案も検討する。
+
+#### 検証
+
+| 検査 | 規模 | 内容 |
+|---|---|---|
+| L1a `TestSagaAtomicityUnderFaultInjection` | 576 コマンド、3,028 実行 | 全フェーズ × 全変更の組み合わせについて、forward の各 effect と補償の各 effect に失敗を 1 回ずつ注入する。シャドウ状態（テストが独立に持つ effect の意味論）で次を確かめる。成功なら期待した新状態になる。失敗なら初期状態に戻る（P1）。Broken になるのは補償が失敗した場合だけである。Finalize は全 commit の後にしか走らない |
+| L1a 精緻化 `internal/spec/refine` | 89 状態、563 遷移 | 仕様の遷移ごとに、コアの計画が触る資源（足跡）と、仕様が変化させる状態成分が一致することを確かめる。フェーズで決まる拒否の扱いも一致することを確かめる |
+| ミュータント | 6 種 | 補償時の再ホットプラグ漏れ、補償での New 起動、Hotunplug 漏れ、Switch 漏れ、停止中のゲストへの stop で作業すること。いずれも検出した |
+
+#### 付随する変更
+
+- domain に `StepIndex`、`StepIndexOrder`、`AbsPathOrder` を追加した。
+- arch linter に `internal/spec/refine`（テストファイルだけのパッケージ）を登録した。
+- `.golangci.yml` の depguard（`tea-pure`）の許可リストに `internal/domain` と `internal/types` を追加した。
+  - `4616b9b` 以降、arch linter とは食い違っており、既存の `tea` パッケージも depguard の違反になっていた。
+  - この修正で、既存の `tea` パッケージに対する他の指摘（exhaustive と staticcheck、計 8 件）が表に出るようになった。新しく追加したコードへの指摘は 0 件である。
+
+#### 残課題（Broken）
+
+補償が恒久的に失敗した場合（Broken）は、仕様違反として報告するだけである。到達しないこと自体は保証できない。これを減らす手段は 2 つある。補償 effect を冪等にしてシェル側で再試行すること、そしてフェーズ 2 でジャーナルによる再開を入れることである。
