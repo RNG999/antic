@@ -320,7 +320,7 @@ P1 により、失敗時の結果は常に「`World` 不変かつ `Fail`」で�
 | D9 | `guest edit` は、Running 中でも再起動しない。新しい設定は次回の start まで反映されず、`Config` と `Running` が食い違ったままになる | `set` と同じく、即時に反映する（Invariant 4 を守る） | `misc.go:19` |
 | D10 | `guest edit` で不正な設定を保存すると、ファイルは不正なまま残り、exit 125 になる | P1：元の内容に書き戻す | `misc.go:19` |
 | D12 | `EDITOR` に引数付きの値（例: `omarchy-launch-editor --inline`）が入っていると、値全体を 1 つの実行ファイル名として扱い、起動に失敗する | git などと同じ慣習に合わせ、`sh -c '$EDITOR "$@"' sh <path>` の形で起動する（`VISUAL` も考慮する） | `misc.go:38` の `exec.Command(editor, g.Path)` |
-| D11 | `allow` が 1 件でもあると、許可リスト方式になる（2 つの意味が重なっている） | 案 B：`default` を明示させる。省略して `allow` を書いた設定は、移行エラーにする | `network.go` の `nftRules` |
+| D11 | **（段階 4 で修正済み）** `allow` が 1 件でもあると、許可リスト方式になる（2 つの意味が重なっている） | 案 B：`default` を明示させる。省略して `allow` を書いた設定は、移行エラーにする | `network.go` の `nftRules` |
 | D13 | **（修正済み）** `start` / `restart` / `create` が成功を返した直後の数秒間、`antic run` が `vsock port 22: EOF`（exit 125）で失敗する。エージェントの Hello が返す `Ready`（`antic-ready.target`）が、セッションソケットの待ち受け開始より先に成立していた | `start` が成功したら、`run` は直ちに使える | `nix/module.nix` の `antic-ready.target` を `antic-session.socket` の後に並べ、`Wants` にも加えた。E2E の最初の実行で検出 |
 | D14 | **（修正済み）** 現在の HEAD では、標準構成のゲストをビルドできない。`4616b9b` でエージェントが `internal/domain`、`internal/tea`、`internal/types` を import するようになったが、`embed.go` の `//go:embed` が更新されていなかった | ビルドできる | `embed.go` に追記した。エージェントが import する全パッケージが埋め込まれているかを検査する `TestGuestFSHasAgentImports` を追加した |
 | D15 | **（修正済み）** `/nix` のないホストで rootless Nix を使っていると、ゲストを起動できない。共有ユニットとネットワークユニットが `Failed to set up mount namespacing: /nix: Permission denied` で失敗する（`b2012a0` 以降） | 起動できる | `Manager.confine` は、ホストに `/nix` がある場合にだけ Nix ルートを `/nix` に bind するよう改めた。`/nix` がなく、`/nix/store` にリンクされた libexec ヘルパーを使う構成は、別途の課題として残る |
@@ -558,3 +558,28 @@ cd e2e && ANTIC_E2E_BIN=~/.cache/antic-e2e/bin/antic ~/.cache/antic-e2e/e2e.test
 #### 残課題（Broken）
 
 補償が恒久的に失敗した場合（Broken）は、仕様違反として報告するだけである。到達しないこと自体は保証できない。これを減らす手段は 2 つある。補償 effect を冪等にしてシェル側で再試行すること、そしてフェーズ 2 でジャーナルによる再開を入れることである。
+
+### 段階 4：egress のルール中間表現（完了）
+
+#### 実装
+
+- **ルールの中間表現を `tea/egress` に置いた**：`internal/tea/egress/rules.go` の `Rules(Policy, HostNet) []Rule` と `Eval(rules, d, learned)` は純粋関数である。順序付きの `match → verdict` 列で、最初に一致したルールが判定を決める。`NeverPrefixes()` と `PrivatePrefixes()` もここに移した。
+- **ホスト側は書き出しだけにした**：`internal/host/guest/network.go` の `nftRules` が担うのは、配管（転送ポート、DNS の経路）の出力と、中間表現を順に nft テキストへ書き出すことだけである。prefix は常に `netip` の表記で出力する（例: `::ffff:0.0.0.0/96`、`192.168.11.12/32`）。
+- **案 B を実装した（D11）**：
+  - 設定に `network.default`（`"allow"` / `"deny"`）を追加した。
+  - 学習済み IP の集合（dyn set）と最後の reject は、`default = "deny"` のときだけ出力する。DNS フィルタも、`default = "deny"` のときか、ドメインの entry があるときだけ起動する。
+  - `tea/egress` の Model に `Default` を追加した。`DomainAllowed` は「deny が優先、`default = "deny"` なら allow に一致したものだけ」を返す。
+  - netns ヘルパーに `--default-deny` を追加した。
+- **移行規則**：`allow` を書いて `default` を省略した設定はエラーにする。`default = "allow"` のまま `allow` にドメインを書いた設定もエラーにする。手元の設定（`dev`、`formal`、`antic.toml`）には該当するものがないことを確認した。
+- **文書**：README、`examples/dev.toml`、SKILL.md（2 か所）に `default` の説明を加えた。
+
+#### 検証
+
+| 検査 | 規模 | 内容 |
+|---|---|---|
+| L1b `TestEgressRulesRefineReach`（`internal/spec/refine`） | 208 ポリシー、8,736 判定 | mode × default × allow の部分集合 × deny の部分集合の全組み合わせについて、`Eval(Rules(...))` が `spec.Reach` と一致することを確かめる。宛先は各同値類の代表 21 個で、on-link、ホスト自身、public、private、never、IPv4-mapped を含む。learned（学習済みかどうか）の両方の値を試す。DNS フィルタの判定も `spec.Resolvable` と照合する |
+| ミュータント | 4 種 | deny と allow の順序を入れ替える、on-link を遮断対象から外す、学習済み IP の許可を LAN 遮断より前に置く（rebinding）、IPv4-mapped を unmap しない。いずれも検出した |
+| 単体テスト | — | `network_test` を案 B に合わせて更新した。`default = "allow"` で CIDR を例外にする場合のテストと、`network.default` の移行規則のテストを追加した |
+| E2E（3 回目、約 6.5 分） | 15 シナリオ | 新たに `default = "deny"` と、`lan` + 例外の 2 シナリオを加えた。いずれも生成したルールを実機の namespace に読み込み、ゲストが起動することを確かめた。D11 は既知の差分から外れ、PASS になった。残る既知の差分は D3、D5、D7、D8、D9、D10、D12、D16 |
+
+到達性を実機で観測するプローブ（O3 のネットワーク）は、段階 6 で扱う。

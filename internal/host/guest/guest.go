@@ -179,7 +179,7 @@ func (g *Guest) netUnit() string { return "antic-net@" + g.Inst.ID + ".service" 
 func (g *Guest) shareUnit(tag string) string {
 	return "antic-share@" + g.Inst.ID + ":" + tag + ".service"
 }
-func (g *Guest) slice() string              { return "antic-" + g.Inst.ID + ".slice" }
+func (g *Guest) slice() string { return "antic-" + g.Inst.ID + ".slice" }
 func (g *Guest) CgroupDir() string {
 	uid := os.Getuid()
 	return filepath.Join("/sys/fs/cgroup/user.slice", fmt.Sprintf("user-%d.slice", uid), fmt.Sprintf("user@%d.service", uid), "antic.slice", g.slice())

@@ -220,8 +220,27 @@ func scenarios() []scenario {
 			},
 		},
 		{
-			name:  "D11 network default",
-			known: "D11",
+			name: "network default deny boots",
+			setup: func(h *harness) {
+				h.fixtureConfig(b, spec.RawConfig{Packages: []string{"git"}, Memory: "1G", Network: spec.RawNetwork{
+					Default: "deny", Allow: []string{"one.one.one.one", "192.168.1.1/32"}, Deny: []string{"*.evil.example"}}})
+			},
+			cmds: func(*harness) []spec.Cmd {
+				return []spec.Cmd{spec.CmdApply{Target: b}, spec.CmdStart{Names: []string{b}}, spec.CmdRun{Target: b, Code: 0}}
+			},
+		},
+		{
+			name: "network lan with exceptions boots",
+			setup: func(h *harness) {
+				h.fixtureConfig(b, spec.RawConfig{Packages: []string{"git"}, Memory: "1G", Network: spec.RawNetwork{
+					Mode: "lan", Default: "allow", Allow: []string{"10.1.2.0/24"}, Deny: []string{"192.168.1.0/24", "*.evil.example"}}})
+			},
+			cmds: func(*harness) []spec.Cmd {
+				return []spec.Cmd{spec.CmdApply{Target: b}, spec.CmdStart{Names: []string{b}}, spec.CmdRun{Target: b, Code: 0}}
+			},
+		},
+		{
+			name: "D11 network default",
 			cmds: func(*harness) []spec.Cmd {
 				return []spec.Cmd{
 					create(a),

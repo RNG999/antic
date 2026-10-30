@@ -88,9 +88,9 @@ func make63() []byte {
 func TestMatches(t *testing.T) {
 	patterns := []string{"*.github.com", "npmjs.org"}
 	for name, want := range map[string]bool{
-		"github.com":         true,  // wildcard matches apex
-		"api.github.com":     true,  // wildcard matches subdomain
-		"a.b.github.com":     true,  // wildcard matches nested subdomain
+		"github.com":         true, // wildcard matches apex
+		"api.github.com":     true, // wildcard matches subdomain
+		"a.b.github.com":     true, // wildcard matches nested subdomain
 		"evilgithub.com":     false,
 		"github.com.evil.io": false,
 		"com":                false,

@@ -42,17 +42,20 @@ type SpecConfig struct {
 
 // NetworkConfig holds network settings in [network].
 type NetworkConfig struct {
-	Mode  string   `toml:"mode" json:"mode"`
-	Allow []string `toml:"allow" json:"allow,omitempty"`
-	Deny  []string `toml:"deny" json:"deny,omitempty"`
-	Ports []Port   `toml:"ports" json:"ports,omitempty"`
+	Mode string `toml:"mode" json:"mode"`
+	// Default is "allow" (the mode's base set, plus allow exceptions) or
+	// "deny" (only allow entries and what allowed domains resolve to).
+	Default string   `toml:"default" json:"default,omitempty"`
+	Allow   []string `toml:"allow" json:"allow,omitempty"`
+	Deny    []string `toml:"deny" json:"deny,omitempty"`
+	Ports   []Port   `toml:"ports" json:"ports,omitempty"`
 }
 
 // Port is one host-to-guest port mapping (127.0.0.1:Host -> Guest).
 type Port struct {
-	Host        int    `toml:"host" json:"host"`                                     // 1..65535
-	Guest       int    `toml:"guest" json:"guest"`                                   // 1..65535 (defaults to Host if omitted)
-	Proto       string `toml:"proto,omitempty" json:"proto,omitempty"`               // "tcp", "udp", or "tcp,udp" (defaults to "tcp")
+	Host        int    `toml:"host" json:"host"`                                   // 1..65535
+	Guest       int    `toml:"guest" json:"guest"`                                 // 1..65535 (defaults to Host if omitted)
+	Proto       string `toml:"proto,omitempty" json:"proto,omitempty"`             // "tcp", "udp", or "tcp,udp" (defaults to "tcp")
 	Description string `toml:"description,omitempty" json:"description,omitempty"` // optional explanation
 }
 
@@ -408,6 +411,20 @@ func (g *Guest) normalize(home string, baseDir ...string) []error {
 		if len(g.Network.Deny) > 0 {
 			errs = append(errs, errors.New("network.deny cannot be used when network.mode is \"none\""))
 		}
+		if g.Network.Default != "" {
+			errs = append(errs, errors.New("network.default cannot be used when network.mode is \"none\""))
+		}
+	}
+	switch g.Network.Default {
+	case "", "allow", "deny":
+	default:
+		errs = append(errs, fmt.Errorf("network.default must be \"allow\" or \"deny\", not %q", g.Network.Default))
+	}
+	if g.Network.Default == "" && len(g.Network.Allow) > 0 {
+		// Before network.default existed, any allow entry meant "deny
+		// everything else"; reading such a file as "allow" would silently
+		// widen what the guest can reach.
+		errs = append(errs, errors.New("network.allow requires network.default: set it to \"deny\" to keep allowing only the allow list, or \"allow\" to add exceptions to the mode"))
 	}
 	g.AllowDomains, g.AllowNets = nil, nil
 	for i, raw := range g.Network.Allow {
@@ -424,6 +441,10 @@ func (g *Guest) normalize(home string, baseDir ...string) []error {
 				g.AllowNets = append(g.AllowNets, p)
 			}
 		}
+	}
+	if !g.Network.DefaultDeny() && len(g.AllowDomains) > 0 {
+		// Public names are reachable anyway, and DNS answers never open the LAN.
+		errs = append(errs, fmt.Errorf("network.allow: domain %q has no effect unless network.default is \"deny\"", g.AllowDomains[0]))
 	}
 	g.DenyDomains, g.DenyNets = nil, nil
 	for i, raw := range g.Network.Deny {
@@ -662,10 +683,13 @@ func parseSize(s string) (int64, error) {
 var knownKeys = []string{
 	"description", "packages", "flake",
 	"spec", "cpus", "memory",
-	"network", "mode", "allow", "deny", "ports",
+	"network", "mode", "default", "allow", "deny", "ports",
 	"shares", "source", "target", "mode", "credentials",
 	"host", "guest", "env",
 }
+
+// DefaultDeny reports whether network.default is "deny".
+func (n NetworkConfig) DefaultDeny() bool { return n.Default == "deny" }
 
 // suggest proposes the closest known key for a misspelled one.
 func suggest(k toml.Key) string {

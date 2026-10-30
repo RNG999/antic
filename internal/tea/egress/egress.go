@@ -58,24 +58,39 @@ type SetElementUpdate struct {
 	Timeout domain.BoundedTimeout
 }
 
+// Default decides what happens to destinations no allow entry names
+// (network.default in the guest config).
+type Default uint8
+
+const (
+	// DefaultAllow reaches the mode's base set; allow entries add exceptions.
+	DefaultAllow Default = iota
+	// DefaultDeny reaches only allow entries (and addresses learned by
+	// resolving allowed domains).
+	DefaultDeny
+)
+
 // Model is the immutable, normalized (SSOT) state of the DNS egress filter.
 type Model struct {
+	Default    Default
 	Allow      PatternSet
 	Deny       PatternSet
 	SetEntries EntrySet
 	RefusedLog DomainSet
 }
 
-// Init constructs a normalized initial Model from validated Allow and Deny patterns.
-func Init(allow, deny []domain.DomainPattern) Model {
+// Init constructs a normalized initial Model from the default and validated
+// Allow and Deny patterns.
+func Init(def Default, allow, deny []domain.DomainPattern) Model {
 	return Model{
-		Allow: types.BuildSet[domain.DomainPattern, domain.DomainPattern, domain.DomainPatternOrder](allow),
-		Deny:  types.BuildSet[domain.DomainPattern, domain.DomainPattern, domain.DomainPatternOrder](deny),
+		Default: def,
+		Allow:   types.BuildSet[domain.DomainPattern, domain.DomainPattern, domain.DomainPatternOrder](allow),
+		Deny:    types.BuildSet[domain.DomainPattern, domain.DomainPattern, domain.DomainPatternOrder](deny),
 	}
 }
 
 // DomainAllowed reports whether domain is permitted by Model's Deny and Allow lists.
-// Deny always takes precedence over Allow; if Allow is non-empty, domain must match Allow.
+// Deny always takes precedence; with DefaultDeny, domain must match Allow.
 func (m Model) DomainAllowed(d domain.DomainName) bool {
 	if !d.Valid() {
 		return false
@@ -85,7 +100,7 @@ func (m Model) DomainAllowed(d domain.DomainName) bool {
 			return false
 		}
 	}
-	if m.Allow.Len() > 0 {
+	if m.Default == DefaultDeny {
 		for _, p := range m.Allow.All() {
 			if domain.DomainMatches(d, p) {
 				return true
@@ -132,7 +147,7 @@ func Invariant(m Model) error {
 //   - MsgEvaluateQuery only modifies RefusedLog (leaving SetEntries untouched).
 //   - MsgRecordAnswers only modifies SetEntries (leaving RefusedLog untouched).
 func FrameValid(prev Model, msg Msg, next Model) error {
-	if !slices.Equal(prev.Allow.All(), next.Allow.All()) || !slices.Equal(prev.Deny.All(), next.Deny.All()) {
+	if prev.Default != next.Default || !slices.Equal(prev.Allow.All(), next.Allow.All()) || !slices.Equal(prev.Deny.All(), next.Deny.All()) {
 		return errors.New("frame violation: Allow/Deny policy frame mutated")
 	}
 	switch msg.(type) {
@@ -151,7 +166,7 @@ func FrameValid(prev Model, msg Msg, next Model) error {
 // StepValid checks the IronFleet / TLA+ transition relation predicate across
 // a single step (prev, msg) -> (next, effects).
 func StepValid(prev Model, msg Msg, next Model, effects []Effect) error {
-	if prev.Allow.Len() != next.Allow.Len() || prev.Deny.Len() != next.Deny.Len() {
+	if prev.Default != next.Default || prev.Allow.Len() != next.Allow.Len() || prev.Deny.Len() != next.Deny.Len() {
 		return errors.New("step violation: Allow or Deny policy mutated during transition")
 	}
 	for _, eff := range effects {
@@ -161,8 +176,8 @@ func StepValid(prev Model, msg Msg, next Model, effects []Effect) error {
 				return fmt.Errorf("step violation: EffectForwardQuery emitted for disallowed domain %q", e.Domain)
 			}
 		case EffectUpdateNFTSet:
-			if prev.Allow.Len() == 0 {
-				return errors.New("step violation: EffectUpdateNFTSet emitted when Allow list is empty")
+			if prev.Default != DefaultDeny {
+				return errors.New("step violation: EffectUpdateNFTSet emitted without default deny (there is no learned set)")
 			}
 			for _, u := range e.Updates.Slice() {
 				if !u.Addr.Valid() || !u.Timeout.Valid() {
@@ -258,6 +273,7 @@ func (EffectUpdateNFTSet) isEffect() {}
 // (Model, Msg) -> (Model, []Effect).
 func Update(m Model, msg Msg) (Model, []Effect) {
 	next := Model{
+		Default:    m.Default,
 		Allow:      m.Allow.Clone(),
 		Deny:       m.Deny.Clone(),
 		SetEntries: m.SetEntries.Clone(),
@@ -281,7 +297,7 @@ func Update(m Model, msg Msg) (Model, []Effect) {
 		return next, []Effect{EffectForwardQuery{Domain: ev.Domain}}
 
 	case MsgRecordAnswers:
-		if next.Allow.Len() == 0 {
+		if next.Default != DefaultDeny {
 			return next, nil
 		}
 		now := ev.Now.Get()

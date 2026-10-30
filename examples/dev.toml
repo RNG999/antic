@@ -9,8 +9,12 @@ memory = "4G"
 [network]
 mode = "internet"   # none | internet | lan
 
-# Optional egress allow list. Domains (and subdomains if prefixed with *.),
-# IP addresses and CIDRs (must use CIDR notation like /32 or /24).
+# Optional egress filter. default = "deny" reaches only allow entries:
+# domains (and subdomains if prefixed with *.) and CIDRs (like /32 or /24).
+# With default = "allow" (the default), allow CIDRs are exceptions to the
+# mode (e.g. one LAN host in "internet" mode). An allow list needs an
+# explicit default.
+# default = "deny"
 # allow = ["github.com", "*.githubusercontent.com", "registry.npmjs.org", "192.168.11.50/32"]
 # deny = [...]
 

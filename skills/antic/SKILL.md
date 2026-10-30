@@ -97,7 +97,8 @@ memory = "4G"
 
 [network]
 mode = "internet"   # none | internet | lan
-# allow = ["github.com", "*.githubusercontent.com", "1.1.1.1/32"]  # Optional: default deny whitelist
+# default = "deny"  # Optional: "deny" reaches only the allow list (an allow list needs an explicit default)
+# allow = ["github.com", "*.githubusercontent.com", "1.1.1.1/32"]
 # deny = ["10.0.0.0/8"]                 # Optional: blacklist (CIDR or domain)
 
 [[network.ports]]

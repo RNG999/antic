@@ -15,6 +15,7 @@ func TestExhaustiveStateSpaceAndIncorrectnessReachability(t *testing.T) {
 	pGist, _ := domain.ParseDomainPattern("gist.github.com")
 
 	initModel := egress.Init(
+		egress.DefaultDeny,
 		[]domain.DomainPattern{pGit, pAnthropic},
 		[]domain.DomainPattern{pGist},
 	)

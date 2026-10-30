@@ -129,6 +129,7 @@ memory = "8G"
 
 [network]
 mode = "internet"   # "internet" (default) | "lan" | "none"
+# default = "deny"  # "allow" (default) | "deny": what destinations no allow entry names get
 # allow = ["github.com", "*.githubusercontent.com", "1.1.1.1/32"]
 # deny = ["10.0.0.0/8"]
 
@@ -206,7 +207,11 @@ For full NixOS configuration beyond a package list, set `flake = "/path/to/flake
   - `"internet"` (default): allows internet access while blocking LAN subnets, CGNAT/Tailscale (`100.64.0.0/10`), link-local/cloud metadata (`169.254.0.0/16`), and host loopback.
   - `"lan"`: allows internet and LAN, while still blocking host addresses, loopback, and link-local.
   - `"none"`: attaches no network device to the VM.
-  - `allow` / `deny`: filters domains (including `*.example.com` wildcards) and CIDRs. When `allow` is set, an in-namespace DNS proxy resolves allowed domains and dynamically populates an `nftables` IP set before returning answers; direct IP connections bypassing DNS (except static CIDR entries) are rejected.
+  - `default`, `allow` and `deny` refine the mode independently:
+    - `deny` entries (domains, including `*.example.com` wildcards, and CIDRs) are never reachable.
+    - `allow` CIDRs are always reachable, even inside the LAN in `"internet"` mode.
+    - `default = "allow"` (the default) reaches the mode's base set. `default = "deny"` reaches only `allow` CIDRs and the addresses `allow` domains resolve to: an in-namespace DNS proxy resolves allowed domains and adds their addresses to an `nftables` set before answering, and refuses every other name. Resolved addresses never open the LAN in `"internet"` mode.
+    - An `allow` list requires an explicit `default` (older configs where `allow` implied "deny everything else" must add `default = "deny"`), and `allow` domains require `default = "deny"`.
 - **Host sandboxing:** Every host helper unit (`antic-vm@`, `antic-net@`, `antic-share@`) runs under `systemd --user` with `ProtectHome=tmpfs`, `ProtectSystem=strict`, `PrivateTmp`, `PrivatePIDs`, and explicit bind mounts for only the paths it needs.
 
 ### Caveats

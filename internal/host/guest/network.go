@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/RNG999/antic/internal/host/config"
 	"github.com/RNG999/antic/internal/host/egress"
+	teaegress "github.com/RNG999/antic/internal/tea/egress"
 )
 
 const (
@@ -21,83 +23,56 @@ const (
 	nsDNS = "192.0.2.54"
 )
 
-// Destinations no guest may reach: the namespace's loopback, link-local
-// (including cloud metadata 169.254.169.254 and host fe80:: addresses),
-// IPv4-mapped IPv6, multicast, and the host's own addresses.
-// "internet" mode also blocks private/LAN ranges, CGNAT (Tailscale), NAT64,
-// and any on-link subnet (including delegated global IPv6 /64 LAN prefixes).
-var (
-	alwaysBlocked4 = []string{"0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4", "240.0.0.0/4"}
-	alwaysBlocked6 = []string{"::/128", "::1/128", "::ffff:0:0/96", "fe80::/10", "ff00::/8"}
-	lanBlocked4    = []string{"10.0.0.0/8", "100.64.0.0/10", "172.16.0.0/12", "192.0.0.0/24", "192.168.0.0/16", "198.18.0.0/15"}
-	lanBlocked6    = []string{"fc00::/7", "fec0::/10", "64:ff9b::/96", "64:ff9b:1::/48"}
-)
-
-// hasFilter reports whether the guest has an allow or deny filter.
+// hasFilter reports whether the guest needs the DNS filter: it has domain
+// entries, or default "deny" (which only reaches what it resolves).
 func hasFilter(g *config.Guest) bool {
-	return len(g.Network.Allow) > 0 || len(g.Network.Deny) > 0
+	return g.Network.DefaultDeny() || len(g.AllowDomains) > 0 || len(g.DenyDomains) > 0
 }
 
-func hasAllow(g *config.Guest) bool {
-	return len(g.Network.Allow) > 0
+// egressPolicy is the IP-level network policy of g.
+func egressPolicy(g *config.Guest) teaegress.Policy {
+	p := teaegress.Policy{Mode: teaegress.ModeInternet, AllowNets: g.AllowNets, DenyNets: g.DenyNets}
+	if g.Network.Mode == config.NetworkLAN {
+		p.Mode = teaegress.ModeLAN
+	}
+	if g.Network.DefaultDeny() {
+		p.Default = teaegress.DefaultDeny
+	}
+	return p
 }
 
-// nftRules renders the egress filter for the guest's network namespace.
-//
-// Order matters: always-blocked destinations and host addresses are
-// rejected first, then static deny entries are rejected, then the static allow
-// list is accepted (so it may name LAN hosts in "internet" mode), then LAN
-// ranges are rejected in "internet" mode (so DNS answers pointing into the LAN
-// never open it), then addresses the DNS filter learned are accepted, and
-// with an allow list everything else is rejected.
+// hostNet describes the host's addresses and on-link subnets.
+func hostNet(hostNets []*net.IPNet) teaegress.HostNet {
+	var h teaegress.HostNet
+	for _, n := range hostNets {
+		a, ok := netip.AddrFromSlice(n.IP)
+		if !ok {
+			continue
+		}
+		a = a.Unmap()
+		h.Addrs = append(h.Addrs, a)
+		if ones, bits := n.Mask.Size(); ones > 0 && ones < bits {
+			h.OnLink = append(h.OnLink, netip.PrefixFrom(a, ones).Masked())
+		}
+	}
+	return h
+}
+
+// nftRules renders the egress filter for the guest's network namespace: the
+// plumbing (forwarded ports, the DNS path) and then the pure egress rules
+// of internal/tea/egress in order.
 func nftRules(g *config.Guest, hostNets []*net.IPNet) string {
 	filter := hasFilter(g)
-	allow := hasAllow(g)
-	internet := g.Network.Mode == config.NetworkInternet
-	v4 := append([]string{}, alwaysBlocked4...)
-	v6 := append([]string{}, alwaysBlocked6...)
-	var lan4, lan6 []string
-	if internet {
-		lan4 = append(lan4, lanBlocked4...)
-		lan6 = append(lan6, lanBlocked6...)
-	}
-	for _, n := range hostNets {
-		ones, bits := n.Mask.Size()
-		if ip4 := n.IP.To4(); ip4 != nil {
-			v4 = append(v4, ip4.String())
-			if internet && ones > 0 && ones < bits {
-				lan4 = append(lan4, (&net.IPNet{IP: ip4.Mask(n.Mask), Mask: n.Mask}).String())
-			}
-		} else if ip6 := n.IP.To16(); ip6 != nil {
-			v6 = append(v6, ip6.String())
-			if internet && ones > 0 && ones < bits {
-				lan6 = append(lan6, (&net.IPNet{IP: ip6.Mask(n.Mask), Mask: n.Mask}).String())
-			}
-		}
-	}
-	var deny4, deny6 []string
-	for _, p := range g.DenyNets {
-		if p.Addr().Is4() {
-			deny4 = append(deny4, p.String())
-		} else {
-			deny6 = append(deny6, p.String())
-		}
-	}
-	var static4, static6 []string
-	for _, p := range g.AllowNets {
-		if p.Addr().Is4() {
-			static4 = append(static4, p.String())
-		} else {
-			static6 = append(static6, p.String())
-		}
-	}
+	policy := egressPolicy(g)
 
 	var b strings.Builder
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
-	set := func(family string, items []string) string { return family + " daddr { " + strings.Join(items, ", ") + " }" }
+	set := func(family string, items []string) string {
+		return family + " daddr { " + strings.Join(items, ", ") + " }"
+	}
 
 	w("table %s {", egress.Table)
-	if allow {
+	if policy.Default == teaegress.DefaultDeny {
 		w("  set %s { type ipv4_addr; flags timeout; size 65536; }", egress.Set4)
 		w("  set %s { type ipv6_addr; flags timeout; size 65536; }", egress.Set6)
 	}
@@ -125,30 +100,33 @@ func nftRules(g *config.Guest, hostNets []*net.IPNet) string {
 		w("    ip daddr %s tcp dport 53 accept", nsDNS)
 	}
 	w("    ip daddr %s reject", nsDNS)
-	w("    %s reject", set("ip", v4))
-	w("    %s reject", set("ip6", v6))
-	if len(deny4) > 0 {
-		w("    %s reject", set("ip", deny4))
-	}
-	if len(deny6) > 0 {
-		w("    %s reject", set("ip6", deny6))
-	}
-	if len(static4) > 0 {
-		w("    %s accept", set("ip", static4))
-	}
-	if len(static6) > 0 {
-		w("    %s accept", set("ip6", static6))
-	}
-	if len(lan4) > 0 {
-		w("    %s reject", set("ip", lan4))
-	}
-	if len(lan6) > 0 {
-		w("    %s reject", set("ip6", lan6))
-	}
-	if allow {
-		w("    ip daddr @%s accept", egress.Set4)
-		w("    ip6 daddr @%s accept", egress.Set6)
-		w("    reject")
+	for _, r := range teaegress.Rules(policy, hostNet(hostNets)) {
+		verdict := "accept"
+		if r.Verdict == teaegress.VerdictReject {
+			verdict = "reject"
+		}
+		switch r.Match {
+		case teaegress.MatchPrefixes:
+			var v4, v6 []string
+			for _, p := range r.Prefixes {
+				if p.Addr().Is4() {
+					v4 = append(v4, p.String())
+				} else {
+					v6 = append(v6, p.String())
+				}
+			}
+			if len(v4) > 0 {
+				w("    %s %s", set("ip", v4), verdict)
+			}
+			if len(v6) > 0 {
+				w("    %s %s", set("ip6", v6), verdict)
+			}
+		case teaegress.MatchLearned:
+			w("    ip daddr @%s %s", egress.Set4, verdict)
+			w("    ip6 daddr @%s %s", egress.Set6, verdict)
+		case teaegress.MatchAll:
+			w("    %s", verdict)
+		}
 	}
 	w("  }")
 	w("}")
@@ -199,6 +177,9 @@ func (g *Guest) startNet(ctx context.Context) (string, error) {
 				return "", err
 			}
 			helper = append(helper, "--deny-domains", denyFile)
+		}
+		if g.Cfg.Network.DefaultDeny() {
+			helper = append(helper, "--default-deny")
 		}
 		helper = append(helper, "--upstream", nsDNS)
 		dnsHost = egress.Listen.Addr().String()
