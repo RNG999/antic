@@ -6,6 +6,6 @@ import "embed"
 
 //go:embed flake.lock go.mod go.sum
 //go:embed cmd/antic-agent
-//go:embed internal/guest internal/proto
+//go:embed internal/guest internal/proto internal/domain internal/tea internal/types
 //go:embed nix/module.nix nix/packages.nix nix/proto.json
 var GuestFS embed.FS

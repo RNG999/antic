@@ -71,8 +71,13 @@ func FindBinaries(d instance.Dirs) Binaries {
 }
 
 // confine returns systemd sandbox properties for a unit, also binding the
-// rootless Nix store at /nix when helpers link against /nix/store.
+// rootless Nix store at /nix when helpers link against /nix/store. The user
+// manager cannot create the /nix mount point, so the bind needs an existing
+// /nix; without one, the unit would fail to set up its namespace.
 func (m *Manager) confine(rw, ro []string) []systemd.Property {
+	if fi, err := os.Stat("/nix"); err != nil || !fi.IsDir() {
+		return systemd.Confine(rw, ro)
+	}
 	if nix, err := m.nixBuilder(); err == nil && nix.Root() != "" {
 		ro = append(append([]string{}, ro...), filepath.Join(nix.Root(), "nix")+":/nix")
 	}

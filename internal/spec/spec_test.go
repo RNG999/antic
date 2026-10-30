@@ -45,13 +45,23 @@ func mustPort(t testing.TB, n int) domain.PortNumber {
 	return p
 }
 
+func mustPackage(t testing.TB, s string) domain.PackageName {
+	t.Helper()
+	p, err := domain.ParsePackageName(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 func fixtureEnv(t testing.TB) spec.Env {
 	return spec.Env{
-		Home:   mustAbs(t, home),
-		Dirs:   []domain.AbsPath{mustAbs(t, dirA), mustAbs(t, dirB), mustAbs(t, sub), mustAbs(t, "/home/u/.ssh"), mustAbs(t, "/srv")},
-		Links:  []spec.Link{{From: mustAbs(t, link), To: mustAbs(t, dirB)}},
-		Denied: []domain.AbsPath{mustAbs(t, "/home/u/.ssh")},
-		Busy:   []spec.PortKey{{Host: mustPort(t, 9999), Proto: spec.ProtoTCP}},
+		Home:        mustAbs(t, home),
+		Dirs:        []domain.AbsPath{mustAbs(t, dirA), mustAbs(t, dirB), mustAbs(t, sub), mustAbs(t, "/home/u/.ssh"), mustAbs(t, "/srv")},
+		Links:       []spec.Link{{From: mustAbs(t, link), To: mustAbs(t, dirB)}},
+		Denied:      []domain.AbsPath{mustAbs(t, "/home/u/.ssh")},
+		Busy:        []spec.PortKey{{Host: mustPort(t, 9999), Proto: spec.ProtoTCP}},
+		Unbuildable: []domain.PackageName{mustPackage(t, "no-such-pkg")},
 	}
 }
 
@@ -102,6 +112,7 @@ func alphabet() []spec.Cmd {
 		spec.CmdStop{},
 		spec.CmdCreate{Name: "Bad_Name"},
 		spec.CmdInstall{Target: "e2e-a", Packages: []string{"bad pkg"}},
+		spec.CmdInstall{Target: "e2e-a", Packages: []string{"no-such-pkg"}},
 		spec.CmdForward{Target: "e2e-a", Ports: []string{"7000"}},
 		spec.CmdForward{Target: "e2e-a", Ports: []string{"9999"}},
 		spec.CmdMount{Target: "e2e-a", Dirs: []string{"/home/u/.ssh"}},
@@ -329,6 +340,11 @@ func TestScenarios(t *testing.T) {
 		if guest(t, w, "e2e-a").Mounts.Len() != 0 {
 			t.Fatal("restart should drop the unconfigured mount")
 		}
+	})
+
+	t.Run("D5 a package that cannot be built changes nothing", func(t *testing.T) {
+		run(t, running, spec.CmdInstall{Target: "e2e-a", Packages: []string{"jq", "no-such-pkg"}}, spec.OutcomeReject)
+		run(t, running, spec.CmdEdit{Target: "e2e-a", New: spec.RawConfig{Packages: []string{"no-such-pkg"}}}, spec.OutcomeReject)
 	})
 
 	t.Run("D7 host ports are unique across guests", func(t *testing.T) {

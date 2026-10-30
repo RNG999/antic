@@ -23,6 +23,28 @@ type Env struct {
 	Denied []domain.AbsPath
 	// Busy are host ports held by processes other than antic.
 	Busy []PortKey
+	// Unbuildable are package attributes that do not exist in nixpkgs; a build
+	// that includes one fails deterministically, so it is rejected before
+	// anything changes (P1 prepare).
+	Unbuildable []domain.PackageName
+}
+
+// ParseConfig validates raw on its own, without checking it against other
+// guests. Observers use it to read a guest's config file.
+func ParseConfig(env Env, raw RawConfig) (Config, error) {
+	return parseConfig(World{}, env, domain.GuestName{}, raw)
+}
+
+// buildable checks that every package of pkgs exists in nixpkgs.
+func buildable(env Env, pkgs PackageSet) error {
+	for _, p := range pkgs.All() {
+		for _, u := range env.Unbuildable {
+			if p == u {
+				return fmt.Errorf("package %s does not exist in nixpkgs", p.Get())
+			}
+		}
+	}
+	return nil
 }
 
 // Link is a symlink From -> To.

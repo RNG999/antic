@@ -310,7 +310,7 @@ P1 により、失敗時の結果は常に「`World` 不変かつ `Fail`」で�
 | # | 現状 | 望ましい仕様 | 根拠 |
 |---|---|---|---|
 | D1 | switch に失敗してロールバックした後も、システムプロファイルは新しい構成のまま残る | P1：`Installed` も元に戻す | `ops.go:204`、`nixbuild.go:121` |
-| D2 | 既存の rw 共有に `mount --ro` しても何も変わらず、exit 0 で「shared … (ro)」と表示する | Reject する（P3） | `edit.go:118` |
+| D2 | **（E2E で訂正）** コードを読んだ段階では「何も変わらず exit 0」と予想していた。実機では exit 125 で拒否され、設定も変わらず、観測上は仕様どおりだった。ただし拒否の理由は「同じパスの共有が重なる」で、本来の理由（mode の不一致）とは違う。設定ファイル上の `~/` 表記とフルパスを比べているため、既存の共有を同一パスと判定できていない（D16 を参照） | Reject する（P3）。理由のメッセージも正しくする | `edit.go:118` の `AddShare` |
 | D3 | 設定が既にある状態で `create` にフラグを渡すと、フラグを黙って無視する | Reject する（P3） | `ops.go` の `Manager.Create` |
 | D4 | lifecycle の Model から、boot 時にマウントした共有が消える | lifecycle 側で `Config` と `Mounts` を分ける | `MsgUnmountShare` |
 | D5 | `install`、`set`、`forward` が失敗しても、設定ファイルの変更は残る | P1：設定ファイルを書き戻す。再起動に失敗したら、旧設定で再起動し直す（例外なし）。2 相（prepare → commit）の構造に改める | `pkg.go`、`port.go`、`guestcmd.go` の `set` |
@@ -321,6 +321,11 @@ P1 により、失敗時の結果は常に「`World` 不変かつ `Fail`」で�
 | D10 | `guest edit` で不正な設定を保存すると、ファイルは不正なまま残り、exit 125 になる | P1：元の内容に書き戻す | `misc.go:19` |
 | D12 | `EDITOR` に引数付きの値（例: `omarchy-launch-editor --inline`）が入っていると、値全体を 1 つの実行ファイル名として扱い、起動に失敗する | git などと同じ慣習に合わせ、`sh -c '$EDITOR "$@"' sh <path>` の形で起動する（`VISUAL` も考慮する） | `misc.go:38` の `exec.Command(editor, g.Path)` |
 | D11 | `allow` が 1 件でもあると、許可リスト方式になる（2 つの意味が重なっている） | 案 B：`default` を明示させる。省略して `allow` を書いた設定は、移行エラーにする | `network.go` の `nftRules` |
+| D13 | **（修正済み）** `start` / `restart` / `create` が成功を返した直後の数秒間、`antic run` が `vsock port 22: EOF`（exit 125）で失敗する。エージェントの Hello が返す `Ready`（`antic-ready.target`）が、セッションソケットの待ち受け開始より先に成立していた | `start` が成功したら、`run` は直ちに使える | `nix/module.nix` の `antic-ready.target` を `antic-session.socket` の後に並べ、`Wants` にも加えた。E2E の最初の実行で検出 |
+| D14 | **（修正済み）** 現在の HEAD では、標準構成のゲストをビルドできない。`4616b9b` でエージェントが `internal/domain`、`internal/tea`、`internal/types` を import するようになったが、`embed.go` の `//go:embed` が更新されていなかった | ビルドできる | `embed.go` に追記した。エージェントが import する全パッケージが埋め込まれているかを検査する `TestGuestFSHasAgentImports` を追加した |
+| D15 | **（修正済み）** `/nix` のないホストで rootless Nix を使っていると、ゲストを起動できない。共有ユニットとネットワークユニットが `Failed to set up mount namespacing: /nix: Permission denied` で失敗する（`b2012a0` 以降） | 起動できる | `Manager.confine` は、ホストに `/nix` がある場合にだけ Nix ルートを `/nix` に bind するよう改めた。`/nix` がなく、`/nix/store` にリンクされた libexec ヘルパーを使う構成は、別途の課題として残る |
+| D16 | 同じ mode で同じディレクトリを再度 `mount` すると、冪等にならず exit 125 になる。原因は D2 と同じで、パス表記の比較が誤っている | P4：何もせずに exit 0 | `edit.go:118` の `AddShare` |
+| D17 | 設定ファイルが読み込めないゲストは `guest rm` で削除できない。インスタンスの状態ディレクトリが残り、同じ名前で `create` すると「already exists」になる。さらに、壊れた設定ファイルが 1 つでもあると、`guest ls` が全体として失敗する | モデルの外の状態（手で壊した設定）だが、`rm` と `ls` は壊れた設定にも耐えるべき | `Manager.Get`、`guest ls`。E2E の片付けでは、最小限の有効な設定で上書きしてから `rm` することで回避している |
 
 ## 10. 実行基盤
 
@@ -467,3 +472,45 @@ antic が commit の途中で kill された場合に備え、`Undo` を各 comm
 - **`PhaseUncreated` には、コマンドだけでは到達できない。** 設定ファイルが手書きで置かれた、という初期状態からしか生じないためである。E2E では、事前準備（フィクスチャ）として TOML を直接置くことで、この状態を作る。
 - **`edit` の扱い**：実行中のゲストでマウント中の共有の mode を変える場合と、残留しているマウントと重なる場合は、再起動の経路に回す。CLI の `mount` で mode を変えようとした場合は、Reject のままにする（D2）。
 - **外部ゲストを名指しするコマンドは、モデルの外とする。** 名前を省略した結果、外部ゲストが選ばれる場合も含む。`Post` は `nil` を返し、生成器はこうしたコマンドを出さない。
+
+### 段階 2：E2E の最小版（完了）
+
+`e2e/`（build tag `e2e`、ファイルはすべて `_test.go`）の構成:
+
+| ファイル | 内容 |
+|---|---|
+| `harness_test.go` | フィクスチャ、`spec.Cmd` から argv と環境変数への変換、TOML の書き出し、片付け |
+| `observe_test.go` | α_obs と view の比較。O3 は vCPU 数のプローブだけを実装した |
+| `scenarios_test.go` | 1 ステップの検査（O0〜O3）とシナリオ |
+
+#### 実行方法
+
+```sh
+nix develop -c sh -c 'export CGO_ENABLED=0 && go build -o ~/.cache/antic-e2e/bin/antic ./cmd/antic &&
+  go test -c -tags e2e -o ~/.cache/antic-e2e/e2e.test ./e2e'
+cd e2e && ANTIC_E2E_BIN=~/.cache/antic-e2e/bin/antic ~/.cache/antic-e2e/e2e.test -test.v -test.timeout 3h
+```
+
+- バイナリは `nix develop` の中で静的にビルドする。テスト本体は、普段のシェル環境から実行する。
+  - このホストの rootless Nix では、`nix develop` は内部で別ストアを `/nix` に見せる名前空間の中で動く。その中からは Nix がゲストをビルドするためのサンドボックスを作れない。
+  - 動的リンクしたバイナリは、その名前空間の `/nix` を前提にするので、外では起動できない。
+- テスト対象の `antic` は `$HOME` 配下に置く。antic は自身のバイナリを、`PrivateTmp` を有効にした systemd ユニットに bind するためである。
+- 既知の差分シナリオは、最後のコマンドで差分を再現した場合にだけ skip する。それより前のステップで失敗した場合は、本物の失敗として扱う。差分が解消されたら fail させ、既知マーカーの削除を促す。
+
+#### 実行結果（2 回目、約 5.5 分）
+
+| 結果 | シナリオ |
+|---|---|
+| 仕様どおり（PASS） | lifecycle、shares、D2、D6 |
+| 既知の差分を再現（SKIP） | D3、D5、D7、D8、D9、D10、D11、D12、D16 |
+
+- 外部ゲスト（`dev`、`formal`）は、全ステップで不変だった。
+- E2E を動かす過程で、antic 本体に阻害要因が 3 件見つかった（D13、D14、D15）。いずれも修正済みである。
+- 実機の観測によって、コードを読んだ段階での予想（D2）を訂正した。新たな差分として D16 と D17 を記録した。
+
+#### 未実装（段階 6 で扱う）
+
+- O3 のプローブのうち、vCPU 以外のもの（パッケージ、マウントと mode、保護パス、ネットワーク、ポート）
+- rapid による系列生成と縮小、txtar での回帰固定
+- D1（switch 失敗の再現に故障注入が要る）
+- D4（lifecycle モデル内部の問題で、E2E では観測できない）

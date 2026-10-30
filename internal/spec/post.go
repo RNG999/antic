@@ -135,11 +135,11 @@ func Post(w World, env Env, c Cmd) []Outcome {
 	case CmdCreate:
 		return postCreate(w, env, c)
 	case CmdApply:
-		return postApply(w, c)
+		return postApply(w, env, c)
 	case CmdInstall:
-		return postPackages(w, c.Target, c.Packages, true)
+		return postPackages(w, env, c.Target, c.Packages, true)
 	case CmdUninstall:
-		return postPackages(w, c.Target, c.Packages, false)
+		return postPackages(w, env, c.Target, c.Packages, false)
 	case CmdSet:
 		return postSet(w, env, c)
 	case CmdForward:
@@ -215,6 +215,9 @@ func postCreate(w World, env Env, c CmdCreate) []Outcome {
 			}
 			g = Guest{Name: name, Config: cfg}
 		}
+		if err := buildable(env, g.Config.Packages); err != nil {
+			return reject(err)
+		}
 		if busy(env, g.Config.Ports) {
 			return reject(errors.New("a forwarded host port is in use"))
 		}
@@ -222,13 +225,16 @@ func postCreate(w World, env Env, c CmdCreate) []Outcome {
 	})
 }
 
-func postApply(w World, c CmdApply) []Outcome {
+func postApply(w World, env Env, c CmdApply) []Outcome {
 	if w.external(c.Target) {
 		return nil
 	}
 	return fold(w, []string{c.Target}, func(w World, t string) step {
 		g, err := w.lookup(t)
 		if err != nil {
+			return reject(err)
+		}
+		if err := buildable(env, g.Config.Packages); err != nil {
 			return reject(err)
 		}
 		if g.Phase == PhaseUncreated {
@@ -238,7 +244,7 @@ func postApply(w World, c CmdApply) []Outcome {
 	})
 }
 
-func postPackages(w World, target string, items []string, add bool) []Outcome {
+func postPackages(w World, env Env, target string, items []string, add bool) []Outcome {
 	if w.external(target) {
 		return nil
 	}
@@ -264,6 +270,9 @@ func postPackages(w World, target string, items []string, add bool) []Outcome {
 		}
 		if slices.Equal(next.All(), g.Config.Packages.All()) && g.Phase != PhaseUncreated {
 			return step{w: w} // P4
+		}
+		if err := buildable(env, next); err != nil {
+			return reject(err)
 		}
 		g.Config.Packages = next
 		if g.Phase == PhaseUncreated {
@@ -601,10 +610,14 @@ func postEdit(w World, env Env, c CmdEdit) []Outcome {
 		case PhaseUncreated:
 			g.Config = cfg
 			return step{w: w.with(g)}
-		case PhaseOff:
+		case PhaseOff, PhaseRunning:
+			if err := buildable(env, cfg.Packages); err != nil {
+				return reject(err)
+			}
+		}
+		if g.Phase == PhaseOff {
 			g.Config = cfg
 			return step{w: w.with(g), risky: true}
-		case PhaseRunning:
 		}
 		// D9: a running guest takes the new config immediately.
 		ms, live := liveMounts(g, cfg.Shares)

@@ -1,10 +1,16 @@
 package nixbuild
 
 import (
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/RNG999/antic"
 )
 
 func TestBuiltinKeyOrderIndependence(t *testing.T) {
@@ -74,5 +80,46 @@ func TestCacheLifecycle(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("expected empty cache after RemoveCache, got %+v", entries)
+	}
+}
+
+// TestGuestFSHasAgentImports checks that the embedded guest flake source
+// contains every repository package antic-agent imports, directly or not;
+// otherwise building a built-in guest fails.
+func TestGuestFSHasAgentImports(t *testing.T) {
+	const module = "github.com/RNG999/antic/"
+	queue := []string{"cmd/antic-agent"}
+	seen := map[string]bool{}
+	for len(queue) > 0 {
+		dir := queue[0]
+		queue = queue[1:]
+		if seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		entries, err := fs.ReadDir(antic.GuestFS, dir)
+		if err != nil {
+			t.Errorf("package %s is imported by antic-agent but not embedded in antic.GuestFS (embed.go)", dir)
+			continue
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			src, err := fs.ReadFile(antic.GuestFS, dir+"/"+name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f, err := parser.ParseFile(token.NewFileSet(), name, src, parser.ImportsOnly)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, imp := range f.Imports {
+				if p := strings.Trim(imp.Path.Value, `"`); strings.HasPrefix(p, module) {
+					queue = append(queue, strings.TrimPrefix(p, module))
+				}
+			}
+		}
 	}
 }

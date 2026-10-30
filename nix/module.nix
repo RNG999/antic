@@ -186,11 +186,15 @@ in
     };
     systemd.services."antic-session@" = sessionService;
 
-    # Everything a session relies on: configured shares (fstab.extra).
-    # Sessions require it, so they never start without these.
+    # Everything a session relies on: configured shares (fstab.extra) and
+    # the session socket. Sessions require it, so they never start without
+    # these; the host treats the guest as ready (Hello) once it is reached,
+    # so a session connection right after "guest start" must find the socket
+    # listening.
     systemd.targets.antic-ready = {
       wantedBy = [ "multi-user.target" ];
-      after = [ "local-fs.target" "remote-fs.target" ];
+      wants = [ "antic-session.socket" ];
+      after = [ "local-fs.target" "remote-fs.target" "antic-session.socket" ];
     };
 
     systemd.services.antic-agent = {
