@@ -37,6 +37,7 @@ antic run formal -- z3 formal/cli_args.smt2
 - **Specification**: [`saga/Saga.tla`](./saga/Saga.tla): several antic processes run the command saga of `internal/tea/operation` on one guest under its lock; any process may crash (its flock is released, a journal survives).
 - **Configurations**: `SagaJournal.cfg` (P1 `Consistent` and `Termination` hold), `SagaNoJournal.cfg` and `SagaStaleRead.cfg` (TLC must find a P1 counterexample: without a journal a crash leaves mixed resources; planning from state read before taking the lock undoes another command's success).
 - **Runner**: [`internal/spec/refine/tla_test.go`](../internal/spec/refine/tla_test.go) runs all three and checks the verdicts.
+- **Unbounded proof (Z3 Spacer)**: [`internal/spec/refine/chc_test.go`](../internal/spec/refine/chc_test.go) encodes the journaling saga as Constrained Horn Clauses. Spacer finds an inductive invariant, so `Consistent` holds for any number of commands, crashes and processes (a process without the lock holds no state, so the lock holder represents them all). The variant without a journal is unsatisfiable, as TLC also finds. Liveness (`Termination`) is checked by TLC only.
 
 Both run in the dev shell (which provides `z3` and `tlc`):
 
