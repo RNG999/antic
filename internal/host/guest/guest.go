@@ -158,10 +158,14 @@ func (m *Manager) Get(name string) (*Guest, error) {
 	return &Guest{m: m, Cfg: c, Inst: inst, Created: ok}, nil
 }
 
-// All returns every configured guest.
+// All returns every configured guest whose config loads (the others are
+// in m.Config.Errors).
 func (m *Manager) All() ([]*Guest, error) {
 	var out []*Guest
 	for _, n := range m.Config.Names() {
+		if m.Config.Errors[n] != nil {
+			continue
+		}
 		g, err := m.Get(n)
 		if err != nil {
 			return nil, err
@@ -169,6 +173,19 @@ func (m *Manager) All() ([]*Guest, error) {
 		out = append(out, g)
 	}
 	return out, nil
+}
+
+// Broken returns guest name whose config file does not load, so that it
+// can still be stopped and removed (D17).
+func (m *Manager) Broken(name string) (*Guest, error) {
+	if m.Config.Errors[name] == nil {
+		return nil, fmt.Errorf("no such guest %q", name)
+	}
+	inst, ok, err := m.Dirs.Lookup(name)
+	if err != nil {
+		return nil, err
+	}
+	return &Guest{m: m, Cfg: &config.Guest{Name: name, Path: m.Config.GuestPath(name)}, Inst: inst, Created: ok}, nil
 }
 
 func (g *Guest) Name() string { return g.Cfg.Name }

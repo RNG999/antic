@@ -31,46 +31,28 @@ import (
 // atomic (a crash falls between effects). Mutants of the Go side check
 // that the comparison can fail.
 
-// The command every process runs: a config and package change on a running
-// guest, whose commit steps (WriteConfig, SetProfile, Switch) each move one
-// resource.
-func sagaOp() operation.Op {
-	return operation.Op{Kind: operation.OpChangeConfig, Phase: operation.GuestRunning,
-		Change: operation.Change{Config: operation.Changed, System: operation.Changed}}
-}
-
-func sagaPlan() []operation.Step {
-	m, _ := operation.Update(operation.Init(guest()), operation.MsgCommand{Op: sagaOp()})
-	return m.Plan.All()
-}
-
-// sagaResources are the resources the commit steps move, in plan order: the
-// model's Plan == [i \in 1..NRes |-> i] numbers them by position.
-func sagaResources() []operation.ResourceKind {
-	var out []operation.ResourceKind
-	for _, s := range sagaPlan() {
-		if s.Phase == operation.PhaseCommit {
-			out = append(out, s.Res.Kind)
-		}
+// The commands processes run, by plan length n (Saga.tla's PlanCmd chooses
+// 0..NRes commit steps): starting a running guest (none), stopping it
+// (StopVM), mounting a directory on it (WriteConfig, Hotplug), and a config
+// and package change (WriteConfig, SetProfile, Switch). The model numbers
+// a plan's resources by position, so the i-th commit step moves resource i.
+func sagaOps() []operation.Op {
+	added := types.BuildSet[domain.AbsPath, domain.AbsPath, domain.AbsPathOrder]([]domain.AbsPath{abs(dirA)})
+	running := func(k operation.OpKind, ch operation.Change) operation.Op {
+		return operation.Op{Kind: k, Phase: operation.GuestRunning, Change: ch}
 	}
-	return out
+	return []operation.Op{
+		running(operation.OpStart, operation.Change{}),
+		running(operation.OpStop, operation.Change{}),
+		running(operation.OpChangeConfig, operation.Change{Config: operation.Changed, Added: added}),
+		running(operation.OpChangeConfig, operation.Change{Config: operation.Changed, System: operation.Changed}),
+	}
 }
 
-// slot is the index of resource k in host.val; tlaRes is its number in the model.
-func slot(k operation.ResourceKind) int      { return slices.Index(sagaResources(), k) }
-func tlaRes(k operation.ResourceKind) string { return fmt.Sprint(slot(k) + 1) }
-
-// moves reports the resource and version an effect sets.
-func moves(e operation.Effect) (operation.ResourceKind, operation.Version, bool) {
-	switch e := e.(type) {
-	case operation.EffectWriteConfig:
-		return operation.ResConfig, e.To, true
-	case operation.EffectSetProfile:
-		return operation.ResProfile, e.To, true
-	case operation.EffectSwitch:
-		return operation.ResSystem, e.To, true
-	}
-	return 0, 0, false
+// planOf returns the saga's plan for op.
+func planOf(op operation.Op) operation.Model {
+	m, _ := operation.Update(operation.Init(guest()), operation.MsgCommand{Op: op})
+	return m
 }
 
 // The bounds of SagaJournal.cfg (checked against it by readTLCGraph).
@@ -81,34 +63,35 @@ const (
 	maxCrashes = 2
 )
 
-// firstRes is the slot of Saga.tla's Plan[1], the resource a command reads its base from.
-const firstRes = 0
+type versions [nRes]int
 
 // proc is one antic process; base and target are the concrete old and new
-// artifacts its shell holds (versions here).
+// artifacts its shell holds (versions here), plen its plan's length.
 type proc struct {
 	lock       bool // holds the guest's lock and has not reported
 	toPlan     bool // holds the lock, recovered, and has not planned yet
 	recovering bool
 	model      operation.Model
 	pending    operation.Effect // nil without a saga
-	base       int
+	base       versions
 	target     int
+	plen       int
 }
 
 type sagaJournal struct {
 	open    bool
-	base    int
+	plen    int // the command recorded (sagaOps()[plen])
+	base    versions
 	intents []domain.StepIndex
 }
 
 type host struct {
-	val     [nRes]int
+	val     versions
 	journal sagaJournal
 	procs   [nProcs]proc
 	cmds    int
 	crashes int
-	lastOk  int
+	lastOk  versions
 }
 
 func (h host) clone() host {
@@ -118,9 +101,9 @@ func (h host) clone() host {
 
 func (h host) key() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%v %+v %d %d %d", h.val, h.journal, h.cmds, h.crashes, h.lastOk)
+	fmt.Fprintf(&b, "%v %+v %d %d %v", h.val, h.journal, h.cmds, h.crashes, h.lastOk)
 	for _, p := range h.procs {
-		fmt.Fprintf(&b, "|%v %v %v %d %d %d %d %s %#v", p.lock, p.toPlan, p.recovering, p.base, p.target,
+		fmt.Fprintf(&b, "|%v %v %v %v %d %d %d %d %s %#v", p.lock, p.toPlan, p.recovering, p.base, p.target, p.plen,
 			p.model.Stage, p.model.Pos.Get(), p.model.Reason.Get(), p.pending)
 	}
 	return b.String()
@@ -170,9 +153,10 @@ func update(t *testing.T, p *proc, msg operation.Msg) {
 	p.model, p.pending = next, effects[0]
 }
 
-// action is the mapping table from a Go transition (the stage whose effect
-// ran and its outcome) to the TLA+ action it implements.
-func action(stage operation.Stage, ok bool) string {
+// sagaAction is the mapping table from a Go transition (the stage whose
+// effect ran and its outcome) to the TLA+ action it implements ("" for a
+// stutter). The shell's traces are checked through it too.
+func sagaAction(stage operation.Stage, ok bool) string {
 	switch stage {
 	case operation.StagePrepare:
 		if !ok {
@@ -220,7 +204,14 @@ func action(stage operation.Stage, ok bool) string {
 	return "?"
 }
 
-// execute runs process i's pending effect with the given outcome on h.
+// slotAt is the resource (0-based) the commit step at pos of m moves.
+func slotAt(m operation.Model, pos int) int { return pos - firstCommitOf(m) }
+
+// execute runs process i's pending effect with the given outcome on h: a
+// forward commit step sets its resource to the command's target, an
+// inverse one back to the version the command (or the journal) started
+// from. operation.StepValid has checked that each effect is the planned
+// step or its inverse.
 func execute(t *testing.T, h host, i int, ok bool, mut mutant) transition {
 	t.Helper()
 	h = h.clone()
@@ -230,43 +221,44 @@ func execute(t *testing.T, h host, i int, ok bool, mut mutant) transition {
 		h.procs[i] = proc{base: p.base, target: p.target}
 		return transition{"Release", h}
 	}
-	act := action(stage, ok)
-	undo := stage == operation.StageCompensate || stage == operation.StageRecover
+	act := sagaAction(stage, ok)
+	pos := p.model.Pos.Get()
 	if ok {
-		if r, v, ok := moves(p.pending); ok {
-			if mut == mutUndoToNew && undo {
-				v = operation.VersionNew
-			}
+		switch stage {
+		case operation.StageCommit:
+			h.val[slotAt(p.model, pos)] = p.target
+		case operation.StageCompensate, operation.StageRecover:
+			r := slotAt(p.model, pos-1)
 			switch {
-			case v == operation.VersionNew:
-				h.val[slot(r)] = p.target
+			case mut == mutUndoToNew:
+				h.val[r] = p.target
 			case p.recovering:
-				h.val[slot(r)] = h.journal.base
+				h.val[r] = h.journal.base[r]
 			default:
-				h.val[slot(r)] = p.base
+				h.val[r] = p.base[r]
 			}
-		}
-		switch e := p.pending.(type) {
-		case operation.EffectWriteConfig, operation.EffectSetProfile, operation.EffectSwitch:
-		case operation.EffectJournalBegin:
+		case operation.StageBegin:
 			if mut != mutNoBegin {
-				h.journal = sagaJournal{open: true, base: p.base}
+				h.journal = sagaJournal{open: true, plen: p.plen, base: p.base}
 			}
-		case operation.EffectJournalIntent:
+		case operation.StageIntent:
 			if h.journal.open && mut != mutNoIntent {
-				h.journal.intents = append(h.journal.intents, e.Pos)
+				h.journal.intents = append(h.journal.intents, p.model.Pos)
 			}
-		case operation.EffectJournalClear:
+		case operation.StageClose, operation.StageAbort, operation.StageRecoverClose:
 			h.journal = sagaJournal{}
 			if stage == operation.StageClose && mut != mutSucceedEarly {
-				h.lastOk = p.target
+				for r := range p.plen {
+					h.lastOk[r] = p.target
+				}
 			}
-		case operation.EffectValidate, operation.EffectBuild, operation.EffectGC:
-		default:
-			t.Fatalf("unexpected effect %T", e)
+		case operation.StageIdle, operation.StagePrepare, operation.StageFinalize, operation.StageDone,
+			operation.StageFailed, operation.StageRecovered, operation.StageBroken:
 		}
-		if mut == mutSucceedEarly && stage == operation.StageCommit && p.model.Pos.Get()+1 == lastCommit(p.model) {
-			h.lastOk = p.target
+		if mut == mutSucceedEarly && stage == operation.StageCommit && slotAt(p.model, pos)+1 == p.plen {
+			for r := range p.plen {
+				h.lastOk[r] = p.target
+			}
 		}
 	}
 	status := operation.ResultOk
@@ -279,16 +271,6 @@ func execute(t *testing.T, h host, i int, ok bool, mut mutant) transition {
 		h.procs[i] = proc{lock: true, toPlan: true, base: p.base, target: p.target}
 	}
 	return transition{act, h}
-}
-
-func lastCommit(m operation.Model) int {
-	n := 0
-	for _, s := range m.Plan.All() {
-		if s.Phase == operation.PhaseCommit {
-			n = s.Index.Get() + 1
-		}
-	}
-	return n
 }
 
 // successors enumerates every transition of h.
@@ -316,21 +298,23 @@ func successors(t *testing.T, h host, mut mutant) []transition {
 					last = types.Some(intents[len(intents)-1])
 				}
 				q.recovering, q.model = true, operation.Init(guest())
-				update(t, q, operation.MsgRecover{Op: sagaOp(), Last: last})
+				update(t, q, operation.MsgRecover{Op: sagaOps()[n.journal.plen], Last: last})
 			} else {
 				q.toPlan = true
 			}
 			out = append(out, transition{"Acquire", n})
 		case p.toPlan:
-			n := h.clone()
-			q := &n.procs[i]
-			q.toPlan = false
-			if mut != mutStaleBase {
-				q.base = n.val[firstRes]
+			for plen, op := range sagaOps() {
+				n := h.clone()
+				q := &n.procs[i]
+				q.toPlan, q.plen = false, plen
+				if mut != mutStaleBase {
+					q.base = n.val
+				}
+				q.model = operation.Init(guest())
+				update(t, q, operation.MsgCommand{Op: op})
+				out = append(out, transition{"PlanCmd", n})
 			}
-			q.model = operation.Init(guest())
-			update(t, q, operation.MsgCommand{Op: sagaOp()})
-			out = append(out, transition{"PlanCmd", n})
 		default:
 			out = append(out, execute(t, h, i, true, mut))
 			_, report := p.pending.(operation.EffectReport)
@@ -379,12 +363,20 @@ func tlaState(vars map[string]string) string {
 	return strings.Join(fs, " ")
 }
 
+func tlaVersions(v versions) string {
+	var xs []string
+	for _, x := range v {
+		xs = append(xs, fmt.Sprint(x))
+	}
+	return tlaSeq(xs)
+}
+
+// resSeq is the model's resources of the commit steps at positions [from, to).
 func resSeq(m operation.Model, from, to int) []string {
 	var out []string
-	steps := m.Plan.All()
 	for i := from; i < to; i++ {
-		if steps[i].Phase == operation.PhaseCommit {
-			out = append(out, tlaRes(steps[i].Res.Kind))
+		if m.Plan.All()[i].Phase == operation.PhaseCommit {
+			out = append(out, fmt.Sprint(slotAt(m, i)+1))
 		}
 	}
 	return out
@@ -411,15 +403,16 @@ func procList() string {
 
 // alpha is the abstraction function from the Go host to a Saga.tla state.
 func alpha(h host) string {
-	var names, pcs, bases, targets, todos, dones []string
+	var names, pcs, bases, targets, todos, dones, plens []string
 	lock := "None"
 	for i, p := range h.procs {
 		names = append(names, procName(i))
 		if p.lock {
 			lock = procName(i)
 		}
-		bases = append(bases, fmt.Sprint(p.base))
+		bases = append(bases, tlaVersions(p.base))
 		targets = append(targets, fmt.Sprint(p.target))
+		plens = append(plens, fmt.Sprint(p.plen))
 		m := p.model
 		pos, first := m.Pos.Get(), firstCommitOf(m)
 		pc, todo, done := "idle", []string{}, []string{}
@@ -448,20 +441,44 @@ func alpha(h host) string {
 	jr := "None"
 	if h.journal.open {
 		var is []string
+		m := planOf(sagaOps()[h.journal.plen])
 		for _, pos := range h.journal.intents {
-			is = append(is, tlaRes(sagaPlan()[pos.Get()].Res.Kind))
+			is = append(is, fmt.Sprint(slotAt(m, pos.Get())+1))
 		}
-		jr = tlaRec(map[string]string{"base": fmt.Sprint(h.journal.base), "intents": tlaSeq(is)})
-	}
-	var val []string
-	for _, v := range h.val {
-		val = append(val, fmt.Sprint(v))
+		jr = tlaRec(map[string]string{"base": tlaVersions(h.journal.base), "intents": tlaSeq(is)})
 	}
 	return tlaState(map[string]string{
-		"val": tlaSeq(val), "lock": lock, "pc": tlaFn(names, pcs), "base": tlaFn(names, bases),
+		"val": tlaVersions(h.val), "lock": lock, "pc": tlaFn(names, pcs), "base": tlaFn(names, bases),
 		"target": tlaFn(names, targets), "todo": tlaFn(names, todos), "done": tlaFn(names, dones),
-		"journal": jr, "cmds": fmt.Sprint(h.cmds), "crashes": fmt.Sprint(h.crashes), "lastOk": fmt.Sprint(h.lastOk),
+		"plen": tlaFn(names, plens), "journal": jr, "cmds": fmt.Sprint(h.cmds), "crashes": fmt.Sprint(h.crashes),
+		"lastOk": tlaVersions(h.lastOk),
 	})
+}
+
+// checkHarnessBounds checks that cfg sets the bounds the replay harness runs.
+func checkHarnessBounds(t *testing.T, cfg string) {
+	t.Helper()
+	raw, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{
+		"NRes": fmt.Sprint(nRes), "MaxCmds": fmt.Sprint(maxCmds), "MaxCrashes": fmt.Sprint(maxCrashes),
+		"Journaling": "TRUE", "PlanUnderLock": "TRUE",
+	} {
+		if !strings.Contains(string(raw), name+" = "+want+"\n") {
+			t.Fatalf("%s must set %s = %s, as the harness does", cfg, name, want)
+		}
+	}
+	for n, op := range sagaOps() {
+		m := planOf(op)
+		if got := len(resSeq(m, 0, m.Plan.Len())); got != n {
+			t.Fatalf("sagaOps()[%d] plans %d commit steps", n, got)
+		}
+	}
+	if len(sagaOps()) != nRes+1 || !strings.Contains(string(raw), fmt.Sprintf("Procs = {%s}\n", procList())) {
+		t.Fatalf("%s: the harness runs %d processes with plans of 0..%d steps", cfg, nProcs, len(sagaOps())-1)
+	}
 }
 
 // tlcGraph is a TLC state graph: canonical states and labelled edges.
@@ -637,20 +654,8 @@ func readTLCGraph(t *testing.T, cfg string) tlcGraph {
 	if _, err := os.Stat(filepath.Join(dir, "Saga.tla")); err != nil {
 		t.Skip("formal/saga is not in this source tree")
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, cfg))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name, want := range map[string]string{
-		"NRes": fmt.Sprint(nRes), "MaxCmds": fmt.Sprint(maxCmds), "MaxCrashes": fmt.Sprint(maxCrashes),
-		"Journaling": "TRUE", "PlanUnderLock": "TRUE",
-	} {
-		if !strings.Contains(string(raw), name+" = "+want+"\n") {
-			t.Fatalf("%s must set %s = %s, as the harness does", cfg, name, want)
-		}
-	}
-	if len(sagaResources()) != nRes || !strings.Contains(string(raw), fmt.Sprintf("Procs = {%s}\n", procList())) {
-		t.Fatalf("%s: the harness runs %d processes over %d resources", cfg, nProcs, len(sagaResources()))
+	if cfg == "SagaJournal.cfg" {
+		checkHarnessBounds(t, filepath.Join(dir, cfg))
 	}
 	tmp := t.TempDir()
 	dot := filepath.Join(tmp, "graph.dot")

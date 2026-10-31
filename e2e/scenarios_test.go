@@ -4,6 +4,8 @@ package e2e
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -155,7 +157,7 @@ func scenarios() []scenario {
 			},
 		},
 		{
-			name: "D3 create flags on an existing config",
+			name:  "D3 create flags on an existing config",
 			setup: func(h *harness) { h.fixtureConfig(b, spec.RawConfig{Packages: []string{"git"}, Memory: "1G"}) },
 			cmds: func(*harness) []spec.Cmd {
 				return []spec.Cmd{spec.CmdCreate{Name: b, Packages: []string{"jq"}}}
@@ -207,7 +209,7 @@ func scenarios() []scenario {
 			},
 		},
 		{
-			name:  "D8 multi-guest start stops at the first failure",
+			name: "D8 multi-guest start stops at the first failure",
 			cmds: func(*harness) []spec.Cmd {
 				return []spec.Cmd{
 					create(a),
@@ -219,7 +221,7 @@ func scenarios() []scenario {
 			},
 		},
 		{
-			name:  "D9 edit of a running guest",
+			name: "D9 edit of a running guest",
 			cmds: func(*harness) []spec.Cmd {
 				return []spec.Cmd{
 					create(a),
@@ -228,7 +230,7 @@ func scenarios() []scenario {
 			},
 		},
 		{
-			name:  "D10 invalid edit",
+			name: "D10 invalid edit",
 			cmds: func(*harness) []spec.Cmd {
 				return []spec.Cmd{
 					create(a),
@@ -358,4 +360,108 @@ func TestE2ECrashRecovery(t *testing.T) {
 		})
 	}
 	h.t = t
+}
+
+// TestE2EFaultInjection fails one effect of a command's saga
+// (ANTIC_SAGA_FAIL) on a running guest and checks P1 on the real host: the
+// command exits 125 and the guest is observed exactly as before, including
+// the system it runs and the system its profile installs (D1).
+func TestE2EFaultInjection(t *testing.T) {
+	h := newHarness(t)
+	base := h.model
+	for _, c := range []struct {
+		name string
+		cmd  func(*harness) spec.Cmd
+		fail string
+	}{
+		{"install whose switch fails (D1)", func(*harness) spec.Cmd {
+			return spec.CmdInstall{Target: a, Packages: []string{"jq"}}
+		}, "Switch"},
+		{"set whose restart fails to boot", func(*harness) spec.Cmd {
+			return spec.CmdSet{Target: a, CPUs: types.Some(3)}
+		}, "StartVM"},
+		{"mount whose hot-plug fails", func(h *harness) spec.Cmd {
+			return spec.CmdMount{Target: a, Dirs: []string{h.path("A")}}
+		}, "Hotplug"},
+		{"forward whose journal cannot be cleared", func(*harness) spec.Cmd {
+			return spec.CmdForward{Target: a, Ports: []string{"8001"}}
+		}, "JournalClear"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h.t = t
+			h.cleanup()
+			h.model = base
+			defer h.cleanup()
+			if msg := h.step(create(a)); msg != "" {
+				t.Fatal(msg)
+			}
+			before, err := h.show(a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			args, env := h.render(c.cmd(h))
+			_, code, stderr := h.antic(append(env, "ANTIC_SAGA_FAIL="+c.fail), args...)
+			if code != 125 || !strings.Contains(stderr, "injected failure") {
+				t.Fatalf("exit %d, want 125 with the injected failure\nstderr: %s", code, stderr)
+			}
+			obs, err := h.observe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := diff(h.model, obs); d != "" {
+				t.Fatalf("the failed command changed the guest (P1):\n%s\nstderr: %s", d, stderr)
+			}
+			after, err := h.show(a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.System != before.System {
+				t.Fatalf("the running system changed from %s to %s", before.System, after.System)
+			}
+			if msg := h.step(spec.CmdStop{Names: []string{a}}); msg != "" {
+				t.Fatal(msg)
+			}
+			if stopped, err := h.show(a); err != nil || stopped.System != before.System {
+				t.Fatalf("the installed profile is %s, not %s (D1): %v", stopped.System, before.System, err)
+			}
+			// The command works without the injected failure.
+			if msg := h.step(spec.CmdStart{Names: []string{a}}); msg != "" {
+				t.Fatal(msg)
+			}
+			if msg := h.step(c.cmd(h)); msg != "" {
+				t.Fatal(msg)
+			}
+		})
+	}
+	h.t = t
+}
+
+// TestE2EBrokenConfig: a running guest whose config file no longer loads
+// is listed (with its error) by "guest ls" and removed by "guest rm",
+// after which its name can be created again (D17; outside the model).
+func TestE2EBrokenConfig(t *testing.T) {
+	h := newHarness(t)
+	base := h.model
+	defer h.cleanup()
+	if msg := h.step(create(a)); msg != "" {
+		t.Fatal(msg)
+	}
+	path := filepath.Join(h.cfg, a+".toml")
+	if err := os.WriteFile(path, []byte("packages = [\"git\"]\n[spec]\ncpus = \"many\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, code, stderr := h.antic(nil, "guest", "ls")
+	if code != 0 || !strings.Contains(out, a) || !strings.Contains(out, "error") {
+		t.Fatalf("guest ls with a broken config: exit %d\n%s%s", code, out, stderr)
+	}
+	if _, code, stderr := h.antic(nil, "guest", "rm", a, "-y"); code != 0 {
+		t.Fatalf("guest rm of a broken config: exit %d\n%s", code, stderr)
+	}
+	if out, _, _ := h.antic(nil, "guest", "ls", "-q"); strings.Contains(out, a) {
+		t.Fatalf("guest %s is still listed after rm:\n%s", a, out)
+	}
+	h.model = base
+	if msg := h.step(create(a)); msg != "" {
+		t.Fatalf("creating the name again: %s", msg)
+	}
 }

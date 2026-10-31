@@ -30,6 +30,7 @@ func TestTLCSagaModels(t *testing.T) {
 		want string
 	}{
 		{"SagaJournal.cfg", "Model checking completed. No error has been found."},
+		{"SagaTrace.cfg", "Model checking completed. No error has been found."},
 		{"SagaNoJournal.cfg", "Invariant Consistent is violated."},
 		{"SagaStaleRead.cfg", "Invariant Consistent is violated."},
 	}

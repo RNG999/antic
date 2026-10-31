@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/RNG999/antic/internal/domain"
@@ -150,12 +151,51 @@ func (g *Guest) readJournal() (journalRecord, bool, error) {
 	return r, true, nil
 }
 
+// traceEnv names an NDJSON file the shell appends its saga events to:
+// taking and releasing the guest's lock, planning (with the plan's number
+// of commit steps), and each executed effect's stage and outcome.
+// internal/spec/refine checks these traces against formal/saga/Saga.tla.
+const traceEnv = "ANTIC_SAGA_TRACE"
+
+// traceEvent is one line of a saga trace.
+type traceEvent struct {
+	PID     int             `json:"pid"`
+	Guest   string          `json:"guest"`
+	Event   string          `json:"event"` // acquire, plan, step, release
+	Commits int             `json:"commits,omitempty"`
+	Stage   operation.Stage `json:"stage,omitempty"`
+	OK      bool            `json:"ok,omitempty"`
+}
+
+func (g *Guest) trace(ev traceEvent) {
+	path := os.Getenv(traceEnv)
+	if path == "" {
+		return
+	}
+	ev.PID, ev.Guest = os.Getpid(), g.Name()
+	b, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	f.Write(append(b, '\n')) // one write: lines of concurrent processes do not mix
+}
+
 // lockAndRecover takes the guest's lock and, if a crashed command left a
 // journal, undoes that command before the caller plans its own.
 func (g *Guest) lockAndRecover(ctx context.Context) (func(), error) {
-	unlock, err := g.lock()
+	locked, err := g.lock()
 	if err != nil {
 		return nil, err
+	}
+	g.trace(traceEvent{Event: "acquire"})
+	unlock := func() {
+		g.trace(traceEvent{Event: "release"})
+		locked()
 	}
 	r, pending, err := g.readJournal()
 	if err == nil && pending {
@@ -197,6 +237,28 @@ func (g *Guest) recoverJournal(ctx context.Context, r journalRecord) error {
 // killed process would, so that the next command must recover.
 const crashAfterEnv = "ANTIC_SAGA_CRASH_AFTER"
 
+// failEnv is the other E2E hook: with ANTIC_SAGA_FAIL=NAME[:n] the n-th
+// effect (default the first) of type EffectNAME fails without running, so
+// that the saga must undo what it committed.
+const failEnv = "ANTIC_SAGA_FAIL"
+
+// injectedFailure reports whether the effect is the one failEnv names;
+// seen counts the effects of each type so far.
+func injectedFailure(eff operation.Effect, seen map[string]int) bool {
+	spec := os.Getenv(failEnv)
+	if spec == "" {
+		return false
+	}
+	name, nth, _ := strings.Cut(spec, ":")
+	n, err := strconv.Atoi(nth)
+	if err != nil || n < 1 {
+		n = 1
+	}
+	typ := strings.TrimPrefix(fmt.Sprintf("%T", eff), "operation.Effect")
+	seen[typ]++
+	return typ == name && seen[typ] == n
+}
+
 // runSaga feeds msg to a new saga and executes its effects until it reports.
 func (g *Guest) runSaga(ctx context.Context, tx *txn, msg operation.Msg) error {
 	name, err := domain.ParseGuestName(g.Name())
@@ -206,10 +268,20 @@ func (g *Guest) runSaga(ctx context.Context, tx *txn, msg operation.Msg) error {
 	m := operation.Init(name)
 	var jr journalRecord
 	crashAfter, _ := strconv.Atoi(os.Getenv(crashAfterEnv))
+	seen := map[string]int{}
 	for executed := 0; ; executed++ {
 		next, effects := operation.Update(m, msg)
 		if len(effects) != 1 {
 			return fmt.Errorf("internal error: saga stalled in stage %d", next.Stage)
+		}
+		if _, command := msg.(operation.MsgCommand); command && m.Stage == operation.StageIdle {
+			commits := 0
+			for _, s := range next.Plan.All() {
+				if s.Phase == operation.PhaseCommit {
+					commits++
+				}
+			}
+			g.trace(traceEvent{Event: "plan", Commits: commits})
 		}
 		if rep, ok := effects[0].(operation.EffectReport); ok {
 			switch rep.Status {
@@ -222,7 +294,13 @@ func (g *Guest) runSaga(ctx context.Context, tx *txn, msg operation.Msg) error {
 			return errors.New(rep.Reason.Get())
 		}
 		m = next
-		err := g.execute(ctx, tx, &jr, effects[0])
+		var err error
+		if injectedFailure(effects[0], seen) {
+			err = fmt.Errorf("injected failure (%s)", failEnv)
+		} else {
+			err = g.execute(ctx, tx, &jr, effects[0])
+		}
+		g.trace(traceEvent{Event: "step", Stage: m.Stage, OK: err == nil})
 		if crashAfter > 0 && executed+1 == crashAfter {
 			os.Exit(137) // as if killed (the kernel releases the lock)
 		}

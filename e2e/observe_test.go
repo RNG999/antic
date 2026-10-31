@@ -120,6 +120,7 @@ type lsEntry struct {
 
 type showInfo struct {
 	State  string `json:"state"`
+	System string `json:"system"`
 	Shares []struct {
 		Path     string `json:"path"`
 		ReadOnly bool   `json:"read_only"`

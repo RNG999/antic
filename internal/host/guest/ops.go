@@ -18,91 +18,8 @@ import (
 	"github.com/RNG999/antic/internal/host/share"
 	"github.com/RNG999/antic/internal/host/transport"
 	"github.com/RNG999/antic/internal/proto"
-	"github.com/RNG999/antic/internal/tea/lifecycle"
 	"github.com/RNG999/antic/internal/tea/operation"
-	"github.com/RNG999/antic/internal/types"
 )
-
-// lifecycleModel reconstructs the pure TEA lifecycle.Model from the host's
-// current configuration, instance store, and boot state.
-func (g *Guest) lifecycleModel(ctx context.Context) (lifecycle.Model, *boot) {
-	name, _ := domain.ParseGuestName(g.Name())
-	m := lifecycle.Init(name)
-	var bt *boot
-	if g.Created {
-		installed, _ := g.store().Current()
-		if instPath, err := domain.ParseStorePath(installed); err == nil {
-			m.Installed = types.Some(types.NewIndexed[domain.StorePath, domain.InstalledState](instPath))
-			if b, err := g.readBoot(ctx); err == nil {
-				if bootSys, err := domain.ParseStorePath(b.System); err == nil {
-					bt = b
-					m.Boot = types.Some(lifecycle.BootedVM{
-						System:    bootSys,
-						KernelSig: g.kernelSignature(b.System),
-					})
-				}
-			}
-		}
-	}
-
-	byPath := map[string]lifecycle.Share{}
-	for _, s := range g.Cfg.Shares {
-		p := s.Path
-		if real, err := filepath.EvalSymlinks(p); err == nil {
-			p = real
-		}
-		absPath, err := domain.ParseAbsPath(p)
-		if err != nil {
-			continue
-		}
-		tag, err := domain.ParseShareTag(share.Tag(p))
-		if err != nil {
-			continue
-		}
-		byPath[p] = lifecycle.Share{
-			Path:     absPath,
-			Tag:      tag,
-			Mount:    lifecycle.MountNone,
-			ReadOnly: s.ReadOnly,
-		}
-	}
-	if bt != nil {
-		for _, bs := range bt.Shares {
-			absPath, err := domain.ParseAbsPath(bs.Path)
-			if err != nil {
-				continue
-			}
-			rawTag := bs.Tag
-			if rawTag == "" {
-				rawTag = share.Tag(bs.Path)
-			}
-			tag, err := domain.ParseShareTag(rawTag)
-			if err != nil {
-				continue
-			}
-			sh, ok := byPath[bs.Path]
-			if !ok {
-				sh = lifecycle.Share{
-					Path:     absPath,
-					Tag:      tag,
-					ReadOnly: bs.ReadOnly,
-				}
-			}
-			if bs.Runtime {
-				sh.Mount = lifecycle.MountRuntime
-			} else {
-				sh.Mount = lifecycle.MountBoot
-			}
-			byPath[bs.Path] = sh
-		}
-	}
-	var shares []lifecycle.Share
-	for _, sh := range byPath {
-		shares = append(shares, sh)
-	}
-	m.Shares = types.BuildSet[lifecycle.Share, domain.AbsPath, lifecycle.ShareByPath](shares)
-	return m, bt
-}
 
 // kernelSignature returns a deterministic signature of a NixOS system's kernel,
 // initrd, and kernel-params so the pure TEA model can compare kernel identity.
@@ -286,7 +203,9 @@ func (g *Guest) Remove(ctx context.Context) error {
 		return err
 	}
 	defer unlock()
-	draft, err := config.ReadDraft(g.Cfg, g.m.Dirs.Home)
+	// Removing needs the file's bytes (for the journal), not its meaning:
+	// a guest whose config does not load can be removed too (D17).
+	draft, err := config.ReadRawDraft(g.Cfg.Path, g.Name(), g.m.Dirs.Home)
 	if err != nil {
 		return err
 	}
@@ -381,17 +300,32 @@ type ShareInfo struct {
 	Mounted  bool   `json:"mounted"`
 }
 
-// Shares lists configured and runtime shares.
+// Shares lists the configured shares and the running guest's mounts, by
+// resolved path: a share removed from the config that stays mounted until
+// the guest restarts is listed as mounted.
 func (g *Guest) Shares(ctx context.Context) []ShareInfo {
-	m, _ := g.lifecycleModel(ctx)
-	var out []ShareInfo
-	for _, s := range m.Shares.All() {
-		out = append(out, ShareInfo{
-			Path:     s.Path.Get(),
-			ReadOnly: s.ReadOnly,
-			Mounted:  s.Mounted(),
-		})
+	byPath := map[string]ShareInfo{}
+	for _, s := range g.Cfg.Shares {
+		p := realPath(s.Path)
+		byPath[p] = ShareInfo{Path: p, ReadOnly: s.ReadOnly}
 	}
+	if g.Created {
+		if bt, err := g.readBoot(ctx); err == nil {
+			for _, m := range bt.Shares {
+				info, ok := byPath[m.Path]
+				if !ok {
+					info = ShareInfo{Path: m.Path, ReadOnly: m.ReadOnly}
+				}
+				info.Mounted = true
+				byPath[m.Path] = info
+			}
+		}
+	}
+	out := make([]ShareInfo, 0, len(byPath))
+	for _, info := range byPath {
+		out = append(out, info)
+	}
+	slices.SortFunc(out, func(a, b ShareInfo) int { return strings.Compare(a.Path, b.Path) })
 	return out
 }
 
@@ -421,7 +355,7 @@ func (g *Guest) planChange(ctx context.Context, draft config.Draft) (*txn, *boot
 		}
 	}
 	tx.op.Runtime, _ = pathSet(runtime)
-	if config.NeedsRestart(draft.Before, draft.After) {
+	if draft.Before != nil && draft.After != nil && config.NeedsRestart(draft.Before, draft.After) {
 		tx.op.Change.Restart = operation.Changed
 	}
 	return tx, bt
@@ -718,7 +652,7 @@ type Info struct {
 func (g *Guest) Inspect(ctx context.Context) (Info, error) {
 	i := Info{
 		Name: g.Name(), ID: g.Inst.ID,
-		Description: g.Cfg.Description, State: lifecycle.PhaseUncreated.String(),
+		Description: g.Cfg.Description, State: "-",
 		OS: g.osDesc(), Packages: g.Cfg.Packages,
 		CPUs: g.Cfg.CPUs, Memory: g.Cfg.Memory, Network: g.Cfg.Network.Mode, Ports: g.Cfg.Ports,
 		Shares: g.Shares(ctx),
@@ -726,14 +660,14 @@ func (g *Guest) Inspect(ctx context.Context) (Info, error) {
 	if !g.Created {
 		return i, nil
 	}
-	i.State = lifecycle.PhaseStopped.String()
+	i.State = "stopped"
 	i.System, _ = g.store().Current()
 	st, err := g.m.Units.State(ctx, g.vmUnit())
 	if err != nil {
 		return i, err
 	}
 	if st.Running() {
-		i.State, i.Since = lifecycle.PhaseRunning.String(), &st.Since
+		i.State, i.Since = "running", &st.Since
 		if bt, err := g.readBoot(ctx); err == nil {
 			i.System = bt.System
 		}

@@ -289,6 +289,9 @@ func (a *app) guestRm() *cobra.Command {
 					return err
 				}
 				g, err := a.mgr.Get(n)
+				if err != nil && a.cfg.Errors[n] != nil {
+					g, err = a.mgr.Broken(n)
+				}
 				if err != nil {
 					return err
 				}

@@ -325,7 +325,8 @@ P1 により、失敗時の結果は常に「`World` 不変かつ `Fail`」で�
 | D14 | **（修正済み）** 現在の HEAD では、標準構成のゲストをビルドできない。`4616b9b` でエージェントが `internal/domain`、`internal/tea`、`internal/types` を import するようになったが、`embed.go` の `//go:embed` が更新されていなかった | ビルドできる | `embed.go` に追記した。エージェントが import する全パッケージが埋め込まれているかを検査する `TestGuestFSHasAgentImports` を追加した |
 | D15 | **（修正済み）** `/nix` のないホストで rootless Nix を使っていると、ゲストを起動できない。共有ユニットとネットワークユニットが `Failed to set up mount namespacing: /nix: Permission denied` で失敗する（`b2012a0` 以降） | 起動できる | `Manager.confine` は、ホストに `/nix` がある場合にだけ Nix ルートを `/nix` に bind するよう改めた。`/nix` がなく、`/nix/store` にリンクされた libexec ヘルパーを使う構成は、別途の課題として残る |
 | D16 | 同じ mode で同じディレクトリを再度 `mount` すると、冪等にならず exit 125 になる。原因は D2 と同じで、パス表記の比較が誤っている | P4：何もせずに exit 0 | `edit.go:118` の `AddShare` |
-| D17 | 設定ファイルが読み込めないゲストは `guest rm` で削除できない。インスタンスの状態ディレクトリが残り、同じ名前で `create` すると「already exists」になる。さらに、壊れた設定ファイルが 1 つでもあると、`guest ls` が全体として失敗する | モデルの外の状態（手で壊した設定）だが、`rm` と `ls` は壊れた設定にも耐えるべき | `Manager.Get`、`guest ls`。E2E の片付けでは、最小限の有効な設定で上書きしてから `rm` することで回避している |
+| D17 | **（修正済み）** 設定ファイルが読み込めないゲストは `guest rm` で削除できない。インスタンスの状態ディレクトリが残り、同じ名前で `create` すると「already exists」になる。さらに、壊れた設定ファイルが 1 つでもあると、`guest ls` が全体として失敗する | モデルの外の状態（手で壊した設定）だが、`rm` と `ls` は壊れた設定にも耐えるべき | `Manager.Get`、`guest ls`。E2E の片付けでは、最小限の有効な設定で上書きしてから `rm` することで回避している |
+| D18 | **（修正済み）** PTY なしの `antic run` が、ゲストの起動直後などに exit 0 のまま出力を失うことがある（E2E の障害注入テストで、CPU 数プローブが空文字列を返して検出） | コマンドの出力は欠けない（P3） | ゲスト側の `internal/guest/session` が、出力のパイプを読み切る前に `cmd.Wait` を呼んでいた。`os/exec` の規約では、Wait はパイプを閉じるので未読の出力を失う。PTY なしの場合は、読み切ってから Wait するように改めた |
 
 ## 10. 実行基盤
 
@@ -664,10 +665,15 @@ E2E には故障注入のフックを置いた。`ANTIC_SAGA_CRASH_AFTER=k` を�
 
 注記：B〜E は同じファイル群にまたがって変更したため、E2E は手順ごとではなく、B〜E をまとめて 1 回実行した。
 
-#### 残り
+#### 段階 5 の残りの実施（完了）
 
-- D1 は、switch の失敗を実機で再現するための故障注入が要る。`ANTIC_SAGA_CRASH_AFTER` と同じ形で effect の失敗を注入するフックを足せば検査できる。
-- 推奨 4（殻のトレースを TLC で照合する）はまだ入れていない。今回は、クラッシュの注入による実機での P1 検査で代えた。
-- `lifecycle` パッケージは、表示用の `Shares` / `Inspect` でしか使わなくなった。D4 はこの表示にしか影響しない。
-- D17（壊れた設定ファイルのゲストを rm / ls できない）は未対応。
+| 項目 | 内容 | 結果 |
+|---|---|---|
+| 故障注入（D1） | `ANTIC_SAGA_FAIL=NAME[:n]` で、n 番目の `EffectNAME` を実行せずに失敗させる。`TestE2EFaultInjection` は Running のゲストで 4 つの場合を試す：install の Switch（D1）、set の再起動での StartVM、mount の Hotplug、forward の JournalClear。いずれも exit 125 で、観測はコマンド前と一致した。実行中のシステムも、停止後にプロファイルが指すシステムも、元のままだった | PASS |
+| 形式モデルの一般化 | `Saga.tla` で、コマンドごとに計画の長さ（commit ステップ 0〜NRes 個）を選ぶようにした。`base` と `lastOk` は資源ごとにした。再生では長さごとに実際のコマンドの形を使う（start、stop、mount、設定とパッケージの変更）。CHC も同じ形に直した | TLC 19,727 状態・36,810 辺と完全一致。ミュータント 6 種をすべて検出。Spacer は約 4 秒 |
+| 殻のトレース照合（推奨 4） | `ANTIC_SAGA_TRACE` に NDJSON を書き出す（ロックの取得と解放、計画の長さ、各 effect の Stage と結果）。`TestShellTracesRefineSagaModel` は、再生と同じ対応表で TLA+ の action に写し、`SagaTrace.cfg`（計画は最大 5 ステップ）の状態グラフ上で非決定性オートマトンとして辿る。解放せずに終わったプロセスは Crash とみなす。静止点でモデルを初期状態に戻すので、長いトレースも検査できる | E2E の全 24 トレース、1,308 イベントが適合。誤ったトレース 4 種は拒否した |
+| D4 / lifecycle | `Shares` と `Inspect` を、設定と boot 記録から直接求めるようにした。`host` は `tea/lifecycle` に依存しなくなった | — |
+| D17 | `Manager.All` は読み込めない設定を飛ばす（`ls` はそれらを error として表示する）。`rm` は読み込めない設定のゲストも削除する（設定の中身ではなくバイト列だけを使う）。`TestE2EBrokenConfig` で、実行中のゲストの設定を壊し、`ls`、`rm`、同名での再作成ができることを確かめた | PASS |
+| D18（新規・修正済み） | トレース付き E2E の最中に、`antic run` が exit 0 のまま空の出力を返したことで見つけた。原因はゲスト側のセッションで、`cmd.Wait` を出力パイプを読み切る前に呼んでいたこと | 修正後の E2E で確認 |
 
+`tea/lifecycle` パッケージは、host からもゲストのエージェントからも使われなくなった。削除するかどうかは別途判断する。

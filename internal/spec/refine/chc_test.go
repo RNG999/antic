@@ -2,6 +2,7 @@ package refine_test
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -15,13 +16,13 @@ import (
 // Abstraction: a command plans from the state it reads after taking the
 // guest's lock and recovering, so a process without the lock holds no
 // state; any number of processes is therefore represented by the current
-// lock holder, and a crash resets it. The plan moves resources 1..nRes in
-// order (as the harness of saga_refine_test.go), so the undo stack (or, while recovering, the recorded intents
-// still to undo), the remaining steps and the journal's intents are the
-// counts k and ji. Versions and the command counter are unbounded integers.
-// The rules follow Saga.tla action by action; each phase of the lock holder
-// (Saga.tla's pc) has its own invariant predicate, which keeps the
-// inductive invariant Spacer must find small per control location.
+// lock holder, and a crash resets it. A plan of length n moves resources
+// 1..n in order, so the undo stack (or, while recovering, the recorded
+// intents still to undo), the remaining steps and the journal's intents are
+// the counts k and ji. Versions and the command counter are unbounded
+// integers. The rules follow Saga.tla action by action; each phase of the
+// lock holder (Saga.tla's pc) has its own invariant predicate, which keeps
+// the inductive invariant Spacer must find small per control location.
 
 // The phases of the lock holder; idle means no process holds the lock.
 const (
@@ -37,17 +38,26 @@ const (
 // chcSaga renders the Horn clauses of the saga with or without a journal.
 func chcSaga(journaling bool) string {
 	phases := []string{phIdle, phRecover, phPlan, phPrepare, phCommit, phCompensate, phDone}
-	// State: v1..vN base target k jon jbase ji cmds lastOk
-	var vs, vsig, atLast []string
-	for i := 1; i <= nRes; i++ {
-		v := fmt.Sprintf("v%d", i)
-		vs, vsig, atLast = append(vs, v), append(vsig, "("+v+" Int)"), append(atLast, "(= "+v+" lastOk)")
+	// Per resource i: v (its version), b (the command's base), jb (the
+	// journal's base), lo (the last successful version); then the scalars.
+	vec := func(prefix string) []string {
+		var out []string
+		for i := 1; i <= nRes; i++ {
+			out = append(out, fmt.Sprintf("%s%d", prefix, i))
+		}
+		return out
 	}
-	state := strings.Join(vs, " ") + " base target k jon jbase ji cmds lastOk"
-	sig := strings.Join(vsig, " ") + " (base Int) (target Int) (k Int) (jon Bool) (jbase Int) (ji Int) (cmds Int) (lastOk Int)"
-	sorts := strings.Repeat("Int ", nRes) + "Int Int Int Bool Int Int Int Int"
-	initial := strings.Repeat("0 ", nRes) + "0 0 0 false 0 0 0 0"
-	n := fmt.Sprint(nRes)
+	vs, bs, jbs, los := vec("v"), vec("b"), vec("jb"), vec("lo")
+	ints := slices.Concat(vs, bs, jbs, los, []string{"target", "k", "n", "ji", "cmds"})
+	state := strings.Join(ints, " ") + " jon"
+	var sig []string
+	for _, v := range ints {
+		sig = append(sig, "("+v+" Int)")
+	}
+	// m is the plan length PlanCmd chooses.
+	sigs := strings.Join(append(sig, "(jon Bool)", "(m Int)"), " ")
+	sorts := strings.Repeat("Int ", len(ints)) + "Bool"
+	initial := strings.Repeat("0 ", len(ints)) + "false"
 	var b strings.Builder
 	b.WriteString("(set-logic HORN)\n")
 	for _, ph := range phases {
@@ -62,13 +72,20 @@ func chcSaga(journaling bool) string {
 				next[i] = e
 			}
 		}
-		fmt.Fprintf(&b, "(assert (forall (%s) (=> (and (%s %s) %s) (%s %s))))\n", sig, from, state, guard, to, strings.Join(next, " "))
+		fmt.Fprintf(&b, "(assert (forall (%s) (=> (and (%s %s) %s) (%s %s))))\n", sigs, from, state, guard, to, strings.Join(next, " "))
 	}
-	// set assigns val to the resource numbered idx.
-	set := func(idx, val string) map[string]string {
+	// set assigns resource idx the value at[i] (the i-th resource's value).
+	set := func(idx string, at func(i int) string) map[string]string {
 		out := map[string]string{}
 		for i, v := range vs {
-			out[v] = fmt.Sprintf("(ite (= %s %d) %s %s)", idx, i+1, val, v)
+			out[v] = fmt.Sprintf("(ite (= %s %d) %s %s)", idx, i+1, at(i), v)
+		}
+		return out
+	}
+	each := func(xs []string, val func(i int) string) map[string]string {
+		out := map[string]string{}
+		for i, x := range xs {
+			out[x] = val(i)
 		}
 		return out
 	}
@@ -82,8 +99,8 @@ func chcSaga(journaling bool) string {
 		return out
 	}
 	and := func(cs ...string) string { return "(and " + strings.Join(cs, " ") + ")" }
-	none, some, all := "(= k 0)", "(> k 0)", "(= k "+n+")"
-	more := "(< k " + n + ")"
+	target := func(int) string { return "target" }
+	none, some, all, more := "(= k 0)", "(> k 0)", "(= k n)", "(< k n)"
 	// Init.
 	fmt.Fprintf(&b, "(assert (%s %s))\n", phIdle, initial)
 	// Acquire: a new command takes the lock; a pending journal is recovered first.
@@ -92,15 +109,18 @@ func chcSaga(journaling bool) string {
 	add(phIdle, "(not jon)", phPlan, merge(acquire, map[string]string{"k": "0"}))
 	// Recover: undo the recorded intents in reverse (idempotent), then clear
 	// the journal, or fail to clear it and stop.
-	add(phRecover, some, phRecover, merge(set("k", "jbase"), map[string]string{"k": "(- k 1)"}))
+	add(phRecover, some, phRecover, merge(set("k", func(i int) string { return jbs[i] }), map[string]string{"k": "(- k 1)"}))
 	add(phRecover, none, phPlan, map[string]string{"jon": "false"})
 	add(phRecover, none, phDone, nil)
-	// Plan from the state read under the lock.
-	add(phPlan, "true", phPrepare, map[string]string{"base": vs[firstRes]})
+	// Plan m commit steps from the state read under the lock; a no-op has
+	// nothing to prepare.
+	read := merge(each(bs, func(i int) string { return vs[i] }), map[string]string{"n": "m"})
+	add(phPlan, "(= m 0)", phDone, read)
+	add(phPlan, fmt.Sprintf("(and (>= m 1) (<= m %d))", nRes), phPrepare, read)
 	// Prepare (changes nothing observable) and open the journal, or fail.
 	prep := map[string]string{"k": "0"}
 	if journaling {
-		prep = merge(prep, map[string]string{"jon": "true", "jbase": "base", "ji": "0"})
+		prep = merge(prep, each(jbs, func(i int) string { return bs[i] }), map[string]string{"jon": "true", "ji": "0"})
 	}
 	add(phPrepare, "true", phCommit, prep)
 	add(phPrepare, "true", phDone, nil)
@@ -111,16 +131,17 @@ func chcSaga(journaling bool) string {
 		add(phCommit, and(more, "(= ji k)"), phCompensate, nil)
 		ready = "(= ji (+ k 1))"
 	}
-	add(phCommit, and(more, ready), phCommit, merge(set("(+ k 1)", "target"), map[string]string{"k": "(+ k 1)"}))
+	add(phCommit, and(more, ready), phCommit, merge(set("(+ k 1)", target), map[string]string{"k": "(+ k 1)"}))
 	add(phCommit, and(more, ready), phCompensate, nil)
 	// Compensate in reverse, then clear the journal (or fail to, leaving it).
-	add(phCompensate, some, phCompensate, merge(set("k", "base"), map[string]string{"k": "(- k 1)"}))
+	add(phCompensate, some, phCompensate, merge(set("k", func(i int) string { return bs[i] }), map[string]string{"k": "(- k 1)"}))
 	add(phCompensate, none, phDone, map[string]string{"jon": "false"})
 	if journaling {
 		add(phCompensate, none, phDone, nil)
 	}
 	// Finish by clearing the journal, or compensate when it cannot be cleared.
-	add(phCommit, all, phDone, map[string]string{"jon": "false", "lastOk": "target", "k": "0"})
+	finish := each(los, func(i int) string { return fmt.Sprintf("(ite (<= %d n) target %s)", i+1, los[i]) })
+	add(phCommit, all, phDone, merge(finish, map[string]string{"jon": "false", "k": "0"}))
 	if journaling {
 		add(phCommit, all, phCompensate, nil)
 	}
@@ -131,8 +152,12 @@ func chcSaga(journaling bool) string {
 		add(ph, "true", phIdle, map[string]string{"k": "0"})
 	}
 	// Safety: with the lock free and no journal pending, every resource is
-	// at the version of the last command that succeeded.
-	fmt.Fprintf(&b, "(assert (forall (%s) (=> (and (%s %s) (not jon) (not (and %s))) false)))\n", sig, phIdle, state, strings.Join(atLast, " "))
+	// at the version of the last command that succeeded in changing it.
+	var atLast []string
+	for i := range vs {
+		atLast = append(atLast, fmt.Sprintf("(= %s %s)", vs[i], los[i]))
+	}
+	fmt.Fprintf(&b, "(assert (forall (%s) (=> (and (%s %s) (not jon) (not (and %s))) false)))\n", sigs, phIdle, state, strings.Join(atLast, " "))
 	b.WriteString("(check-sat)\n")
 	return b.String()
 }

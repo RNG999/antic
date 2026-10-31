@@ -83,6 +83,16 @@ func RestoreDraft(path, name, home string, absent bool, old, new []byte) Draft {
 	return d
 }
 
+// ReadRawDraft reads a config file's bytes without loading it (an unchanged
+// draft, for commands that move the file rather than edit it).
+func ReadRawDraft(path, name, home string) (Draft, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return Draft{}, err
+	}
+	return Draft{Path: path, Name: name, Old: b, New: b, home: home}, nil
+}
+
 // project reports whether the draft is a project antic.toml (whose name is
 // in the file and whose relative paths are relative to it).
 func (d Draft) project() bool { return filepath.Base(d.Path) == "antic.toml" }

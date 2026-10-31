@@ -188,6 +188,12 @@ func (h *harness) antic(extraEnv []string, args ...string) (stdout string, code 
 	cmd := exec.CommandContext(ctx, h.bin, args...)
 	cmd.Dir = h.work
 	cmd.Env = append(os.Environ(), extraEnv...)
+	if dir := os.Getenv("ANTIC_E2E_TRACES"); dir != "" {
+		// Every command's saga events, for trace validation against
+		// formal/saga/Saga.tla (internal/spec/refine).
+		name := strings.NewReplacer("/", "_", " ", "_").Replace(h.t.Name())
+		cmd.Env = append(cmd.Env, "ANTIC_SAGA_TRACE="+filepath.Join(dir, name+".ndjson"))
+	}
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	err := cmd.Run()
