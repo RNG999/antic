@@ -6,7 +6,6 @@ package guest
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -296,5 +295,3 @@ func (m *Manager) policy() share.Policy {
 func (m *Manager) protectedNames() []string {
 	return append([]string{}, proto.ProtectedNames...)
 }
-
-var errNotRunning = errors.New("not running")

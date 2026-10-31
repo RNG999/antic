@@ -2,6 +2,7 @@ package nixbuild
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -23,7 +24,8 @@ func flakeMetadata(ref string) (map[string]any, error) {
 	}
 	out, err := withNixConfig(exec.Command(bin, "flake", "metadata", "--json", "--no-write-lock-file", ref)).Output()
 	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
 			return nil, fmt.Errorf("nix flake metadata %s: %s", ref, strings.TrimSpace(string(ee.Stderr)))
 		}
 		return nil, err
@@ -93,7 +95,7 @@ func CheckLocks(flake string, avoid []string) error {
 		args := append([]string{"flake", "update"}, stale...)
 		args = append(args, "--flake", "path:"+flake)
 		if out, err := withNixConfig(exec.Command(bin, args...)).CombinedOutput(); err != nil {
-			return fmt.Errorf("nix %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+			return fmt.Errorf("nix %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 		}
 	}
 	return nil

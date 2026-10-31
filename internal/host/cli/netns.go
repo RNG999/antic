@@ -54,7 +54,7 @@ func netnsMain(args []string) int {
 
 func netnsRun(nft, rules, domainsFile, denyFile string, defaultDeny bool, upstream string, argv []string) error {
 	if out, err := exec.Command(nft, "-f", rules).CombinedOutput(); err != nil {
-		return fmt.Errorf("nft -f %s: %v: %s", rules, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("nft -f %s: %w: %s", rules, err, strings.TrimSpace(string(out)))
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

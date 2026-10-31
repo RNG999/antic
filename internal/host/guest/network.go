@@ -233,5 +233,3 @@ func (g *Guest) startNet(ctx context.Context) (string, error) {
 	props := g.m.confine([]string{dir}, []string{g.m.Bins.Pasta, g.m.Bins.Passt, g.m.Bins.NFT, g.m.Bins.Self})
 	return sock, g.helper(ctx, g.netUnit(), "antic network for "+g.Name(), props, sock, argv...)
 }
-
-func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }

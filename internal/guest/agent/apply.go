@@ -93,7 +93,7 @@ func kill(unit domain.SessionUnit) error {
 	}
 	cmd := exec.Command("systemctl", "stop", "--no-block", unit.Get())
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("stop %s: %v: %s", unit.Get(), err, out)
+		return fmt.Errorf("stop %s: %w: %s", unit.Get(), err, out)
 	}
 	return nil
 }

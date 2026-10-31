@@ -33,7 +33,7 @@ func NewIndexed[T comparable, State any](v T) Indexed[T, State] {
 
 // TransitionIndexed transitions an Indexed value from typestate From to To.
 func TransitionIndexed[T comparable, From, To any](x Indexed[T, From]) Indexed[T, To] {
-	return Indexed[T, To]{value: x.value}
+	return Indexed[T, To](x) // same representation; only the typestate changes
 }
 
 // Get returns the underlying value.

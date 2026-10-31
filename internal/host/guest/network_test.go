@@ -3,6 +3,7 @@ package guest
 import (
 	"net"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 
@@ -104,7 +105,7 @@ func TestNFTRulesAllowList(t *testing.T) {
 	lan := index(t, rules, "ip daddr { 10.0.0.0/8")
 	dyn := index(t, rules, "ip daddr @dyn4 accept")
 	final := index(t, rules, "    reject\n  }")
-	if !(nsReject < always && always < static4 && static4 < static6 && static6 < lan && lan < dyn && dyn < final) {
+	if !slices.IsSorted([]int{nsReject, always, static4, static6, lan, dyn, final}) {
 		t.Errorf("rule order wrong:\n%s", rules)
 	}
 	// The host address is rejected before the static allow list.

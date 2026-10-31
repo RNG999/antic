@@ -566,7 +566,7 @@ func checkDomainPackage(t *testing.T, root string) {
 								posStr(fset, ts.Pos()), name)
 						}
 					case "predicates.go":
-						if ! ts.Assign.IsValid() && (strings.HasSuffix(name, "Tag") || strings.HasSuffix(name, "State") || strings.HasSuffix(name, "Prop")) {
+						if !ts.Assign.IsValid() && (strings.HasSuffix(name, "Tag") || strings.HasSuffix(name, "State") || strings.HasSuffix(name, "Prop")) {
 							t.Errorf("%s: %s does not belong in internal/domain/predicates.go (only *Pred, *Order, and Refined type aliases belong here)",
 								posStr(fset, ts.Pos()), name)
 						}
@@ -1460,8 +1460,8 @@ func newRepoImporter(t *testing.T, root string) *repoImporter {
 		}
 	}
 	return &repoImporter{
-		t:        t,
-		root:     root,
+		t:     t,
+		root:  root,
 		std:   firstOf{importer.Default(), importer.ForCompiler(token.NewFileSet(), "source", nil)},
 		cache: make(map[string]*types.Package),
 	}

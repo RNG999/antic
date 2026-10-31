@@ -22,7 +22,7 @@ func (GuestNamePred) Check(s string) error {
 		if i == 0 && c == '-' {
 			return fmt.Errorf("invalid guest name %q (a-z, 0-9 and -, up to 32 characters)", s)
 		}
-		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+		if !isLowerAlnum(c) && c != '-' {
 			return fmt.Errorf("invalid guest name %q (a-z, 0-9 and -, up to 32 characters)", s)
 		}
 	}
@@ -51,7 +51,7 @@ func (StorePathPred) Check(s string) error {
 		return fmt.Errorf("invalid system path %q", s)
 	}
 	for _, c := range rest[:32] {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z')) {
+		if !isLowerAlnum(c) {
 			return fmt.Errorf("invalid system path %q", s)
 		}
 	}
@@ -79,7 +79,7 @@ func (ShareTagPred) Check(s string) error {
 		return fmt.Errorf("invalid share tag %q", s)
 	}
 	for _, c := range s[2:] {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+		if !isLowerHex(c) {
 			return fmt.Errorf("invalid share tag %q", s)
 		}
 	}
@@ -284,7 +284,7 @@ func (DomainNamePred) Check(s string) error {
 		return fmt.Errorf("invalid domain name %q", s)
 	}
 	for _, c := range s {
-		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.') {
+		if !isLowerAlnum(c) && !strings.ContainsRune("-_.", c) {
 			return fmt.Errorf("invalid domain name %q", s)
 		}
 	}
@@ -518,3 +518,9 @@ func isUnitChar(c rune, allowAtAndSlash bool) bool {
 		return false
 	}
 }
+
+// isLowerAlnum reports whether c is a lowercase ASCII letter or a digit.
+func isLowerAlnum(c rune) bool { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') }
+
+// isLowerHex reports whether c is a lowercase hexadecimal digit.
+func isLowerHex(c rune) bool { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') }

@@ -132,7 +132,7 @@ func Protected(root string, names []string) ([]string, error) {
 			return nil
 		}
 		depth := strings.Count(strings.TrimPrefix(path, root), "/")
-		if d.Type()&fs.ModeSymlink != 0 || !(d.IsDir() || d.Type().IsRegular()) {
+		if d.Type()&fs.ModeSymlink != 0 || (!d.IsDir() && !d.Type().IsRegular()) {
 			return nil
 		}
 		if want[d.Name()] {

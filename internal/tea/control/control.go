@@ -371,6 +371,9 @@ func ParseRequest(peerCID uint32, req proto.Request, inMountinfo bool) MsgReques
 		}
 		msg.Session = types.Some(su)
 
+	case proto.OpHello, proto.OpSessions:
+		// No arguments to parse.
+
 	case proto.OpJournal:
 		for _, rawU := range req.Units {
 			u, err := domain.ParseUnitName(rawU)
@@ -476,6 +479,7 @@ func Update(m Model, msg Msg) (Model, []Effect) {
 				return next, nil
 			}
 		}
+		//nolint:staticcheck // S1016: a literal keeps the message and the model's entry independent types
 		next.Mounts = next.Mounts.Upsert(MountEntry{
 			Tag:      ev.Tag,
 			Path:     ev.Path,

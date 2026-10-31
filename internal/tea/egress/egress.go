@@ -317,6 +317,7 @@ func Update(m Model, msg Msg) (Model, []Effect) {
 				Addr:      ans.Addr,
 				ExpiresAt: domain.NewUnixSec(now + tSecs),
 			})
+			//nolint:staticcheck // S1016: a literal keeps the DNS answer and the nft update independent types
 			updates = append(updates, SetElementUpdate{
 				Addr:    ans.Addr,
 				Timeout: ans.Timeout,

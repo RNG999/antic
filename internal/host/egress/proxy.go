@@ -127,10 +127,18 @@ func (p *Proxy) Serve(ctx context.Context) error {
 	err := <-errc
 	p.udp.Close()
 	p.tcp.Close()
-	if ctx.Err() != nil {
+	return stopped(ctx, err)
+}
+
+// stopped is err, unless ctx was cancelled: then the listeners were closed
+// on purpose and the error only reports that.
+func stopped(ctx context.Context, err error) error {
+	select {
+	case <-ctx.Done():
 		return nil
+	default:
+		return err
 	}
-	return err
 }
 
 func (p *Proxy) serveUDP(ctx context.Context) error {
@@ -139,10 +147,7 @@ func (p *Proxy) serveUDP(ctx context.Context) error {
 	for {
 		n, from, err := p.udp.ReadFromUDPAddrPort(buf)
 		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			return err
+			return stopped(ctx, err)
 		}
 		msg := bytes.Clone(buf[:n])
 		select {
@@ -164,10 +169,7 @@ func (p *Proxy) serveTCP(ctx context.Context) error {
 	for {
 		c, err := p.tcp.Accept()
 		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			return err
+			return stopped(ctx, err)
 		}
 		select {
 		case sem <- struct{}{}:
@@ -429,7 +431,7 @@ func (p *Proxy) allow(ctx context.Context, addrs []answer) error {
 		cmd := exec.CommandContext(ctx, p.cfg.NFT, "-f", "-")
 		cmd.Stdin = strings.NewReader(script.String())
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("nft: %v: %s", err, strings.TrimSpace(string(out)))
+			return fmt.Errorf("nft: %w: %s", err, strings.TrimSpace(string(out)))
 		}
 	}
 	p.model = next
