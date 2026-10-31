@@ -479,4 +479,3 @@ func (h *harness) kill(c spec.CmdKill) ([]string, int, string) {
 	}
 	return args, code, stderr
 }
-
