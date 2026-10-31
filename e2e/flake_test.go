@@ -20,7 +20,8 @@ import (
 // shares are mounted again. Applying a system that boots the same switches
 // and keeps them.
 //
-// The flake takes antic's guest module from the pushed branch: a local path
+// The flake takes antic's guest module from GitHub (main, or
+// ANTIC_E2E_FLAKE_REF for an unmerged branch): a local path
 // would be a flake input inside a directory another guest shares, which
 // antic refuses to build.
 func TestE2EFlakeKernelChange(t *testing.T) {
@@ -32,7 +33,7 @@ func TestE2EFlakeKernelChange(t *testing.T) {
 	}
 	ref := os.Getenv("ANTIC_E2E_FLAKE_REF")
 	if ref == "" {
-		ref = "github:RNG999/antic/feat/e2e-spec"
+		ref = "github:RNG999/antic"
 	}
 	dir := h.path("F")
 	writeFlake := func(param string) {
