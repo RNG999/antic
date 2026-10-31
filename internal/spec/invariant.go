@@ -45,8 +45,11 @@ func guestInvariant(g Guest) error {
 	if !g.Name.Valid() || g.Phase > PhaseRunning {
 		return errors.New("invalid name or phase")
 	}
-	if !c.Packages.Canonical() || !c.Shares.Canonical() || !c.Ports.Canonical() || !g.Mounts.Canonical() {
+	if !c.Packages.Canonical() || !c.Shares.Canonical() || !c.Ports.Canonical() || !g.Mounts.Canonical() || !g.Sessions.Canonical() {
 		return errors.New("sets are not canonical")
+	}
+	if g.Phase != PhaseRunning && g.Sessions.Len() > 0 {
+		return errors.New("sessions in a guest that is not running")
 	}
 	if !c.Res.CPUs.Valid() || !c.Res.Memory.Valid() {
 		return errors.New("invalid resources")

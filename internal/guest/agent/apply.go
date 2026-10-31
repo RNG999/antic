@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -81,6 +82,11 @@ func sessions() ([]proto.Session, error) {
 				s.Command = strings.TrimSpace(strings.ReplaceAll(string(cl), "\x00", " "))
 			}
 		}
+		if s.Command == "" {
+			// Only antic-agent is left: the command has ended and the unit
+			// is being torn down (D20).
+			continue
+		}
 		out = append(out, s)
 	}
 	return out, nil
@@ -90,6 +96,15 @@ func sessions() ([]proto.Session, error) {
 func kill(unit domain.SessionUnit) error {
 	if !unit.Valid() {
 		return fmt.Errorf("invalid session %q", unit)
+	}
+	// Stopping a unit that is not running succeeds, so check first: killing
+	// a session that does not exist is an error, not a no-op (D21).
+	running, err := sessions()
+	if err != nil {
+		return err
+	}
+	if !slices.ContainsFunc(running, func(s proto.Session) bool { return s.Unit == unit.Get() }) {
+		return fmt.Errorf("no session %s", unit.Get())
 	}
 	cmd := exec.Command("systemctl", "stop", "--no-block", unit.Get())
 	if out, err := cmd.CombinedOutput(); err != nil {

@@ -105,6 +105,8 @@ func alphabet() []spec.Cmd {
 			spec.CmdEdit{Target: n, New: spec.RawConfig{Packages: []string{"git"}, CPUs: 2, Shares: []spec.RawShare{{Path: dirB, Mode: "ro"}}}},
 			spec.CmdEdit{Target: n, New: spec.RawConfig{Network: spec.RawNetwork{Default: "deny", Allow: []string{"one.one.one.one", "192.168.1.0/24"}}}},
 			spec.CmdRun{Target: n, Code: 42},
+			spec.CmdSpawn{Target: n, Command: "sleep 600"},
+			spec.CmdKill{Target: n, Commands: []string{"sleep 600"}},
 		)
 	}
 	return append(cs,
@@ -145,6 +147,10 @@ func targets(c spec.Cmd) []string {
 	case spec.CmdEdit:
 		return []string{c.Target}
 	case spec.CmdRun:
+		return []string{c.Target}
+	case spec.CmdSpawn:
+		return []string{c.Target}
+	case spec.CmdKill:
 		return []string{c.Target}
 	case spec.CmdStart:
 		return c.Names
@@ -382,6 +388,27 @@ func TestScenarios(t *testing.T) {
 		last := outs[len(outs)-1]
 		if last.Kind != spec.OutcomeReject || guest(t, last.World, "e2e-a").Phase != spec.PhaseRunning {
 			t.Fatalf("e2e-a should stay started when e2e-b is rejected: %v", last)
+		}
+	})
+
+	t.Run("sessions end when the guest stops or restarts, and kill ends one", func(t *testing.T) {
+		w := run(t, running, spec.CmdSpawn{Target: "e2e-a", Command: "sleep 1"}, spec.OutcomeOk)
+		w = run(t, w, spec.CmdSpawn{Target: "e2e-a", Command: "sleep 2"}, spec.OutcomeOk)
+		if n := guest(t, w, "e2e-a").Sessions.Len(); n != 2 {
+			t.Fatalf("%d sessions, want 2", n)
+		}
+		killed := run(t, w, spec.CmdKill{Target: "e2e-a", Commands: []string{"sleep 1"}}, spec.OutcomeOk)
+		if n := guest(t, killed, "e2e-a").Sessions.Len(); n != 1 {
+			t.Fatalf("%d sessions after kill, want 1", n)
+		}
+		run(t, killed, spec.CmdKill{Target: "e2e-a", Commands: []string{"sleep 1"}}, spec.OutcomeReject)
+		for _, c := range []spec.Cmd{spec.CmdRestart{Names: []string{"e2e-a"}}, spec.CmdStop{Names: []string{"e2e-a"}}, spec.CmdSet{Target: "e2e-a", CPUs: types.Some(4)}} {
+			if n := guest(t, run(t, w, c, spec.OutcomeOk), "e2e-a").Sessions.Len(); n != 0 {
+				t.Fatalf("%#v left %d sessions", c, n)
+			}
+		}
+		if n := guest(t, run(t, w, spec.CmdMount{Target: "e2e-a", Dirs: []string{dirA}}, spec.OutcomeOk), "e2e-a").Sessions.Len(); n != 2 {
+			t.Fatalf("a live mount ended sessions: %d left", n)
 		}
 	})
 

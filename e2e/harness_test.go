@@ -55,6 +55,8 @@ type harness struct {
 	// editorArgs runs EDITOR as "sh SCRIPT" (an EDITOR value with arguments, D12).
 	editorArgs bool
 	busy       net.Listener
+	// spawned are the "antic run" processes of sessions left running.
+	spawned []*exec.Cmd
 }
 
 func newHarness(t *testing.T) *harness {
@@ -223,6 +225,11 @@ func (h *harness) anticIn(dir string, extraEnv []string, args ...string) (stdout
 // does not load cannot be removed with "guest rm" (D17), so every e2e-*
 // config is first replaced with a minimal valid one.
 func (h *harness) cleanup() {
+	for _, p := range h.spawned {
+		p.Process.Kill()
+		p.Wait()
+	}
+	h.spawned = nil
 	if h.cfg != "" {
 		files, _ := filepath.Glob(filepath.Join(h.cfg, prefix+"*.toml"))
 		for _, f := range files {
@@ -397,3 +404,79 @@ func (h *harness) fixtureConfig(name string, raw spec.RawConfig) {
 	}
 	h.model.Guests = h.model.Guests.Upsert(spec.Guest{Name: n, Config: cfg, Mounts: types.EmptySet[spec.Mount, domain.AbsPath, spec.MountByPath]()})
 }
+
+// spawn leaves "antic run NAME -T -- COMMAND" running in the background and
+// waits until "guest ps" lists its session (exit 0), or until it exits.
+func (h *harness) spawn(c spec.CmdSpawn) ([]string, int, string) {
+	args := append([]string{"run", c.Target, "-T", "--"}, strings.Fields(c.Command)...)
+	cmd := exec.Command(h.bin, args...)
+	cmd.Dir = h.work
+	cmd.Env = os.Environ()
+	if dir := os.Getenv("ANTIC_E2E_TRACES"); dir != "" {
+		name := strings.NewReplacer("/", "_", " ", "_").Replace(h.t.Name())
+		cmd.Env = append(cmd.Env, "ANTIC_SAGA_TRACE="+filepath.Join(dir, name+".ndjson"))
+	}
+	var errb bytes.Buffer
+	cmd.Stderr = &errb
+	if err := cmd.Start(); err != nil {
+		h.t.Fatal(err)
+	}
+	h.spawned = append(h.spawned, cmd)
+	exited := make(chan int, 1)
+	go func() {
+		err := cmd.Wait()
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			exited <- ee.ExitCode()
+			return
+		}
+		exited <- 0
+	}()
+	deadline := time.Now().Add(cmdTimeout)
+	for time.Now().Before(deadline) {
+		select {
+		case code := <-exited:
+			h.spawned = h.spawned[:len(h.spawned)-1]
+			return args, code, errb.String()
+		case <-time.After(time.Second):
+		}
+		if ss, err := h.sessions(c.Target); err == nil {
+			if _, ok := ss[c.Command]; ok {
+				return args, 0, ""
+			}
+		}
+	}
+	h.t.Fatalf("antic %v: no session within %v", args, cmdTimeout)
+	return args, 0, ""
+}
+
+// kill runs "guest kill" with the units of the named sessions (an absent
+// one is named by a unit that does not exist) and waits until they end.
+func (h *harness) kill(c spec.CmdKill) ([]string, int, string) {
+	ss, _ := h.sessions(c.Target)
+	args := []string{"guest", "kill", c.Target}
+	for _, cmd := range c.Commands {
+		unit, ok := ss[cmd]
+		if !ok {
+			unit = "antic-session@e2e-missing.service"
+		}
+		args = append(args, unit)
+	}
+	_, code, stderr := h.antic(nil, args...)
+	for deadline := time.Now().Add(cmdTimeout); code == 0 && time.Now().Before(deadline); time.Sleep(time.Second) {
+		now, err := h.sessions(c.Target)
+		if err != nil {
+			break
+		}
+		gone := true
+		for _, cmd := range c.Commands {
+			_, alive := now[cmd]
+			gone = gone && !alive
+		}
+		if gone {
+			break
+		}
+	}
+	return args, code, stderr
+}
+

@@ -140,6 +140,24 @@ func (MountByPath) Less(a, b domain.AbsPath) bool { return a.Get() < b.Get() }
 // MountSet is a canonical set of mounts keyed by path.
 type MountSet = types.SortedSet[Mount, domain.AbsPath, MountByPath]
 
+// Session is a command running in a guest ("antic run" that has not
+// returned), as "guest ps" lists it, identified by its command line.
+type Session struct {
+	Command string
+}
+
+// SessionByCommand orders sessions by command line.
+type SessionByCommand struct{}
+
+// Key returns the session's command line.
+func (SessionByCommand) Key(s Session) string { return s.Command }
+
+// Less orders command lines lexicographically.
+func (SessionByCommand) Less(a, b string) bool { return a < b }
+
+// SessionSet is a canonical set of sessions keyed by command line.
+type SessionSet = types.SortedSet[Session, string, SessionByCommand]
+
 // Port forwards 127.0.0.1:Host on the host to Guest in the guest.
 type Port struct {
 	Host  domain.PortNumber
@@ -228,6 +246,9 @@ type Guest struct {
 	Phase  Phase
 	// Mounts are the active mounts; empty unless Phase is PhaseRunning.
 	Mounts MountSet
+	// Sessions are the running commands; empty unless Phase is
+	// PhaseRunning (stopping or restarting the guest ends them).
+	Sessions SessionSet
 }
 
 // GuestByName orders guests by name.
@@ -278,7 +299,8 @@ func (w World) Equal(o World) bool {
 func (g Guest) Equal(o Guest) bool {
 	return g.Name == o.Name && g.Phase == o.Phase &&
 		g.Config.Equal(o.Config) &&
-		slices.Equal(g.Mounts.All(), o.Mounts.All())
+		slices.Equal(g.Mounts.All(), o.Mounts.All()) &&
+		slices.Equal(g.Sessions.All(), o.Sessions.All())
 }
 
 // Equal reports whether two external guests are identical.

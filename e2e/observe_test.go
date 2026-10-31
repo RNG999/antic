@@ -30,6 +30,8 @@ type guestView struct {
 	Mounted []mountView
 	// CPUs is the vCPU count seen inside a running guest (O3), or 0.
 	CPUs int
+	// Sessions are the running commands "guest ps" lists, sorted.
+	Sessions []string
 }
 
 // observation is α_obs's input: what the CLI reports.
@@ -48,6 +50,9 @@ func view(w spec.World) map[string]guestView {
 		}
 		if g.Phase == spec.PhaseRunning {
 			v.CPUs = g.Config.Res.CPUs.Get()
+		}
+		for _, s := range g.Sessions.All() {
+			v.Sessions = append(v.Sessions, s.Command)
 		}
 		out[g.Name.Get()] = v
 	}
@@ -88,6 +93,9 @@ func diff(w spec.World, o observation) string {
 			}
 			if b.CPUs != 0 && a.CPUs != b.CPUs {
 				out = append(out, fmt.Sprintf("%s: %d vCPUs inside the guest, model %d", n, b.CPUs, a.CPUs))
+			}
+			if !slices.Equal(a.Sessions, b.Sessions) {
+				out = append(out, fmt.Sprintf("%s: sessions %q, model %q", n, b.Sessions, a.Sessions))
 			}
 		}
 	}
@@ -225,11 +233,40 @@ func (h *harness) observe() (observation, error) {
 			if v.CPUs, err = h.probeCPUs(e.Name); err != nil {
 				return o, err
 			}
+			ss, err := h.sessions(e.Name)
+			if err != nil {
+				return o, err
+			}
+			for cmd := range ss {
+				v.Sessions = append(v.Sessions, cmd)
+			}
+			slices.Sort(v.Sessions)
 		}
 		o.guests[e.Name] = v
 	}
 	o.external = types.BuildSet[spec.External, domain.GuestName, spec.ExternalByName](ext)
 	return o, nil
+}
+
+// sessions maps the command line of each session "guest ps" lists to its
+// unit (the probe's own "antic run" has ended before ps runs).
+func (h *harness) sessions(name string) (map[string]string, error) {
+	out, code, stderr := h.antic(nil, "guest", "ps", name, "--json")
+	if code != 0 {
+		return nil, fmt.Errorf("guest ps %s: exit %d: %s", name, code, stderr)
+	}
+	var ss []struct {
+		Unit    string `json:"unit"`
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal([]byte(out), &ss); err != nil {
+		return nil, fmt.Errorf("guest ps %s --json: %w", name, err)
+	}
+	m := map[string]string{}
+	for _, s := range ss {
+		m[s.Command] = s.Unit
+	}
+	return m, nil
 }
 
 func (h *harness) show(name string) (showInfo, error) {

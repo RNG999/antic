@@ -149,6 +149,7 @@ func (w World) external(ts ...string) bool {
 func boot(g Guest) Guest {
 	g.Phase = PhaseRunning
 	g.Mounts = bootMounts(g.Config)
+	g.Sessions = types.EmptySet[Session, string, SessionByCommand]()
 	return g
 }
 
@@ -186,6 +187,10 @@ func Post(w World, env Env, c Cmd) []Outcome {
 		return postEdit(w, env, c)
 	case CmdRun:
 		return postRun(w, env, c)
+	case CmdSpawn:
+		return postSpawn(w, env, c)
+	case CmdKill:
+		return postKill(w, c)
 	}
 	return nil
 }
@@ -451,6 +456,7 @@ func stopGuest(w World, _ Env, g Guest) step {
 	}
 	g.Phase = PhaseOff
 	g.Mounts = types.EmptySet[Mount, domain.AbsPath, MountByPath]()
+	g.Sessions = types.EmptySet[Session, string, SessionByCommand]()
 	return step{w: w.with(g), risky: true}
 }
 
@@ -654,6 +660,52 @@ func postEdit(w World, env Env, c CmdEdit) []Outcome {
 		s := newSystem(w, g)
 		s.w = w.with(switched)
 		return s
+	})
+}
+
+// postSpawn starts the guest if needed (as run does) and leaves a session
+// running COMMAND.
+func postSpawn(w World, env Env, c CmdSpawn) []Outcome {
+	if w.external(c.Target) {
+		return nil
+	}
+	return fold(w, []string{c.Target}, func(w World, t string) step {
+		g, err := w.lookup(t)
+		if err != nil {
+			return reject(err)
+		}
+		if g.Sessions.Contains(c.Command) {
+			return reject(fmt.Errorf("%q is already running (the model keeps one session per command)", c.Command))
+		}
+		s := startGuest(w, env, g)
+		if s.err != nil {
+			return s
+		}
+		g, _ = s.w.Guests.Lookup(g.Name)
+		g.Sessions = g.Sessions.Upsert(Session{Command: c.Command})
+		return step{w: s.w.with(g), risky: true}
+	})
+}
+
+// postKill ends the named sessions in order, stopping at the first one that
+// is not running (P2).
+func postKill(w World, c CmdKill) []Outcome {
+	if w.external(c.Target) {
+		return nil
+	}
+	if _, err := w.lookup(c.Target); err != nil || len(c.Commands) == 0 {
+		if err == nil {
+			err = errors.New("SESSION is required")
+		}
+		return []Outcome{{World: w, Kind: OutcomeReject, Reason: err.Error()}}
+	}
+	return fold(w, c.Commands, func(w World, cmd string) step {
+		g, _ := w.lookup(c.Target)
+		if !g.Sessions.Contains(cmd) {
+			return reject(fmt.Errorf("no session %q in %s", cmd, g.Name.Get()))
+		}
+		g.Sessions = g.Sessions.Remove(cmd)
+		return step{w: w.with(g), risky: true}
 	})
 }
 

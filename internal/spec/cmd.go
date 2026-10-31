@@ -99,6 +99,22 @@ type CmdRun struct {
 	Code   int
 }
 
+// CmdSpawn is "antic run NAME -T -- sh -c COMMAND" left running: a session
+// that runs until it is killed (or the guest stops).
+type CmdSpawn struct {
+	Target  string
+	Command string
+}
+
+// CmdKill is "antic guest kill NAME SESSION...", naming each session by
+// its command line (the test finds its unit with "guest ps").
+type CmdKill struct {
+	Target   string
+	Commands []string
+}
+
+func (CmdSpawn) isCmd()     {}
+func (CmdKill) isCmd()      {}
 func (CmdCreate) isCmd()    {}
 func (CmdApply) isCmd()     {}
 func (CmdInstall) isCmd()   {}

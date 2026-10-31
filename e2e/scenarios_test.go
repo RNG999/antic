@@ -26,8 +26,19 @@ func (h *harness) step(c spec.Cmd) string {
 	if outs == nil {
 		h.t.Fatalf("%#v is outside the model", c)
 	}
-	args, env := h.render(c)
-	_, code, stderr := h.antic(env, args...)
+	var args []string
+	var code int
+	var stderr string
+	switch c := c.(type) {
+	case spec.CmdSpawn:
+		args, code, stderr = h.spawn(c)
+	case spec.CmdKill:
+		args, code, stderr = h.kill(c)
+	default:
+		var env []string
+		args, env = h.render(c)
+		_, code, stderr = h.antic(env, args...)
+	}
 	cmdline := "antic " + strings.Join(args, " ")
 	obs, err := h.observe()
 	if err != nil {
@@ -122,6 +133,26 @@ func scenarios() []scenario {
 					spec.CmdRestart{Names: []string{a}},
 					spec.CmdMount{Target: a, Dirs: []string{h.home + "/.local"}},
 					spec.CmdMount{Target: a, Dirs: []string{h.home}},
+				}
+			},
+		},
+		{
+			name: "sessions",
+			cmds: func(h *harness) []spec.Cmd {
+				spawn := func(cmd string) spec.Cmd { return spec.CmdSpawn{Target: a, Command: cmd} }
+				kill := func(cmd string) spec.Cmd { return spec.CmdKill{Target: a, Commands: []string{cmd}} }
+				return []spec.Cmd{
+					create(a),
+					spawn("sleep 6001"),
+					spawn("sleep 6002"),
+					kill("sleep 6001"),
+					kill("sleep 6001"),
+					spec.CmdMount{Target: a, Dirs: []string{h.path("A")}},
+					spec.CmdSet{Target: a, CPUs: types.Some(1)},
+					spawn("sleep 6003"),
+					spec.CmdStop{Names: []string{a}},
+					spawn("sleep 6004"),
+					spec.CmdRestart{Names: []string{a}},
 				}
 			},
 		},
