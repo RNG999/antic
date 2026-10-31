@@ -437,3 +437,30 @@ func TestParsePort(t *testing.T) {
 		}
 	}
 }
+
+// TestProjectConfigCannotRedefineAGuest: a project antic.toml, which a guest
+// sharing the project may have written, cannot take over a guest defined
+// elsewhere: both definitions are refused. A new name loads.
+func TestProjectConfigCannotRedefineAGuest(t *testing.T) {
+	dir := t.TempDir()
+	writeGuest(t, dir, "dev", validDev)
+	proj := t.TempDir()
+	write := func(name string) {
+		content := "name = \"" + name + "\"\npackages = [\"git\"]\n\n[spec]\nmemory = \"1G\"\n"
+		if err := os.WriteFile(filepath.Join(proj, "antic.toml"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("dev")
+	c, err := LoadWithProject(dir, home, proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Guests["dev"] != nil || c.Errors["dev"] == nil || !strings.Contains(c.Errors["dev"].Error(), "defined twice") {
+		t.Fatalf("a project file redefining dev: guest %v, error %v", c.Guests["dev"], c.Errors["dev"])
+	}
+	write("proj")
+	if c, err = LoadWithProject(dir, home, proj); err != nil || c.Guests["proj"] == nil || c.Guests["dev"] == nil {
+		t.Fatalf("a project file with a new name: %v, %v", c.Guests, err)
+	}
+}

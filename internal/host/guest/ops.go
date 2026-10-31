@@ -140,7 +140,7 @@ func (g *Guest) switchTo(ctx context.Context, system string) error {
 	g.m.logf("switching the running guest to %s...", system)
 	err = g.vsock().Agent(ctx, proto.Request{Op: proto.OpApply, Toplevel: system}, func(r proto.Response) {
 		if r.Line != "" {
-			fmt.Fprintln(g.m.Log, r.Line)
+			fmt.Fprintln(g.m.Log, domain.Printable(r.Line))
 		}
 	})
 	if err != nil {
@@ -706,7 +706,7 @@ func (g *Guest) Journal(ctx context.Context, units []string, lines int, line fun
 	}
 	return g.vsock().Agent(ctx, proto.Request{Op: proto.OpJournal, Units: units, Lines: lines}, func(r proto.Response) {
 		if r.Line != "" {
-			line(r.Line)
+			line(domain.Printable(r.Line))
 		}
 	})
 }

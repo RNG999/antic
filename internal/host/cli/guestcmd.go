@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/RNG999/antic/internal/domain"
 	"github.com/RNG999/antic/internal/host/config"
 	"github.com/RNG999/antic/internal/host/guest"
 )
@@ -69,7 +70,7 @@ func (a *app) guestPs() *cobra.Command {
 			return a.out(ss, func(w io.Writer) {
 				fmt.Fprintln(w, "SESSION\tSTARTED\tCOMMAND")
 				for _, s := range ss {
-					fmt.Fprintf(w, "%s\t%s ago\t%s\n", s.Unit, age(time.Since(time.Unix(s.Started, 0))), s.Command)
+					fmt.Fprintf(w, "%s\t%s ago\t%s\n", domain.Printable(s.Unit), age(time.Since(time.Unix(s.Started, 0))), domain.Printable(s.Command))
 				}
 			})
 		},

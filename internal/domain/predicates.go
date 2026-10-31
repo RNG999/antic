@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"path"
+	"strconv"
 	"strings"
 
 	"github.com/RNG999/antic/internal/types"
@@ -524,3 +525,22 @@ func isLowerAlnum(c rune) bool { return (c >= 'a' && c <= 'z') || (c >= '0' && c
 
 // isLowerHex reports whether c is a lowercase hexadecimal digit.
 func isLowerHex(c rune) bool { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') }
+
+// Printable returns s with its control characters escaped (as Go quotes
+// them), for text a guest supplies that the host prints to a terminal: a
+// guest must not send it escape sequences (titles, clipboard writes, ...).
+func Printable(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r == '\t' || !isControl(r) {
+			b.WriteRune(r)
+			continue
+		}
+		q := strconv.QuoteRune(r)
+		b.WriteString(q[1 : len(q)-1])
+	}
+	return b.String()
+}
+
+// isControl reports whether r is a control character (Unicode category Cc).
+func isControl(r rune) bool { return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) }

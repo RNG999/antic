@@ -246,10 +246,15 @@ func LoadWithProject(dir, home, startDir string) (*Config, error) {
 				c.Errors[filepath.Base(ppath)] = err
 			} else {
 				if existing, ok := c.Guests[g.Name]; ok && existing.Path != g.Path {
-					fmt.Fprintf(os.Stderr, "antic: warning: guest %q in %s shadows %s\n", g.Name, g.Path, existing.Path)
+					// A project file inside a directory a guest shares may
+					// have been written by that guest: it must not take over
+					// a guest defined elsewhere (its shares, network and
+					// flake). Two definitions are an error, not a choice.
+					delete(c.Guests, g.Name)
+					c.Errors[g.Name] = fmt.Errorf("guest %q is defined twice, in %s and in %s; remove one", g.Name, existing.Path, g.Path)
+				} else {
+					c.Guests[g.Name] = g
 				}
-				// Project guest takes precedence or adds to guests
-				c.Guests[g.Name] = g
 			}
 		}
 	}

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/RNG999/antic/internal/domain"
 	"github.com/RNG999/antic/internal/host/chv"
 	"github.com/RNG999/antic/internal/host/config"
 	"github.com/RNG999/antic/internal/host/share"
@@ -124,7 +125,7 @@ func (g *Guest) showAgentLog(ctx context.Context) {
 		Units: []string{"antic-agent.service", "antic-ready.target"}},
 		func(r proto.Response) {
 			if r.Line != "" {
-				fmt.Fprintln(g.m.Log, "  "+r.Line)
+				fmt.Fprintln(g.m.Log, "  "+domain.Printable(r.Line))
 			}
 		})
 }
