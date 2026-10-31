@@ -188,7 +188,7 @@ func reachFormula(s spec.ReachShape) string {
 		setVar(s.Never), setVar(s.Deny), setVar(s.Allow), setVar(s.Private), learned)
 }
 
-func TestZ3EgressBuiltinSetsEqualSpec(t *testing.T) {
+func TestEgressBuiltinSetsEqualSpec(t *testing.T) {
 	sh, eh := testHost()
 	internet := specPolicy(t, "internet", "", false, false)
 	shape := spec.Shape(internet, sh)
@@ -224,7 +224,7 @@ func TestZ3EgressBuiltinSetsEqualSpec(t *testing.T) {
 	}
 }
 
-func TestZ3EgressStructureEqualsSpec(t *testing.T) {
+func TestEgressRuleStructureEqualsSpec(t *testing.T) {
 	sh, eh := testHost()
 	decls := "(declare-const N Bool)\n(declare-const D Bool)\n(declare-const A Bool)\n(declare-const P Bool)\n(declare-const learned Bool)\n"
 	var qs []query

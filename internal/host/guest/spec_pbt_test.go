@@ -183,9 +183,9 @@ func genEdit(t *rapid.T, home string) spec.Cmd {
 	return c
 }
 
-// TestPBTDraftEditsRefineSpec: on a stopped guest, the shell's config edits
+// TestDraftEditsRefineSpec: on a stopped guest, the shell's config edits
 // accept and reject as the specification does and leave the config it says.
-func TestPBTDraftEditsRefineSpec(t *testing.T) {
+func TestDraftEditsRefineSpec(t *testing.T) {
 	f := newFixture(t)
 	dir := filepath.Join(f.home, ".config/antic/guests")
 	rapid.Check(t, func(rt *rapid.T) {
@@ -194,7 +194,7 @@ func TestPBTDraftEditsRefineSpec(t *testing.T) {
 		if err != nil {
 			rt.Fatal(err)
 		}
-		if err := c.CreateGuest("e2e-a", config.Guest{Packages: []string{"git"}, Memory: "1G"}, f.home); err != nil {
+		if d, err := c.NewGuestDraft("e2e-a", config.Guest{Packages: []string{"git"}, Memory: "1G"}, f.home); err != nil || d.Write(false) != nil {
 			rt.Fatal(err)
 		}
 		if f.cfg, err = config.Load(dir, f.home); err != nil {
@@ -232,11 +232,11 @@ func TestPBTDraftEditsRefineSpec(t *testing.T) {
 	})
 }
 
-// TestPBTLiveSharesRefineSpec: for a running guest with random boot and
+// TestLiveSharesRefineSpec: for a running guest with random boot and
 // hot-plugged mounts, an edit of its shares is taken live (and with which
 // hot-plugs and detaches) exactly when the specification's edit keeps the
 // guest running with those mounts instead of restarting it.
-func TestPBTLiveSharesRefineSpec(t *testing.T) {
+func TestLiveSharesRefineSpec(t *testing.T) {
 	f := newFixture(t)
 	paths := []string{f.home + "/A", f.home + "/A/sub", f.home + "/B"}
 	rapid.Check(t, func(rt *rapid.T) {

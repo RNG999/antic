@@ -251,6 +251,18 @@ func scenarios() []scenario {
 			},
 		},
 		{
+			name: "D25 edit cannot take another guest's host port",
+			cmds: func(*harness) []spec.Cmd {
+				return []spec.Cmd{
+					create(a, "8001"),
+					create(b),
+					// Stopped, so that no restart checks whether the port is free.
+					spec.CmdStop{Names: []string{b}},
+					spec.CmdEdit{Target: b, New: spec.RawConfig{Packages: []string{"git"}, Memory: "1G", Ports: []spec.RawPort{{Host: 8001, Guest: 80}}}},
+				}
+			},
+		},
+		{
 			name: "reconfigure a running guest atomically",
 			cmds: func(*harness) []spec.Cmd {
 				return []spec.Cmd{

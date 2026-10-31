@@ -37,7 +37,7 @@ func meaning(g *Guest) string {
 		shares = append(shares, fmt.Sprintf("%s:%v", s.Path, s.ReadOnly))
 	}
 	for _, p := range g.Ports {
-		ports = append(ports, fmt.Sprintf("%d:%d/%s", p.Host, p.Guest, p.ProtoStr()))
+		ports = append(ports, fmt.Sprintf("%d:%d/%s", p.Host, p.Guest, p.ProtoString()))
 	}
 	slices.Sort(shares)
 	slices.Sort(ports)
@@ -93,7 +93,7 @@ func genDraftEdit(t *rapid.T, d Draft) Draft {
 	return next
 }
 
-func TestPBTDraftKeepsComments(t *testing.T) {
+func TestDraftEditsKeepComments(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		d, _ := draftFixture(t)
 		for range rapid.IntRange(1, 15).Draw(rt, "edits") {
@@ -107,7 +107,7 @@ func TestPBTDraftKeepsComments(t *testing.T) {
 	})
 }
 
-func TestPBTDraftInverseEdits(t *testing.T) {
+func TestDraftEditsUndo(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		d, _ := draftFixture(t)
 		for range rapid.IntRange(0, 6).Draw(rt, "setup") {
@@ -135,7 +135,7 @@ func TestPBTDraftInverseEdits(t *testing.T) {
 	})
 }
 
-func TestPBTDraftEditsCommute(t *testing.T) {
+func TestDraftEditsCommute(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		d, _ := draftFixture(t)
 		x := rapid.SampledFrom(pbtShares).Draw(rt, "x")

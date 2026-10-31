@@ -22,8 +22,8 @@ func (a *app) cacheCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 	}
 	c.AddCommand(
-		a.cacheLs(),
-		a.cacheRm(),
+		a.cacheLsCmd(),
+		a.cacheRmCmd(),
 	)
 	return c
 }
@@ -84,7 +84,7 @@ func cachePackagesDesc(e nixbuild.CacheEntry) string {
 	return "-"
 }
 
-func (a *app) cacheLs() *cobra.Command {
+func (a *app) cacheLsCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:     "ls",
 		Aliases: []string{"list"},
@@ -118,7 +118,7 @@ func (a *app) cacheLs() *cobra.Command {
 	return c
 }
 
-func (a *app) cacheRm() *cobra.Command {
+func (a *app) cacheRmCmd() *cobra.Command {
 	var all bool
 	c := &cobra.Command{
 		Use:               "rm [GUEST...]",

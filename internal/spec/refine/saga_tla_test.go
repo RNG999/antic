@@ -8,12 +8,12 @@ import (
 	"testing"
 )
 
-// TestTLCSagaModels model-checks formal/saga/Saga.tla with TLC in three
+// TestSagaModelVerdicts model-checks formal/saga/Saga.tla with TLC in three
 // configurations and requires the expected verdicts: with journaling the
 // saga keeps P1 (Consistent) and terminates under crashes; without a
 // journal, or when a command reads the state it plans from before taking
 // the guest's lock, TLC must find a P1 counterexample.
-func TestTLCSagaModels(t *testing.T) {
+func TestSagaModelVerdicts(t *testing.T) {
 	tlc, err := exec.LookPath("tlc")
 	if err != nil {
 		t.Skip("tlc is not installed (it is in the dev shell: nix develop)")

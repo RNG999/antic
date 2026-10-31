@@ -771,9 +771,9 @@ func compare(t *testing.T, g tlcGraph, mut mutant) (problems []string, states, t
 	return problems, states, transitions
 }
 
-// TestGoCoreRefinesSagaModel replays the TLC state graph of the journaling
+// TestSagaCoreRefinesModel replays the TLC state graph of the journaling
 // saga against operation.Update, and checks that every mutant is caught.
-func TestGoCoreRefinesSagaModel(t *testing.T) {
+func TestSagaCoreRefinesModel(t *testing.T) {
 	g := readTLCGraph(t, "SagaJournal.cfg")
 	problems, states, transitions := compare(t, g, mutNone)
 	for _, p := range problems {

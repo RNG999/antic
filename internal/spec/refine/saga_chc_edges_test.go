@@ -192,7 +192,7 @@ func chcCoverage(t *testing.T, g traceGraph, sys chcSystem) (problems []string, 
 	return problems, len(edges), len(queries)
 }
 
-func TestCHCCoversSagaModel(t *testing.T) {
+func TestSagaClausesCoverModel(t *testing.T) {
 	g := indexGraph(readTLCGraph(t, "SagaJournal.cfg"))
 	sys := chcModel(true)
 	problems, edges, queries := chcCoverage(t, g, sys)

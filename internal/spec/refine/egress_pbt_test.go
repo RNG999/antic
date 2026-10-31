@@ -131,7 +131,7 @@ func decide(c egressCase, raw spec.RawNetwork, d netip.Addr, learned bool) (bool
 	return egress.Eval(egress.Rules(pol, c.host), d, learned), true
 }
 
-func TestPBTEgressRulesRefineReach(t *testing.T) {
+func TestEgressRulesRefineReachOnRandomInputs(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		c := genCase(t)
 		d := genDst(t, c)
@@ -143,7 +143,7 @@ func TestPBTEgressRulesRefineReach(t *testing.T) {
 	})
 }
 
-func TestPBTEgressMetamorphic(t *testing.T) {
+func TestEgressRulesMetamorphicRelations(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		c := genCase(t)
 		d := genDst(t, c)

@@ -238,3 +238,48 @@ func TestE2EConcurrentCommands(t *testing.T) {
 	}
 	h.t = t
 }
+
+// TestE2EConcurrentPortClaims: two guests claim the same host port at the
+// same time (D26). The ports a guest may forward depend on the other
+// guests' configs, so the claims must be serialized across guests: exactly
+// one succeeds, and the host port is forwarded once (Invariant 3).
+func TestE2EConcurrentPortClaims(t *testing.T) {
+	h := newHarness(t)
+	defer h.cleanup()
+	for _, c := range []spec.Cmd{create(a), create(b), spec.CmdStop{Names: []string{a, b}}} {
+		if msg := h.step(c); msg != "" {
+			t.Fatal(msg)
+		}
+	}
+	for round := range 3 {
+		port := fmt.Sprint(8002)
+		runs, err := h.runConcurrently([]spec.Cmd{
+			spec.CmdForward{Target: a, Ports: []string{port}},
+			spec.CmdForward{Target: b, Ports: []string{port}},
+		}, 0, filepath.Join(t.TempDir(), "trace.ndjson"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ok := 0
+		for _, r := range runs {
+			if r.code == 0 {
+				ok++
+			}
+		}
+		owners := 0
+		for _, g := range []string{a, b} {
+			cfg, err := h.readConfig(g)
+			if err != nil {
+				t.Fatal(err)
+			}
+			owners += cfg.Ports.Len()
+		}
+		if ok != 1 || owners != 1 {
+			t.Fatalf("round %d: %d of the two claims succeeded and %d guests forward port %s, want 1 and 1\n%+v", round, ok, owners, port, runs)
+		}
+		// Release the port for the next round.
+		for _, g := range []string{a, b} {
+			h.antic(nil, "guest", "unforward", g, port)
+		}
+	}
+}

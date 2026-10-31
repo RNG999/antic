@@ -307,6 +307,8 @@ P1 により、失敗時の結果は常に「`World` 不変かつ `Fail`」で�
 
 ## 9. 望ましい仕様と現状の差分（実装側の課題）
 
+「根拠」の列は、差分を見つけた時点のファイルと行である。その後のファイル整理（`docs/naming.md`）で、場所は変わっている。
+
 | # | 現状 | 望ましい仕様 | 根拠 |
 |---|---|---|---|
 | D1 | switch に失敗してロールバックした後も、システムプロファイルは新しい構成のまま残る | P1：`Installed` も元に戻す | `ops.go:204`、`nixbuild.go:121` |
@@ -332,7 +334,9 @@ P1 により、失敗時の結果は常に「`World` 不変かつ `Fail`」で�
 | D21 | **（修正済み）** 存在しないセッションへの `guest kill` が、exit 0 で成功する（`systemctl stop --no-block` は動いていないユニットに対しても成功するため） | Reject する（P3） | エージェントの `kill` は、実行中のセッションであることを確かめてから止める。E2E の `sessions` シナリオで検出した |
 | D22 | **（修正済み・セキュリティ）** プロジェクトを書き込み可で共有しているゲストが、そのプロジェクトの `antic.toml` を書き換えられる。`antic.toml` は、ホストがゲストをどう動かすか（ネットワークポリシー、共有、flake）を決める設定である。書き換えれば、次に人が起動したときに制限を緩められる | ゲストから書き換えられない | `antic.toml` を `ProtectedNames`（共有の中で読み取り専用に見せるもの）に加えた。`TestE2EProjectGuest` はプロジェクト自体を共有し、ゲストから `antic.toml` への書き込みが失敗し、他のファイルへは書けることを確かめる。formal の設定を整理する過程で見つかった |
 | D23 | **（修正済み・セキュリティ）** プロジェクトの `antic.toml` が、別の場所で定義されたゲストと同じ名前を定義すると、警告だけで優先される（shadows）。ゲストは、自分が共有するディレクトリの中に新しい `antic.toml` を作れる。利用者がその中で antic を実行すると、既存のゲスト（例 dev）が、ゲストの選んだ共有とネットワークで起動しうる | 重複した定義は、どちらも使わずにエラーにする | `LoadWithProject` は、重複を `Errors` に記録し、どちらのゲストも読み込まない。`TestProjectConfigCannotRedefineAGuest` で検査する |
-| D24 | **（修正済み・セキュリティ）** `guest ps` のコマンドライン、`guest logs` の行、switch 中のエージェントの出力など、ゲストが返す文字列をそのまま端末に出す。ゲストがエスケープシーケンス（タイトルの変更、OSC 52 によるクリップボードへの書き込みなど）を注入できる | 制御文字はエスケープして出す（`antic run` の出力は、コマンドの端末なのでそのまま出す） | `domain.Printable` で、Unicode の Cc に当たる文字を Go の引用形式でエスケープする |
+| D24 | **（修正済み・セキュリティ）** `guest ps` のコマンドラインと、switch 中のエージェントの出力（ゲストが返す文字列）を、そのまま端末に出す（`guest logs` は、以前から CLI の `sanitizer` が制御シーケンスを除いていた）。ゲストがエスケープシーケンス（タイトルの変更、OSC 52 によるクリップボードへの書き込みなど）を注入できる | 制御文字はエスケープして出す（`antic run` の出力は、コマンドの端末なのでそのまま出す） | `domain.Printable` で、Unicode の Cc に当たる文字を Go の引用形式でエスケープする |
+| D25 | **（修正済み）** 他のゲストが転送しているホストポートを、`guest edit`（と `guest create --port`）で追加できてしまう。他のゲストとの衝突は `forward` でしか検査していなかった（Running のゲストなら、再起動時のポート検査で偶然拒否される） | Reject する（不変条件 3） | `claimPorts` が、ポートを増やすすべての変更について衝突を検査する |
+| D26 | **（修正済み）** 2 つのゲストへの `forward` を同時に実行すると、両方が同じホストポートを得る。他のゲストの設定を、プロセスの起動時に読んだもので検査していたため | 1 つだけが成功する | ポートを増やす変更は、ホスト全体のポートのロックの下で、他のゲストの設定をディスクから読み直して検査し、書き終えるまでロックを保持する（`claimPorts`。ロックの順序はゲスト → ポート）。`TestE2EConcurrentPortClaims` は、同時の要求を 3 回行い、毎回 1 つだけが成功することを確かめる |
 
 ## 10. 実行基盤
 
@@ -606,7 +610,7 @@ cd e2e && ANTIC_E2E_BIN=~/.cache/antic-e2e/bin/antic ~/.cache/antic-e2e/e2e.test
 |---|---|---|
 | `spec` ↔ `tea/operation` | 足跡の精緻化（`TestCoreRefinesSpec`） | 既存 |
 | egress データ ↔ `spec.Reach` | Z3（`egress_smt_test.go`） | 既存 |
-| `Saga.tla` ↔ `tea/operation` | TLC 状態グラフの再生（`TestGoCoreRefinesSagaModel`） | **今回** |
+| `Saga.tla` ↔ `tea/operation` | TLC 状態グラフの再生（`TestSagaCoreRefinesModel`） | **今回** |
 | `Saga.tla` ↔ CHC | 手で書き写したもの（規則は action ごとに対応させた） | 検査は推奨 3 で行う予定 |
 | コア ↔ 殻 | NDJSON トレースと TLC による照合 | 段階 5 で行う |
 
@@ -630,7 +634,7 @@ cd e2e && ANTIC_E2E_BIN=~/.cache/antic-e2e/bin/antic ~/.cache/antic-e2e/e2e.test
 
 | 検査 | 規模 | 内容 |
 |---|---|---|
-| `TestGoCoreRefinesSagaModel` | TLC 3,949 状態・6,660 辺、Go 4,511 状態・7,880 遷移 | TLC が出力した状態グラフ（`-dump dot,actionlabels`）を読む。同じ上限（2 プロセス、3 コマンド、2 クラッシュ）で `operation.Update` を動かす。抽象化関数 `alpha` と対応表 `action`（Go の Stage と結果 → TLA+ の action）を通して、Go の全遷移が stutter か、同じ action の TLC の辺であることを確かめる。逆に、TLC の全状態と全辺に Go 側から到達することも確かめる。つまり、この有限の構成で stutter を除いて等価である。上限が cfg と一致することも検査する |
+| `TestSagaCoreRefinesModel` | TLC 3,949 状態・6,660 辺、Go 4,511 状態・7,880 遷移 | TLC が出力した状態グラフ（`-dump dot,actionlabels`）を読む。同じ上限（2 プロセス、3 コマンド、2 クラッシュ）で `operation.Update` を動かす。抽象化関数 `alpha` と対応表 `action`（Go の Stage と結果 → TLA+ の action）を通して、Go の全遷移が stutter か、同じ action の TLC の辺であることを確かめる。逆に、TLC の全状態と全辺に Go 側から到達することも確かめる。つまり、この有限の構成で stutter を除いて等価である。上限が cfg と一致することも検査する |
 | ミュータント | 6 種 | ジャーナルを開かない、意図を記録しない、逆操作で New に戻す、回復で最後の意図を飛ばす、ロック前に読んだ状態で計画する、ジャーナルを消す前に成功扱いにする。いずれも検出した。さらに、コアに「回復で最後の意図を飛ばす」バグを直接入れると、`Invariant` と `StepValid` は通る一方で、この検査は検出した |
 | `TestSagaRecoversFromCrashes` | 57,598 実行 | 全コマンド × 故障 1 回 × 全クラッシュ点について、ジャーナルが残れば回復で初期状態に戻ることを確かめる。回復自体を任意の点でクラッシュさせ、もう一度回復させた場合も確かめる。ジャーナルが残っていなければ、旧状態か新状態のどちらかになっている |
 | L1a（改訂） | 6,720 実行 | ジャーナルの effect も故障注入の対象にした。成功時にジャーナルが残らないこと、Broken のときはジャーナルが残っていて回復できることも確かめる |
@@ -667,7 +671,7 @@ E2E には故障注入のフックを置いた。`ANTIC_SAGA_CRASH_AFTER=k` を�
 | E2E（手順 A の後、約 7 分） | 16 シナリオ。D16 と、複数ディレクトリの mount が P2 で止まるシナリオを含めて PASS |
 | E2E（手順 B〜E の後、約 8 分） | 18 シナリオ。D5、D7、D8、D9、D10、D12 が既知の差分から外れて PASS。残る既知の差分は D3 だけ |
 | E2E（手順 F の後、約 8 分） | 18 シナリオがすべて PASS（既知の差分 0 件）。`TestE2ECrashRecovery` も PASS：mount のクラッシュ点 3 つと、再起動を伴う set のクラッシュ点 3 つ（設定を書いた後、VM を止めた後、新しい設定で起動した後）。いずれも次のコマンドで回復し、観測がクラッシュ前の状態と一致した |
-| 単体テスト | `TestDraftShares`、`TestDraftPorts`（D2、D7、D16）、`TestJournalRoundTrip`、`TestLiveShares`、`TestTrashRestore` |
+| 単体テスト | `TestDraftShares`、`TestDraftPorts`（D2、D7、D16）、`TestJournalRoundTrip`、`TestLiveSharesExamples`、`TestTrashRestore` |
 
 注記：B〜E は同じファイル群にまたがって変更したため、E2E は手順ごとではなく、B〜E をまとめて 1 回実行した。
 
@@ -677,7 +681,7 @@ E2E には故障注入のフックを置いた。`ANTIC_SAGA_CRASH_AFTER=k` を�
 |---|---|---|
 | 故障注入（D1） | `ANTIC_SAGA_FAIL=NAME[:n]` で、n 番目の `EffectNAME` を実行せずに失敗させる。`TestE2EFaultInjection` は Running のゲストで 4 つの場合を試す：install の Switch（D1）、set の再起動での StartVM、mount の Hotplug、forward の JournalClear。いずれも exit 125 で、観測はコマンド前と一致した。実行中のシステムも、停止後にプロファイルが指すシステムも、元のままだった | PASS |
 | 形式モデルの一般化 | `Saga.tla` で、コマンドごとに計画の長さ（commit ステップ 0〜NRes 個）を選ぶようにした。`base` と `lastOk` は資源ごとにした。再生では長さごとに実際のコマンドの形を使う（start、stop、mount、設定とパッケージの変更）。CHC も同じ形に直した | TLC 19,727 状態・36,810 辺と完全一致。ミュータント 6 種をすべて検出。Spacer は約 4 秒 |
-| 殻のトレース照合（推奨 4） | `ANTIC_SAGA_TRACE` に NDJSON を書き出す（ロックの取得と解放、計画の長さ、各 effect の Stage と結果）。`TestShellTracesRefineSagaModel` は、再生と同じ対応表で TLA+ の action に写し、`SagaTrace.cfg`（計画は最大 5 ステップ）の状態グラフ上で非決定性オートマトンとして辿る。解放せずに終わったプロセスは Crash とみなす。静止点でモデルを初期状態に戻すので、長いトレースも検査できる | E2E の全 24 トレース、1,308 イベントが適合。誤ったトレース 4 種は拒否した |
+| 殻のトレース照合（推奨 4） | `ANTIC_SAGA_TRACE` に NDJSON を書き出す（ロックの取得と解放、計画の長さ、各 effect の Stage と結果）。`TestSagaShellTracesRefineModel` は、再生と同じ対応表で TLA+ の action に写し、`SagaTrace.cfg`（計画は最大 5 ステップ）の状態グラフ上で非決定性オートマトンとして辿る。解放せずに終わったプロセスは Crash とみなす。静止点でモデルを初期状態に戻すので、長いトレースも検査できる | E2E の全 24 トレース、1,308 イベントが適合。誤ったトレース 4 種は拒否した |
 | D4 / lifecycle | `Shares` と `Inspect` を、設定と boot 記録から直接求めるようにした。`host` は `tea/lifecycle` に依存しなくなった | — |
 | D17 | `Manager.All` は読み込めない設定を飛ばす（`ls` はそれらを error として表示する）。`rm` は読み込めない設定のゲストも削除する（設定の中身ではなくバイト列だけを使う）。`TestE2EBrokenConfig` で、実行中のゲストの設定を壊し、`ls`、`rm`、同名での再作成ができることを確かめた | PASS |
 | D18（新規・修正済み） | トレース付き E2E の最中に、`antic run` が exit 0 のまま空の出力を返したことで見つけた。原因はゲスト側のセッションで、`cmd.Wait` を出力パイプを読み切る前に呼んでいたこと | 修正後の E2E で確認 |
@@ -688,8 +692,8 @@ E2E には故障注入のフックを置いた。`ANTIC_SAGA_CRASH_AFTER=k` を�
 
 | 継ぎ目 | 検査 | 結果 |
 |---|---|---|
-| `Saga.tla` ↔ CHC（推奨 3） | `TestCHCCoversSagaModel`。CHC の規則をデータとして持ち（`chcModel`）、Horn 節と遷移式の両方をそこから出力する。TLC の全辺をロック保持者の視点に抽象化し、同じ action の規則の具体例になっていることを Z3 で確かめる。全規則が少なくとも 1 回使われることも確かめる | 19,727 状態から得た 2,079 本の抽象辺がすべて 25 規則で被覆された。ミュータント 3 種（規則の欠落、回復で New に戻す、Apply のガードを強める）はすべて検出した。限界：検査は 1 ステップ単位なので、その相で陳腐化した変数を誤って読む規則は検出できない（「回復で現コマンドの base を使う」ミュータントは通ってしまった） |
-| egress の SMT 生成器 ↔ Go（推奨 5） | `TestSMTGeneratorAgreesWithGo`。生成した式を具体値で評価し、Go と比べる。`smtIn` は `netip.Prefix.Contains` と、全 prefix の境界の前後のアドレスで比べる。`rulesFormula` は `egress.Eval` と、`reachFormula` は `spec.Reach` と比べる | 1,232 件が一致した。`smtPrefix` のビット範囲を 1 つずらすバグを入れると、この検査は検出した。一方、Z3 の等価性証明は両辺が同じ生成器を使うため、このバグを検出できない |
+| `Saga.tla` ↔ CHC（推奨 3） | `TestSagaClausesCoverModel`。CHC の規則をデータとして持ち（`chcModel`）、Horn 節と遷移式の両方をそこから出力する。TLC の全辺をロック保持者の視点に抽象化し、同じ action の規則の具体例になっていることを Z3 で確かめる。全規則が少なくとも 1 回使われることも確かめる | 19,727 状態から得た 2,079 本の抽象辺がすべて 25 規則で被覆された。ミュータント 3 種（規則の欠落、回復で New に戻す、Apply のガードを強める）はすべて検出した。限界：検査は 1 ステップ単位なので、その相で陳腐化した変数を誤って読む規則は検出できない（「回復で現コマンドの base を使う」ミュータントは通ってしまった） |
+| egress の SMT 生成器 ↔ Go（推奨 5） | `TestEgressSMTGeneratorAgreesWithGo`。生成した式を具体値で評価し、Go と比べる。`smtIn` は `netip.Prefix.Contains` と、全 prefix の境界の前後のアドレスで比べる。`rulesFormula` は `egress.Eval` と、`reachFormula` は `spec.Reach` と比べる | 1,232 件が一致した。`smtPrefix` のビット範囲を 1 つずらすバグを入れると、この検査は検出した。一方、Z3 の等価性証明は両辺が同じ生成器を使うため、このバグを検出できない |
 
 これで、継ぎ目の表（§13「段階 5 の準備」）にあった「手で書き写したもの」「未実装」はなくなった。各継ぎ目は、機械的な検査（証明、モデル検査の再生、トレース照合、差分検査のいずれか）で結ばれている。推奨 6（Gobra による Go コードの直接検証の概念実証）は見送った。Gobra は nixpkgs になく、導入するには GitHub のリリース jar を Nix の derivation に固定し、JRE で動かす必要がある。一方で、コアと TLA+ は状態グラフの完全一致で、殻と TLA+ はトレース照合で、すでに結ばれている。概念実証で得られるものは、この費用に見合わない。純粋関数の帰納的な性質を証明したくなったときに、推奨 7（Dafny を証明専用に使う）と合わせて再検討する。
 
@@ -723,12 +727,12 @@ E2E には故障注入のフックを置いた。`ANTIC_SAGA_CRASH_AFTER=k` を�
 
 | 対象（溝） | テスト | 性質 | 確認 |
 |---|---|---|---|
-| egress：代表点 21 個と自由論理変数による抽象化の外側 | `TestPBTEgressRulesRefineReach`（`internal/spec/refine`） | 差分：ランダムなホスト網、ランダムなポリシー（設定が受け付ける CIDR の任意のリスト）、ランダムな宛先（各 prefix の境界と IPv4-mapped 形式に寄せる）について、`egress.Eval(Rules(...))` = `spec.Reach` | `Eval` の Unmap を外すミュータントは、`::ffff:1.0.0.0` まで縮めて検出した。最初は IPv4-mapped 形式を生成できず見逃したので、生成器を直した |
-| 同上（仕様と実装が同じ誤りを共有する場合） | `TestPBTEgressMetamorphic` | メタモルフィック関係（実装側で検査）：deny を足しても到達性は増えない。allow を足しても減らない。default deny ⊆ default allow。learned ⊇ 未学習。エントリの順序に依存しない | — |
-| saga コア：TLC の有限構成（2 プロセス、3 コマンド、4 つの形）の外側 | `TestPBTSagaConsistentUnderCrashes`（`internal/tea/operation`） | 状態付き PBT：2〜4 プロセス、コーパスのすべてのコマンド、任意の effect の失敗（TLA+ モデルが扱わない逆操作の失敗も含む）、クラッシュを、50〜400 ステップにわたってランダムに織り交ぜる。各ステップの後に `Consistent` が成り立つ | 「回復で最後の意図を飛ばす」コアのバグを検出した。最初は rapid の `Repeat`（30 ステップ、行動を一様に選ぶ）では到達できなかったので、ロック保持者が取れる行動だけを選ぶ形に改めた |
-| 殻の設定編集（`config.Draft`、実ファイルの TOML とポリシー）：形式モデルの外側 | `TestPBTDraftEditsRefineSpec`（`internal/host/guest`） | 差分：停止中のゲストに mount / unmount / forward / unforward / set のランダムな系列を適用する。殻は、仕様が受け付けるものだけを受け付け、仕様の `Config` を意味するファイルを残す | **D19 を発見した**。「フラグなしの set」の検査は CLI にしかなく、殻の層と食い違っていたので、`Draft.SetResources` に移した |
-| 殻のライブ判定（`liveShares`） | `TestPBTLiveSharesRefineSpec` | 差分：ランダムな boot / runtime のマウントと、新しい共有の集合について、殻が残すマウント（ライブ反映か再起動か）が、仕様の `edit` の結果と一致する | — |
-| 設定ファイルの書き方（仕様は意味しか語らない） | `TestPBTDraftKeepsComments`、`TestPBTDraftInverseEdits`、`TestPBTDraftEditsCommute`（`internal/host/config`） | メタモルフィック関係：編集しても、取り除くブロックの外にある利用者のコメントは残る。追加してから取り除くと意味が元に戻る（共有、ポート）。別々の共有の追加は可換である | — |
+| egress：代表点 21 個と自由論理変数による抽象化の外側 | `TestEgressRulesRefineReachOnRandomInputs`（`internal/spec/refine`） | 差分：ランダムなホスト網、ランダムなポリシー（設定が受け付ける CIDR の任意のリスト）、ランダムな宛先（各 prefix の境界と IPv4-mapped 形式に寄せる）について、`egress.Eval(Rules(...))` = `spec.Reach` | `Eval` の Unmap を外すミュータントは、`::ffff:1.0.0.0` まで縮めて検出した。最初は IPv4-mapped 形式を生成できず見逃したので、生成器を直した |
+| 同上（仕様と実装が同じ誤りを共有する場合） | `TestEgressRulesMetamorphicRelations` | メタモルフィック関係（実装側で検査）：deny を足しても到達性は増えない。allow を足しても減らない。default deny ⊆ default allow。learned ⊇ 未学習。エントリの順序に依存しない | — |
+| saga コア：TLC の有限構成（2 プロセス、3 コマンド、4 つの形）の外側 | `TestSagaConsistentUnderRandomFaultsAndCrashes`（`internal/tea/operation`） | 状態付き PBT：2〜4 プロセス、コーパスのすべてのコマンド、任意の effect の失敗（TLA+ モデルが扱わない逆操作の失敗も含む）、クラッシュを、50〜400 ステップにわたってランダムに織り交ぜる。各ステップの後に `Consistent` が成り立つ | 「回復で最後の意図を飛ばす」コアのバグを検出した。最初は rapid の `Repeat`（30 ステップ、行動を一様に選ぶ）では到達できなかったので、ロック保持者が取れる行動だけを選ぶ形に改めた |
+| 殻の設定編集（`config.Draft`、実ファイルの TOML とポリシー）：形式モデルの外側 | `TestDraftEditsRefineSpec`（`internal/host/guest`） | 差分：停止中のゲストに mount / unmount / forward / unforward / set のランダムな系列を適用する。殻は、仕様が受け付けるものだけを受け付け、仕様の `Config` を意味するファイルを残す | **D19 を発見した**。「フラグなしの set」の検査は CLI にしかなく、殻の層と食い違っていたので、`Draft.SetResources` に移した |
+| 殻のライブ判定（`liveShares`） | `TestLiveSharesRefineSpec` | 差分：ランダムな boot / runtime のマウントと、新しい共有の集合について、殻が残すマウント（ライブ反映か再起動か）が、仕様の `edit` の結果と一致する | — |
+| 設定ファイルの書き方（仕様は意味しか語らない） | `TestDraftEditsKeepComments`、`TestDraftEditsUndo`、`TestDraftEditsCommute`（`internal/host/config`） | メタモルフィック関係：編集しても、取り除くブロックの外にある利用者のコメントは残る。追加してから取り除くと意味が元に戻る（共有、ポート）。別々の共有の追加は可換である | — |
 
 `rapid` の追加で、Nix の `vendorHash` を、ホストとエージェントで別々の値にした（ホスト側のテストだけが rapid を import するため）。両方のパッケージがビルドできることを確かめた。`nix flake check` の `go-tests` は、従来どおり arch テストだけが失敗する（サンドボックスで標準ライブラリを解決できないという既存の問題）。
 
@@ -740,7 +744,7 @@ E2E には故障注入のフックを置いた。`ANTIC_SAGA_CRASH_AFTER=k` を�
 
 - **線形化可能性**：実際にロックを取った順序を、トレースの `acquire` から読む。その順序で仕様の `Post` を適用し、各コマンドの終了コードと、最後の観測が許される世界に含まれることを確かめる。
 - **クラッシュ**：奇数番目のラウンドでは、1 つのプロセスをジャーナルを開いた後で kill する（exit 137）。P1 により、kill されたコマンドは何も変えていない扱いになる。次にロックを取ったプロセスが回復する。
-- **トレース照合**：同じトレースを、`TestShellTracesRefineSagaModel` で `Saga.tla` と照合する。ロック待ちのプロセスはイベントを出さないので、モデルのプロセス数 2 で足りる。
+- **トレース照合**：同じトレースを、`TestSagaShellTracesRefineModel` で `Saga.tla` と照合する。ロック待ちのプロセスはイベントを出さないので、モデルのプロセス数 2 で足りる。
 
 結果：4 ラウンド（うち 1 ラウンドで実際に kill した）がすべて線形化できた。トレース 4 本、166 イベントがモデルに適合した。
 

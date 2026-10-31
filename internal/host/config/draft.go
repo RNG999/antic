@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -234,14 +235,12 @@ func (d Draft) AddPorts(ports []Port, others []Port) (Draft, error) {
 	have := slices.Clone(d.After.Ports)
 	var add []Port
 	for _, p := range ports {
-		same := func(q Port) bool { return q.Host == p.Host && q.Guest == p.Guest && q.ProtoStr() == p.ProtoStr() }
+		same := func(q Port) bool { return q.Host == p.Host && q.Guest == p.Guest && q.ProtoString() == p.ProtoString() }
 		if slices.ContainsFunc(have, same) {
 			continue
 		}
-		for _, q := range append(slices.Clone(have), others...) {
-			if q.Host == p.Host && ((p.TCP() && q.TCP()) || (p.UDP() && q.UDP())) {
-				return d, fmt.Errorf("host port %d is already forwarded", p.Host)
-			}
+		if err := PortsConflict([]Port{p}, map[string][]Port{"": have, "another guest": others}); err != nil {
+			return d, err
 		}
 		have, add = append(have, p), append(add, p)
 	}
@@ -262,6 +261,42 @@ func (d Draft) AddPorts(ports []Port, others []Port) (Draft, error) {
 		}
 		return lines, nil
 	})
+}
+
+// PortsConflict reports a forward in ports whose host port (and protocol)
+// a forward in taken uses already; taken maps each owner ("" for the guest
+// itself) to its forwards.
+func PortsConflict(ports []Port, taken map[string][]Port) error {
+	owners := slices.Sorted(maps.Keys(taken))
+	for _, p := range ports {
+		for _, owner := range owners {
+			for _, q := range taken[owner] {
+				if !p.Overlaps(q) {
+					continue
+				}
+				if owner == "" {
+					return fmt.Errorf("host port %d is already forwarded", p.Host)
+				}
+				return fmt.Errorf("host port %d is already forwarded by %s", p.Host, owner)
+			}
+		}
+	}
+	return nil
+}
+
+// NewPorts are the forwards of d's new config that its old config does not
+// have (all of them for a new file).
+func (d Draft) NewPorts() []Port {
+	var out []Port
+	for _, p := range d.After.Ports {
+		had := d.Before != nil && slices.ContainsFunc(d.Before.Ports, func(q Port) bool {
+			return q.Host == p.Host && q.ProtoString() == p.ProtoString()
+		})
+		if !had {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // RemovePorts removes the forwards of the given host ports.
@@ -319,7 +354,7 @@ func NeedsRestart(a, b *Guest) bool {
 		!slices.Equal(a.AllowDomains, b.AllowDomains) || !slices.Equal(a.AllowNets, b.AllowNets) ||
 		!slices.Equal(a.DenyDomains, b.DenyDomains) || !slices.Equal(a.DenyNets, b.DenyNets) ||
 		!slices.EqualFunc(a.Ports, b.Ports, func(p, q Port) bool {
-			return p.Host == q.Host && p.Guest == q.Guest && p.ProtoStr() == q.ProtoStr()
+			return p.Host == q.Host && p.Guest == q.Guest && p.ProtoString() == q.ProtoString()
 		})
 }
 
@@ -349,4 +384,104 @@ func writeFileAtomic(real string, content []byte) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), real)
+}
+
+// NewGuestDraft drafts a new ~/.config/antic/guests/<name>.toml file (a
+// draft with NewFile set).
+func (c *Config) NewGuestDraft(name string, g Guest, home string) (Draft, error) {
+	if err := os.MkdirAll(c.dir, 0o755); err != nil {
+		return Draft{}, err
+	}
+	path := c.GuestPath(name)
+	if _, err := os.Stat(path); err == nil {
+		return Draft{}, fmt.Errorf("guest config %s already exists", path)
+	}
+	d := Draft{Path: path, Name: name, NewFile: true, home: home}
+	content := []byte(strings.Join(renderGuest(g, home), "\n") + "\n")
+	after, err := d.parse(content)
+	if err != nil {
+		return Draft{}, err
+	}
+	d.New, d.After = content, after
+	return d, nil
+}
+
+// renderGuest renders the config file of a new guest.
+func renderGuest(g Guest, home string) []string {
+	var lines []string
+	if g.Description != "" {
+		lines = append(lines, "description = "+tomlString(g.Description))
+	}
+	if g.Flake != "" {
+		lines = append(lines, "flake = "+tomlString(tildePath(g.Flake, home)))
+	} else {
+		lines = append(lines, "packages = "+tomlArray(g.Packages))
+	}
+	cpus := g.CPUs
+	if cpus == 0 {
+		cpus = 2
+	}
+	mem := g.Memory
+	if mem == "" {
+		mem = "4G"
+	}
+	lines = append(lines, "", "[spec]",
+		fmt.Sprintf("cpus = %d", cpus),
+		"memory = "+tomlString(mem))
+
+	lines = append(lines, "", "[network]")
+	netMode := g.Network.Mode
+	if netMode == "" {
+		netMode = NetworkInternet
+	}
+	lines = append(lines, "mode = "+tomlString(netMode))
+	if len(g.Network.Allow) > 0 {
+		lines = append(lines, "allow = "+tomlArray(g.Network.Allow))
+	}
+	if len(g.Network.Deny) > 0 {
+		lines = append(lines, "deny = "+tomlArray(g.Network.Deny))
+	}
+	for _, p := range g.Ports {
+		lines = append(lines, "", "[[network.ports]]",
+			fmt.Sprintf("host = %d", p.Host),
+			fmt.Sprintf("guest = %d", p.Guest))
+		if p.Proto != "" && p.Proto != "tcp" {
+			lines = append(lines, "proto = "+tomlString(p.Proto))
+		}
+		if p.Description != "" {
+			lines = append(lines, "description = "+tomlString(p.Description))
+		}
+	}
+	for _, s := range g.Shares {
+		sp := s.Source
+		if sp == "" {
+			sp = s.Path
+		}
+		mode := "rw"
+		if s.ReadOnly || s.Mode == "ro" {
+			mode = "ro"
+		}
+		lines = append(lines, "", "[[shares]]",
+			"source = "+tomlString(tildePath(sp, home)),
+			"mode = "+tomlString(mode))
+	}
+	if len(g.Env) > 0 {
+		lines = append(lines, "", "[env]")
+		var keys []string
+		for k := range g.Env {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+		for _, k := range keys {
+			lines = append(lines, fmt.Sprintf("%s = %s", k, tomlString(g.Env[k])))
+		}
+	}
+	return lines
+}
+
+// ResourceUpdates specifies optional updates to a guest's cpus, memory, and network.
+type ResourceUpdates struct {
+	CPUs    *int
+	Memory  *string
+	Network *string
 }

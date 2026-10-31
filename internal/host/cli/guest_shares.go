@@ -10,7 +10,7 @@ import (
 	"github.com/RNG999/antic/internal/host/config"
 )
 
-func (a *app) guestMount() *cobra.Command {
+func (a *app) guestMountCmd() *cobra.Command {
 	var ro bool
 	cmd := &cobra.Command{
 		Use:   "mount [NAME] DIR...",
@@ -35,10 +35,10 @@ func (a *app) guestMount() *cobra.Command {
 					return err
 				}
 				if !changed {
-					fmt.Fprintf(os.Stderr, "antic: %s is already shared with %s (%s)\n", p, g.Name(), mode(ro))
+					fmt.Fprintf(os.Stderr, "antic: %s is already shared with %s (%s)\n", p, g.Name(), shareMode(ro))
 					continue
 				}
-				fmt.Fprintf(os.Stderr, "antic: shared %s with %s (%s)\n", p, g.Name(), mode(ro))
+				fmt.Fprintf(os.Stderr, "antic: shared %s with %s (%s)\n", p, g.Name(), shareMode(ro))
 			}
 			return nil
 		},
@@ -47,7 +47,7 @@ func (a *app) guestMount() *cobra.Command {
 	return cmd
 }
 
-func (a *app) guestUnmount() *cobra.Command {
+func (a *app) guestUnmountCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "unmount [NAME] DIR...",
 		Short: "Unmount and stop sharing directories with a guest",

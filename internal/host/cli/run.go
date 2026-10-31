@@ -105,7 +105,7 @@ func (a *app) shellCmd() *cobra.Command {
 func (a *app) execIn(ctx context.Context, g *guest.Guest, workdir string, argv []string, pty bool) error {
 	dir := workdir
 	if dir == "" {
-		if d, err := g.Dir(ctx); err == nil {
+		if d, err := g.WorkDir(ctx); err == nil {
 			dir = d
 		} else {
 			dir = "~"
