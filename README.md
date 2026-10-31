@@ -225,9 +225,11 @@ For full NixOS configuration beyond a package list, set `flake = "/path/to/flake
 The top-level behavior is a state-transition specification (`internal/spec`, see `docs/design/spec.md`) that serves as the test oracle; the command saga is model-checked (`formal/`). The tasks are in the `justfile` (`just` lists them). Install `just` on the host: a rootless Nix cannot start `nix develop` from inside another Nix shell, and the E2E tests must run outside it.
 
 ```bash
-just quick     # every change: nix flake check (unit tests, property-based tests, Z3, TLC, Spacer) and lint
-just e2e       # this host: every E2E test against real antic, with saga traces validated against the TLA+ model
-just nightly   # e2e plus larger property-based tests, generated command sequences and more concurrent rounds
+just check              # every change: nix flake check (unit tests, property-based tests, Z3, TLC, Spacer) and lint
+just e2e run            # this host: every E2E test against real antic, with saga traces validated against the TLA+ model
+just e2e run 'TestE2E$/sessions'   # one test (a -test.run filter)
+just test pbt 20000     # property-based tests with more cases
+just nightly            # larger property-based tests, then every E2E test with generated command sequences
 ```
 
 The E2E tests run antic for real (KVM, `systemd --user`) and only touch guests named `e2e-*`; run them from a plain shell, not inside `nix develop`.
