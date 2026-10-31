@@ -192,10 +192,16 @@ func (h *harness) antic(extraEnv []string, args ...string) (stdout string, code 
 
 // anticIn runs antic in dir (where it looks for a project antic.toml).
 func (h *harness) anticIn(dir string, extraEnv []string, args ...string) (stdout string, code int, stderr string) {
+	return h.anticWith(dir, "", extraEnv, args...)
+}
+
+// anticWith runs antic in dir with input on its standard input.
+func (h *harness) anticWith(dir, input string, extraEnv []string, args ...string) (stdout string, code int, stderr string) {
 	ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, h.bin, args...)
 	cmd.Dir = dir
+	cmd.Stdin = strings.NewReader(input)
 	cmd.Env = append(os.Environ(), extraEnv...)
 	if dir := os.Getenv("ANTIC_E2E_TRACES"); dir != "" {
 		// Every command's saga events, for trace validation against
@@ -335,6 +341,21 @@ func (h *harness) render(c spec.Cmd) ([]string, []string) {
 		return opt([]string{"guest", "edit"}, c.Target), []string{"EDITOR=" + editor, "VISUAL=", "E2E_EDIT_SRC=" + src}
 	case spec.CmdRun:
 		return append(opt([]string{"run"}, c.Target), "-T", "--", "sh", "-c", fmt.Sprintf("exit %d", c.Code)), nil
+	case spec.CmdInspect:
+		switch c.What {
+		case spec.InspectLs:
+			return []string{"guest", "ls"}, nil
+		case spec.InspectShow:
+			return opt([]string{"guest", "show"}, c.Target), nil
+		case spec.InspectStats:
+			return opt([]string{"guest", "stats"}, c.Target), nil
+		case spec.InspectLogs:
+			return opt([]string{"guest", "logs"}, c.Target), nil
+		case spec.InspectDoctor:
+			return []string{"doctor"}, nil
+		case spec.InspectCacheLs:
+			return []string{"cache", "ls"}, nil
+		}
 	}
 	h.t.Fatalf("cannot render %#v", c)
 	return nil, nil

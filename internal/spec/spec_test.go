@@ -106,10 +106,14 @@ func alphabet() []spec.Cmd {
 			spec.CmdEdit{Target: n, New: spec.RawConfig{Network: spec.RawNetwork{Default: "deny", Allow: []string{"one.one.one.one", "192.168.1.0/24"}}}},
 			spec.CmdRun{Target: n, Code: 42},
 			spec.CmdSpawn{Target: n, Command: "sleep 600"},
+			spec.CmdShell{Target: n, Code: 7},
+			spec.CmdInspect{What: spec.InspectShow, Target: n},
+			spec.CmdInspect{What: spec.InspectLogs, Target: n},
 			spec.CmdKill{Target: n, Commands: []string{"sleep 600"}},
 		)
 	}
 	return append(cs,
+		spec.CmdInspect{What: spec.InspectLs},
 		spec.CmdStart{Names: []string{"e2e-a", "e2e-b"}},
 		spec.CmdStop{},
 		spec.CmdCreate{Name: "Bad_Name"},
@@ -149,6 +153,10 @@ func targets(c spec.Cmd) []string {
 	case spec.CmdRun:
 		return []string{c.Target}
 	case spec.CmdSpawn:
+		return []string{c.Target}
+	case spec.CmdShell:
+		return []string{c.Target}
+	case spec.CmdInspect:
 		return []string{c.Target}
 	case spec.CmdKill:
 		return []string{c.Target}
@@ -216,6 +224,14 @@ func checkStep(t *testing.T, w spec.World, c spec.Cmd, outs []spec.Outcome) {
 	}
 	if last.Kind == spec.OutcomeEnvFail {
 		t.Fatalf("%#v: last outcome must be success or rejection", c)
+	}
+	// P5: an inspection changes nothing, whatever it reports.
+	if _, inspect := c.(spec.CmdInspect); inspect {
+		for _, o := range outs {
+			if !o.World.Equal(w) {
+				t.Fatalf("%#v changed the World", c)
+			}
+		}
 	}
 }
 

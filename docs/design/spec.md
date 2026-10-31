@@ -789,3 +789,9 @@ E2E の `sessions` シナリオは、2 つの spawn、kill、存在しないセ�
 
 結果は PASS（約 45 秒）。以前の振る舞い（ユーザーランドだけ switch してメッセージを出す）では、手順 3 の `/proc/cmdline` の検査で失敗する。
 
+### 残りのコマンド（shell、読み取りのコマンド、cache、update）
+
+- `CmdShell`：`run` と同じ意味である。停止中のゲストは起動し、終了コードはシェルの終了コードになる。E2E では、標準入力に `exit N` を渡して確かめる。
+- `CmdInspect`（`guest ls`、`guest show`、`guest stats`、`guest logs`、`doctor`、`cache ls`）：World を変えない（P5）。存在しないゲストへの `show`、`stats`、`logs` と、一度も起動していないゲストへの `logs`（コンソールログがない）は Reject する。L0 は、どの結果でも World が等しいことを検査する。E2E の「inspection changes nothing」シナリオでは、Running と停止中の両方で全種を実行する。D6 のシナリオでは、未作成のゲストへの `logs` と `show` を確かめる。
+- モデルの外に置くもの：`antic update`（ホストにインストールされた antic を置き換える）と `antic cache rm`（ホストの Nix ストア全体を GC する）。どちらも、テストが利用者のマシンに対して行ってはならない操作なので、E2E では実行しない。
+

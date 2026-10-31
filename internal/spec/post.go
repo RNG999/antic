@@ -187,6 +187,10 @@ func Post(w World, env Env, c Cmd) []Outcome {
 		return postEdit(w, env, c)
 	case CmdRun:
 		return postRun(w, env, c)
+	case CmdShell:
+		return postRun(w, env, CmdRun(c))
+	case CmdInspect:
+		return postInspect(w, c)
 	case CmdSpawn:
 		return postSpawn(w, env, c)
 	case CmdKill:
@@ -661,6 +665,27 @@ func postEdit(w World, env Env, c CmdEdit) []Outcome {
 		s.w = w.with(switched)
 		return s
 	})
+}
+
+// postInspect changes nothing; it rejects a guest that does not exist,
+// and the console log of a guest that never booted.
+func postInspect(w World, c CmdInspect) []Outcome {
+	switch c.What {
+	case InspectLs, InspectDoctor, InspectCacheLs:
+		return []Outcome{{World: w, Kind: OutcomeOk}}
+	case InspectShow, InspectStats, InspectLogs:
+	}
+	if w.external(c.Target) {
+		return nil
+	}
+	g, err := w.lookup(c.Target)
+	if err == nil && c.What == InspectLogs && g.Phase == PhaseUncreated {
+		err = fmt.Errorf("guest %s has not been built yet", g.Name.Get())
+	}
+	if err != nil {
+		return []Outcome{{World: w, Kind: OutcomeReject, Reason: err.Error()}}
+	}
+	return []Outcome{{World: w, Kind: OutcomeOk}}
 }
 
 // postSpawn starts the guest if needed (as run does) and leaves a session

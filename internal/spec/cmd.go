@@ -113,6 +113,43 @@ type CmdKill struct {
 	Commands []string
 }
 
+// CmdShell is "antic shell [NAME]" whose shell exits with Code: like run.
+type CmdShell struct {
+	Target string
+	Code   int
+}
+
+// Inspection is a command that only reads.
+type Inspection uint8
+
+const (
+	// InspectLs is "antic guest ls".
+	InspectLs Inspection = iota
+	// InspectShow is "antic guest show NAME".
+	InspectShow
+	// InspectStats is "antic guest stats NAME".
+	InspectStats
+	// InspectLogs is "antic guest logs NAME" (the console log of its last boot).
+	InspectLogs
+	// InspectDoctor is "antic doctor".
+	InspectDoctor
+	// InspectCacheLs is "antic cache ls".
+	InspectCacheLs
+)
+
+// CmdInspect is a command that reports and changes nothing (P5). Target
+// names the guest for show, stats and logs.
+//
+// "antic update" and "antic cache rm" are outside the model: they replace
+// the host's antic and garbage-collect the host's whole Nix store, which
+// the tests must not do to the person's machine.
+type CmdInspect struct {
+	What   Inspection
+	Target string
+}
+
+func (CmdShell) isCmd()     {}
+func (CmdInspect) isCmd()   {}
 func (CmdSpawn) isCmd()     {}
 func (CmdKill) isCmd()      {}
 func (CmdCreate) isCmd()    {}

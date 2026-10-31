@@ -34,6 +34,10 @@ func (h *harness) step(c spec.Cmd) string {
 		args, code, stderr = h.spawn(c)
 	case spec.CmdKill:
 		args, code, stderr = h.kill(c)
+	case spec.CmdShell:
+		// An interactive shell reading its commands from standard input.
+		args = append([]string{"shell"}, c.Target)
+		_, code, stderr = h.anticWith(h.work, fmt.Sprintf("exit %d\n", c.Code), nil, args...)
 	default:
 		var env []string
 		args, env = h.render(c)
@@ -157,6 +161,24 @@ func scenarios() []scenario {
 			},
 		},
 		{
+			name: "inspection changes nothing, shell passes its status",
+			cmds: func(*harness) []spec.Cmd {
+				inspect := func(what spec.Inspection) spec.Cmd { return spec.CmdInspect{What: what, Target: a} }
+				all := func() []spec.Cmd {
+					return []spec.Cmd{inspect(spec.InspectLs), inspect(spec.InspectShow), inspect(spec.InspectStats),
+						inspect(spec.InspectLogs), inspect(spec.InspectDoctor), inspect(spec.InspectCacheLs)}
+				}
+				var cmds []spec.Cmd
+				cmds = append(cmds, inspect(spec.InspectShow)) // no such guest: rejected
+				cmds = append(cmds, create(a))
+				cmds = append(cmds, all()...)
+				cmds = append(cmds, spec.CmdShell{Target: a, Code: 7}, spec.CmdStop{Names: []string{a}})
+				cmds = append(cmds, all()...)
+				cmds = append(cmds, spec.CmdShell{Target: a, Code: 0}) // starts the stopped guest
+				return cmds
+			},
+		},
+		{
 			name: "D2 mount with another mode",
 			cmds: func(h *harness) []spec.Cmd {
 				return []spec.Cmd{
@@ -201,6 +223,8 @@ func scenarios() []scenario {
 				return []spec.Cmd{
 					spec.CmdStop{Names: []string{b}},
 					spec.CmdStart{Names: []string{b}},
+					spec.CmdInspect{What: spec.InspectLogs, Target: b},
+					spec.CmdInspect{What: spec.InspectShow, Target: b},
 					spec.CmdApply{Target: b},
 					spec.CmdStart{Names: []string{b}},
 					spec.CmdRm{Names: []string{b}, Yes: true},
