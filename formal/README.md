@@ -32,6 +32,7 @@ antic run formal -- z3 formal/cli_args.smt2
   1. the rules' built-in "never" and "LAN" address sets equal the specification's, for all IPv4 and IPv6 addresses (bit-vectors);
   2. the rules' first-match structure equals the specification's `Reach` formula with free Boolean set memberships, which covers every allow/deny list, mode and default.
 - A deliberately satisfiable control query guards against a pipeline that answers `unsat` to everything.
+- **The generator is checked too**: [`smt_gen_test.go`](../internal/spec/refine/smt_gen_test.go) evaluates the generated formulas on concrete inputs and compares them with the Go code they stand for (`smtIn` with `netip.Prefix.Contains` at and around every prefix boundary, `rulesFormula` with `egress.Eval`, `reachFormula` with `spec.Reach`). A generator bug that both sides of the proof share (an off-by-one in a prefix's bit range) is invisible to the equality proof but caught here.
 
 ### 3. Command saga under locking and crashes (TLA+ / TLC)
 - **Specification**: [`saga/Saga.tla`](./saga/Saga.tla): several antic processes run the command saga of `internal/tea/operation` on one guest under its lock; any process may crash (its flock is released, the journal survives). Each action is one transition of the Go core (one effect and its result), including the failures of journal writes.
@@ -45,6 +46,7 @@ antic run formal -- z3 formal/cli_args.smt2
   ANTIC_E2E_TRACES=$HOME/.cache/antic-e2e/traces ANTIC_E2E_BIN=... ./e2e.test   # writes the traces
   nix develop -c sh -c 'ANTIC_SAGA_TRACES=$HOME/.cache/antic-e2e/traces go test ./internal/spec/refine -run TestShellTraces'
   ```
+- **The Horn clauses cover the model**: [`chc_edges_test.go`](../internal/spec/refine/chc_edges_test.go) abstracts every edge of the `SagaJournal.cfg` graph to the lock holder and checks with Z3 that it is an instance of a clause rule with the same action (the clauses are built as data, `chcModel`, and rendered both as Horn clauses and as transition formulas), and that every rule is used. Spacer's proof carries over to the model only because the clauses allow at least what it does. The check is one step at a time, so a rule that reads a variable that is stale in its phase is not caught.
 - **Unbounded proof (Z3 Spacer)**: [`internal/spec/refine/chc_test.go`](../internal/spec/refine/chc_test.go) encodes the journaling saga as Constrained Horn Clauses, one invariant predicate per phase of the lock holder. Spacer finds an inductive invariant, so `Consistent` holds for any number of commands, crashes and processes (a process without the lock holds no state, so the lock holder represents them all). The variant without a journal is unsatisfiable, as TLC also finds. Liveness (`Termination`) is checked by TLC only.
 
 Both run in the dev shell (which provides `z3` and `tlc`):
