@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/RNG999/antic/internal/domain"
 )
 
 // Draft is a validated new content of one guest's config file that has not
@@ -291,6 +293,16 @@ func (d Draft) RemovePorts(hosts []int) (Draft, error) {
 
 // SetResources updates the guest's cpus, memory, and network mode.
 func (d Draft) SetResources(u ResourceUpdates) (Draft, error) {
+	if u.CPUs == nil && u.Memory == nil && u.Network == nil {
+		return d, errors.New("specify at least one of --cpus, --memory, or --network")
+	}
+	// A requested count is checked as given: the file's "cpus = 0" means
+	// the default, so writing 0 would report success for 2 CPUs (D19).
+	if u.CPUs != nil {
+		if _, err := domain.ParseCPUCount(*u.CPUs); err != nil {
+			return d, fmt.Errorf("cpus must be between 1 and 256: %w", err)
+		}
+	}
 	return d.edit(func(lines []string) ([]string, error) {
 		if u.CPUs != nil {
 			lines = setTableKey(lines, "spec", "cpus", strconv.Itoa(*u.CPUs))

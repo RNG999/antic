@@ -1,0 +1,76 @@
+# 2026/10/31 13:36:41.542247 [TestPBTSagaConsistentUnderCrashes] [rapid] draw procs: 2
+# 2026/10/31 13:36:41.542253 [TestPBTSagaConsistentUnderCrashes] [rapid] draw length: 50
+# 2026/10/31 13:36:41.542254 [TestPBTSagaConsistentUnderCrashes] [rapid] draw proc: 0
+# 2026/10/31 13:36:41.542255 [TestPBTSagaConsistentUnderCrashes] [rapid] draw crash?: 1
+# 2026/10/31 13:36:41.542256 [TestPBTSagaConsistentUnderCrashes] [rapid] draw op: operation.Op{Kind:0x5, Phase:0x3, Change:operation.Change{Config:0x1, System:0x1, Restart:0x1, Added:types.SortedSet[github.com/RNG999/antic/internal/types.Refined[string,github.com/RNG999/antic/internal/domain.AbsPathPred],github.com/RNG999/antic/internal/types.Refined[string,github.com/RNG999/antic/internal/domain.AbsPathPred],github.com/RNG999/antic/internal/domain.AbsPathOrder]{items:[]types.Refined[string,github.com/RNG999/antic/internal/domain.AbsPathPred]{types.Refined[string,github.com/RNG999/antic/internal/domain.AbsPathPred]{value:"/home/u/w/A", valid:true}}}, Removed:types.SortedSet[github.com/RNG999/antic/internal/types.Refined[string,github.com/RNG999/antic/internal/domain.AbsPathPred],github.com/RNG999/antic/internal/types.Refined[string,github.com/RNG999/antic/internal/domain.AbsPathPred],github.com/RNG999/antic/internal/domain.AbsPathOrder]{items:[]types.Refined[string,github.com/RNG999/antic/internal/domain.AbsPathPred]{types.Refined[string,github.com/RNG999/antic/internal/domain.AbsPathPred]{value:"/home/u/w/R", valid:true}}}}, Runtime:types.SortedSet[github.com/RNG999/antic/internal/types.Refined[string,github.com/RNG999/antic/internal/domain.AbsPathPred],github.com/RNG999/antic/internal/types.Refined[string,github.com/RNG999/antic/internal/domain.AbsPathPred],github.com/RNG999/antic/internal/domain.AbsPathOrder]{items:[]types.Refined[string,github.com/RNG999/antic/internal/domain.AbsPathPred]{types.Refined[string,github.com/RNG999/antic/internal/domain.AbsPathPred]{value:"/home/u/w/R", valid:true}}}}
+# 2026/10/31 13:36:41.542283 [TestPBTSagaConsistentUnderCrashes] [rapid] draw crash?: 1
+# 2026/10/31 13:36:41.542285 [TestPBTSagaConsistentUnderCrashes] [rapid] draw ok: true
+# 2026/10/31 13:36:41.542288 [TestPBTSagaConsistentUnderCrashes] [rapid] draw crash?: 1
+# 2026/10/31 13:36:41.542289 [TestPBTSagaConsistentUnderCrashes] [rapid] draw ok: true
+# 2026/10/31 13:36:41.542291 [TestPBTSagaConsistentUnderCrashes] [rapid] draw crash?: 1
+# 2026/10/31 13:36:41.542292 [TestPBTSagaConsistentUnderCrashes] [rapid] draw ok: true
+# 2026/10/31 13:36:41.542294 [TestPBTSagaConsistentUnderCrashes] [rapid] draw crash?: 1
+# 2026/10/31 13:36:41.542294 [TestPBTSagaConsistentUnderCrashes] [rapid] draw ok: true
+# 2026/10/31 13:36:41.542297 [TestPBTSagaConsistentUnderCrashes] [rapid] draw crash?: 1
+# 2026/10/31 13:36:41.542297 [TestPBTSagaConsistentUnderCrashes] [rapid] draw ok: true
+# 2026/10/31 13:36:41.542300 [TestPBTSagaConsistentUnderCrashes] [rapid] draw crash?: 0
+# 2026/10/31 13:36:41.542300 [TestPBTSagaConsistentUnderCrashes] [rapid] draw proc: 0
+# 2026/10/31 13:36:41.542303 [TestPBTSagaConsistentUnderCrashes] [rapid] draw crash?: 1
+# 2026/10/31 13:36:41.542304 [TestPBTSagaConsistentUnderCrashes] [rapid] draw ok: true
+# 2026/10/31 13:36:41.542307 [TestPBTSagaConsistentUnderCrashes] [rapid] draw crash?: 1
+# 2026/10/31 13:36:41.542307 [TestPBTSagaConsistentUnderCrashes] [rapid] draw ok: true
+# 2026/10/31 13:36:41.542309 [TestPBTSagaConsistentUnderCrashes] [rapid] draw crash?: 0
+# 2026/10/31 13:36:41.542310 [TestPBTSagaConsistentUnderCrashes] resource {Kind:0 Path:{value:{value: valid:false} present:false}} is at 1, but the last successful command left it at 0 (P1)
+# 
+v0.4.8#14517755558060744823
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x1
+0x1f1e1798b9150c
+0x0
+0x0
+0x0
+0x1
+0x1
+0x0
+0x0
+0x1
+0x1
+0x0
+0x0
+0x1
+0x1
+0x0
+0x0
+0x1
+0x1
+0x0
+0x0
+0x1
+0x1
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x1
+0x1
+0x0
+0x0
+0x1
+0x1
+0x0
+0x0
+0x0

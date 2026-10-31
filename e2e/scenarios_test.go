@@ -209,6 +209,12 @@ func scenarios() []scenario {
 			},
 		},
 		{
+			name: "D19 set zero cpus",
+			cmds: func(*harness) []spec.Cmd {
+				return []spec.Cmd{create(a), spec.CmdSet{Target: a, CPUs: types.Some(0)}}
+			},
+		},
+		{
 			name: "D8 multi-guest start stops at the first failure",
 			cmds: func(*harness) []spec.Cmd {
 				return []spec.Cmd{

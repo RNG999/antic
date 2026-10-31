@@ -34,7 +34,9 @@ let
   };
   goModule = args: pkgs.buildGoModule ({
     version = "0.4.0";
-    vendorHash = "sha256-NsfRxs8rzbkXYlacpudkT52zBldyzEbZYIKPOeMxmPA=";
+    # The host's and the agent's sources import different modules (the
+    # host's tests use pgregory.net/rapid), so each has its own vendorHash.
+    vendorHash = "sha256-W61RMiU093FlFvABovS0+dFoMMUVolWHU1+rUvBeigw=";
     env.CGO_ENABLED = 0;
     ldflags = [ "-s" "-w" ];
   } // args);
@@ -49,6 +51,7 @@ in
   antic-agent = goModule {
     pname = "antic-agent";
     src = agentSrc;
+    vendorHash = "sha256-K8+KuNbnkdEAsxWOZEmSGVmtiS6fdqVb4oxshhEM8RU=";
     subPackages = [ "cmd/antic-agent" ];
   };
 

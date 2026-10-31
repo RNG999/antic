@@ -51,6 +51,7 @@ type harness struct {
 	edit  string // EDITOR script
 	env   spec.Env
 	model spec.World
+	base  spec.World // the world without e2e guests (runSequence starts from it)
 	// editorArgs runs EDITOR as "sh SCRIPT" (an EDITOR value with arguments, D12).
 	editorArgs bool
 	busy       net.Listener

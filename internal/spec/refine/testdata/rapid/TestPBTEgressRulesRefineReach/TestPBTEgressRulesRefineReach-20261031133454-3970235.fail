@@ -1,0 +1,48 @@
+# 2026/10/31 13:34:54.395872 [TestPBTEgressRulesRefineReach] [rapid] draw ifaces: 1
+# 2026/10/31 13:34:54.395876 [TestPBTEgressRulesRefineReach] [rapid] draw v6iface: false
+# 2026/10/31 13:34:54.395877 [TestPBTEgressRulesRefineReach] [rapid] draw host: 0x1
+# 2026/10/31 13:34:54.395878 [TestPBTEgressRulesRefineReach] [rapid] draw mode: "internet"
+# 2026/10/31 13:34:54.395879 [TestPBTEgressRulesRefineReach] [rapid] draw default: "allow"
+# 2026/10/31 13:34:54.395880 [TestPBTEgressRulesRefineReach] [rapid] draw allows: 0
+# 2026/10/31 13:34:54.395881 [TestPBTEgressRulesRefineReach] [rapid] draw denies: 0
+# 2026/10/31 13:34:54.395885 [TestPBTEgressRulesRefineReach] [rapid] draw dstkind: 0
+# 2026/10/31 13:34:54.395887 [TestPBTEgressRulesRefineReach] [rapid] draw dst4: []byte{0x1, 0x0, 0x0, 0x0}
+# 2026/10/31 13:34:54.395888 [TestPBTEgressRulesRefineReach] [rapid] draw mapped: true
+# 2026/10/31 13:34:54.395889 [TestPBTEgressRulesRefineReach] [rapid] draw learned: false
+# 2026/10/31 13:34:54.395893 [TestPBTEgressRulesRefineReach] {Mode:internet Default:allow Allow:[] Deny:[]} on {Addrs:[192.168.0.1] OnLink:[192.168.0.0/24]}: ::ffff:1.0.0.0 (learned false): rules false, spec true
+# 
+v0.4.8#11604714137048897304
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x1
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x1
+0x0

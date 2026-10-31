@@ -327,6 +327,7 @@ P1 により、失敗時の結果は常に「`World` 不変かつ `Fail`」で�
 | D16 | 同じ mode で同じディレクトリを再度 `mount` すると、冪等にならず exit 125 になる。原因は D2 と同じで、パス表記の比較が誤っている | P4：何もせずに exit 0 | `edit.go:118` の `AddShare` |
 | D17 | **（修正済み）** 設定ファイルが読み込めないゲストは `guest rm` で削除できない。インスタンスの状態ディレクトリが残り、同じ名前で `create` すると「already exists」になる。さらに、壊れた設定ファイルが 1 つでもあると、`guest ls` が全体として失敗する | モデルの外の状態（手で壊した設定）だが、`rm` と `ls` は壊れた設定にも耐えるべき | `Manager.Get`、`guest ls`。E2E の片付けでは、最小限の有効な設定で上書きしてから `rm` することで回避している |
 | D18 | **（修正済み）** PTY なしの `antic run` が、ゲストの起動直後などに exit 0 のまま出力を失うことがある（E2E の障害注入テストで、CPU 数プローブが空文字列を返して検出） | コマンドの出力は欠けない（P3） | ゲスト側の `internal/guest/session` が、出力のパイプを読み切る前に `cmd.Wait` を呼んでいた。`os/exec` の規約では、Wait はパイプを閉じるので未読の出力を失う。PTY なしの場合は、読み切ってから Wait するように改めた |
+| D19 | **（修正済み）** `guest set --cpus 0` が成功を返し、ゲストは 2 CPU になる。設定ファイルの `cpus = 0` は「既定値」を意味するため。殻と仕様の差分 PBT で検出した | Reject する（P3） | `Draft.SetResources` は、指定された値を `domain.ParseCPUCount` で検査するようにした |
 
 ## 10. 実行基盤
 
@@ -686,4 +687,45 @@ E2E には故障注入のフックを置いた。`ANTIC_SAGA_CRASH_AFTER=k` を�
 | egress の SMT 生成器 ↔ Go（推奨 5） | `TestSMTGeneratorAgreesWithGo`。生成した式を具体値で評価し、Go と比べる。`smtIn` は `netip.Prefix.Contains` と、全 prefix の境界の前後のアドレスで比べる。`rulesFormula` は `egress.Eval` と、`reachFormula` は `spec.Reach` と比べる | 1,232 件が一致した。`smtPrefix` のビット範囲を 1 つずらすバグを入れると、この検査は検出した。一方、Z3 の等価性証明は両辺が同じ生成器を使うため、このバグを検出できない |
 
 これで、継ぎ目の表（§13「段階 5 の準備」）にあった「手で書き写したもの」「未実装」はなくなった。各継ぎ目は、機械的な検査（証明、モデル検査の再生、トレース照合、差分検査のいずれか）で結ばれている。推奨 6（Gobra による Go コードの直接検証の概念実証）は見送った。Gobra は nixpkgs になく、導入するには GitHub のリリース jar を Nix の derivation に固定し、JRE で動かす必要がある。一方で、コアと TLA+ は状態グラフの完全一致で、殻と TLA+ はトレース照合で、すでに結ばれている。概念実証で得られるものは、この費用に見合わない。純粋関数の帰納的な性質を証明したくなったときに、推奨 7（Dafny を証明専用に使う）と合わせて再検討する。
+
+### 段階 6：E2E の完成（進行中）
+
+#### O3 のネットワーク（`e2e/network_test.go`）
+
+ゲストの中から、ベースシステムの道具だけで到達性を調べる。TCP 接続は bash の `/dev/tcp` で、名前解決は `getent ahosts` で試す。期待値は書き下さず、仕様から計算する。モデルにあるゲストのポリシーと、ハーネスが `net.Interfaces` から独立に求めたホストの網（`spec.HostNet`）を、`spec.Reach` と `spec.Resolvable` に渡す。
+
+| ポリシー | 調べたこと（結果は観測 = 仕様） |
+|---|---|
+| internet | 1.1.1.1:443 に届く。example.org を解決できる |
+| internet、deny `1.1.1.0/24` | 1.1.1.1 には届かない。1.0.0.1 には届く |
+| default deny、allow `one.one.one.one` | 1.1.1.1 には届かない。example.org は解決できない。`one.one.one.one` を解決すると 1.1.1.1 が学習され、届くようになる |
+| none | 名前解決ができない |
+| すべて | ホスト自身の LAN アドレスで待ち受けるリスナーには届かない（Never） |
+
+ホスト自身が 1.1.1.1:443 に届かない環境では、この検査を skip する。
+
+#### 系列の生成と回帰の固定（`e2e/random_test.go`）
+
+- 安定した名前の付いたコマンドのアルファベット（25 種）の上で、種を固定してランダムウォークする（`ANTIC_E2E_RANDOM=N`、`ANTIC_E2E_SEED`、`ANTIC_E2E_LENGTH`）。各ステップは、シナリオと同じく `Post` と観測で検査する。
+- 失敗した系列は、失敗が保たれる範囲でコマンドを 1 つずつ貪欲に取り除いて縮める。予算は実行回数で決める。縮めた系列は `e2e/testdata/regress/seed-N.txtar` に固定する。ファイルの中身は、由来と失敗理由のコメントと、`-- commands --` 以下のコマンド名である。
+- `TestE2ERegressions` は、固定した系列をすべて再生する。
+- rapid は採らなかった。実機では 1 回の実行に数十秒かかるので、再実行を繰り返して縮める rapid の方式は合わない。依存を足すと Nix の `vendorHash` の更新も要る。
+- 仕組みの確認：環境全体に `ANTIC_SAGA_FAIL=Hotplug` を入れて流した。6 コマンドの系列が `create mount-A` の 2 コマンドまで縮み、txtar に固定された。故障注入なしで再生すると通った。この確認用に作った固定ファイルは削除した。
+
+#### 形式手法と実コードの溝を PBT で埋める（`pgregory.net/rapid`）
+
+形式モデルの検査は、有限の構成と抽象化の上で行っている。その外側を、純粋なコードに対する性質ベースのテストで覆う。
+
+| 対象（溝） | テスト | 性質 | 確認 |
+|---|---|---|---|
+| egress：代表点 21 個と自由論理変数による抽象化の外側 | `TestPBTEgressRulesRefineReach`（`internal/spec/refine`） | 差分：ランダムなホスト網、ランダムなポリシー（設定が受け付ける CIDR の任意のリスト）、ランダムな宛先（各 prefix の境界と IPv4-mapped 形式に寄せる）について、`egress.Eval(Rules(...))` = `spec.Reach` | `Eval` の Unmap を外すミュータントは、`::ffff:1.0.0.0` まで縮めて検出した。最初は IPv4-mapped 形式を生成できず見逃したので、生成器を直した |
+| 同上（仕様と実装が同じ誤りを共有する場合） | `TestPBTEgressMetamorphic` | メタモルフィック関係（実装側で検査）：deny を足しても到達性は増えない。allow を足しても減らない。default deny ⊆ default allow。learned ⊇ 未学習。エントリの順序に依存しない | — |
+| saga コア：TLC の有限構成（2 プロセス、3 コマンド、4 つの形）の外側 | `TestPBTSagaConsistentUnderCrashes`（`internal/tea/operation`） | 状態付き PBT：2〜4 プロセス、コーパスのすべてのコマンド、任意の effect の失敗（TLA+ モデルが扱わない逆操作の失敗も含む）、クラッシュを、50〜400 ステップにわたってランダムに織り交ぜる。各ステップの後に `Consistent` が成り立つ | 「回復で最後の意図を飛ばす」コアのバグを検出した。最初は rapid の `Repeat`（30 ステップ、行動を一様に選ぶ）では到達できなかったので、ロック保持者が取れる行動だけを選ぶ形に改めた |
+| 殻の設定編集（`config.Draft`、実ファイルの TOML とポリシー）：形式モデルの外側 | `TestPBTDraftEditsRefineSpec`（`internal/host/guest`） | 差分：停止中のゲストに mount / unmount / forward / unforward / set のランダムな系列を適用する。殻は、仕様が受け付けるものだけを受け付け、仕様の `Config` を意味するファイルを残す | **D19 を発見した**。「フラグなしの set」の検査は CLI にしかなく、殻の層と食い違っていたので、`Draft.SetResources` に移した |
+| 殻のライブ判定（`liveShares`） | `TestPBTLiveSharesRefineSpec` | 差分：ランダムな boot / runtime のマウントと、新しい共有の集合について、殻が残すマウント（ライブ反映か再起動か）が、仕様の `edit` の結果と一致する | — |
+| 設定ファイルの書き方（仕様は意味しか語らない） | `TestPBTDraftKeepsComments`、`TestPBTDraftInverseEdits`、`TestPBTDraftEditsCommute`（`internal/host/config`） | メタモルフィック関係：編集しても、取り除くブロックの外にある利用者のコメントは残る。追加してから取り除くと意味が元に戻る（共有、ポート）。別々の共有の追加は可換である | — |
+
+`rapid` の追加で、Nix の `vendorHash` を、ホストとエージェントで別々の値にした（ホスト側のテストだけが rapid を import するため）。両方のパッケージがビルドできることを確かめた。`nix flake check` の `go-tests` は、従来どおり arch テストだけが失敗する（サンドボックスで標準ライブラリを解決できないという既存の問題）。
+
+実機のランダム系列：長さ 10 の系列 15 本（種 100〜114）がすべて仕様どおりだった。D19 のシナリオも PASS した。
 
