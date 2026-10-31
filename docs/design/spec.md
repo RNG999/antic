@@ -781,7 +781,7 @@ E2E の `sessions` シナリオは、2 つの spawn、kill、存在しないセ�
 
 #### flake ゲストとカーネル変更の E2E（`e2e/flake_test.go`）
 
-`~/e2e-work/F` に、antic のゲストモジュールを使う最小の flake を置く。`boot.kernelParams` は引数で変えられるようにしてある。モジュールの入力には、push 済みのブランチ（`ANTIC_E2E_FLAKE_REF`、既定は `github:RNG999/antic/feat/e2e-spec`）を使う。ローカルのパスを入力にすると、別のゲスト（formal）が共有しているディレクトリの中の入力になるため、antic がビルドを拒否する。
+`~/e2e-work/F` に、antic のゲストモジュールを使う最小の flake を置く。`boot.kernelParams` は引数で変えられるようにしてある。モジュールの入力には、push 済みのブランチ（`ANTIC_E2E_FLAKE_REF`、既定は `github:RNG999/antic`、つまり main。未マージのブランチを試すときに指定する）を使う。ローカルのパスを入力にすると、別のゲスト（formal）が共有しているディレクトリの中の入力になるため、antic がビルドを拒否する。
 
 1. `guest create` を実行し、`/proc/cmdline` に flake のパラメータが入っていることを確かめる。次に A を mount し、`sleep` のセッションを残す。
 2. 起動内容が同じ `apply`：再起動しない。セッションと共有は残る（switch）。
