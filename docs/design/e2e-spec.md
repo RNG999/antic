@@ -729,3 +729,17 @@ E2E には故障注入のフックを置いた。`ANTIC_SAGA_CRASH_AFTER=k` を�
 
 実機のランダム系列：長さ 10 の系列 15 本（種 100〜114）がすべて仕様どおりだった。D19 のシナリオも PASS した。
 
+#### 並行実行の E2E（`e2e/concurrent_test.go`）
+
+1 つの Running のゲストに、3〜4 個の antic プロセスを同時に起動する。対象は mount / unmount / forward / unforward / set / restart / stop / start で、種で選ぶ。ゲストのロックが、それらを直列化する。
+
+- **線形化可能性**：実際にロックを取った順序を、トレースの `acquire` から読む。その順序で仕様の `Post` を適用し、各コマンドの終了コードと、最後の観測が許される世界に含まれることを確かめる。
+- **クラッシュ**：奇数番目のラウンドでは、1 つのプロセスをジャーナルを開いた後で kill する（exit 137）。P1 により、kill されたコマンドは何も変えていない扱いになる。次にロックを取ったプロセスが回復する。
+- **トレース照合**：同じトレースを、`TestShellTracesRefineSagaModel` で `Saga.tla` と照合する。ロック待ちのプロセスはイベントを出さないので、モデルのプロセス数 2 で足りる。
+
+結果：4 ラウンド（うち 1 ラウンドで実際に kill した）がすべて線形化できた。トレース 4 本、166 イベントがモデルに適合した。
+
+#### `nix flake check`（修正）
+
+arch テストの型検査は、標準ライブラリを `importer.Default()`（export data）から読んでいた。Nix のビルドでは、`-trimpath` のためにテストバイナリが GOROOT を知らず、ビルドキャッシュもない。そのため失敗していた（`4616b9b` 以前からの既存の問題）。GOROOT が不明なときは `go env GOROOT` で補い、export data がないときはソースから読む（`importer.ForCompiler(..., "source", nil)`）ようにした。`nix flake check` は通るようになった。
+

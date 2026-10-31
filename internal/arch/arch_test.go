@@ -7,12 +7,14 @@ package arch
 import (
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -1427,14 +1429,26 @@ type repoImporter struct {
 	t        *testing.T
 	root     string
 	fallback types.Importer
+	source   types.Importer
 	cache    map[string]*types.Package
 }
 
+// newRepoImporter type-checks the module from source and the standard
+// library from export data, or from its source where export data is not
+// available (the Nix build sandbox has no build cache to produce it).
 func newRepoImporter(t *testing.T, root string) *repoImporter {
+	// A test binary built with -trimpath (as Nix builds it) does not know
+	// GOROOT; the go command does.
+	if build.Default.GOROOT == "" {
+		if out, err := exec.Command("go", "env", "GOROOT").Output(); err == nil {
+			build.Default.GOROOT = strings.TrimSpace(string(out))
+		}
+	}
 	return &repoImporter{
 		t:        t,
 		root:     root,
 		fallback: importer.Default(),
+		source:   importer.ForCompiler(token.NewFileSet(), "source", nil),
 		cache:    make(map[string]*types.Package),
 	}
 }
@@ -1456,6 +1470,9 @@ func (imp *repoImporter) Import(path string) (*types.Package, error) {
 		return pkg, nil
 	}
 	pkg, err := imp.fallback.Import(path)
+	if err != nil {
+		pkg, err = imp.source.Import(path)
+	}
 	if err == nil {
 		imp.cache[path] = pkg
 	}
