@@ -331,7 +331,7 @@ func (g *Guest) execute(ctx context.Context, tx *txn, jr *journalRecord, eff ope
 		// allowed by the share policy.
 		for _, s := range tx.draft.After.Shares {
 			if tx.draft.Before != nil {
-				if _, had := tx.draft.Before.ShareAt(realPath(s.Path)); had {
+				if _, had := tx.draft.Before.ShareAt(config.RealPath(s.Path)); had {
 					continue
 				}
 			}

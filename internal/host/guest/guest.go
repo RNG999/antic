@@ -53,13 +53,10 @@ func FindBinaries(d instance.Dirs) Binaries {
 		return name
 	}
 	self, err := os.Executable()
-	if err == nil {
-		if real, err := filepath.EvalSymlinks(self); err == nil {
-			self = real
-		}
-	} else {
+	if err != nil {
 		self = "antic"
 	}
+	self = config.RealPath(self)
 	return Binaries{
 		CloudHypervisor: filepath.Join(d.Libexec, "cloud-hypervisor"),
 		Virtiofsd:       find("virtiofsd", "/usr/lib/virtiofsd", "/usr/libexec/virtiofsd"),
@@ -284,7 +281,7 @@ func (g *Guest) writeBoot(bt *boot) error {
 // guest's flake.
 func (m *Manager) policy() share.Policy {
 	extra := []string{m.Dirs.ConfigDir, m.Dirs.StateRoot, m.Dirs.Libexec}
-	if real, err := filepath.EvalSymlinks(m.Config.Dir()); err == nil {
+	if real := config.RealPath(m.Config.Dir()); real != m.Config.Dir() {
 		extra = append(extra, real)
 	}
 	for _, c := range m.Config.Guests {

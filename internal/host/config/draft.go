@@ -48,11 +48,7 @@ func (d Draft) Write(old bool) error {
 		}
 		content = d.Old
 	}
-	real := d.Path
-	if r, err := filepath.EvalSymlinks(d.Path); err == nil {
-		real = r
-	}
-	return writeFileAtomic(real, content)
+	return writeFileAtomic(RealPath(d.Path), content)
 }
 
 // ReadDraft reads the current config file of guest g, to edit with the
@@ -102,11 +98,7 @@ func (d Draft) project() bool { return filepath.Base(d.Path) == "antic.toml" }
 // parse validates content as this draft's file by loading it from a
 // temporary file next to it (so relative paths resolve the same way).
 func (d Draft) parse(content []byte) (*Guest, error) {
-	real := d.Path
-	if r, err := filepath.EvalSymlinks(d.Path); err == nil {
-		real = r
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(real), "."+d.Name+".toml.*")
+	tmp, err := os.CreateTemp(filepath.Dir(RealPath(d.Path)), "."+d.Name+".toml.*")
 	if err != nil {
 		return nil, err
 	}
@@ -143,8 +135,10 @@ func (d Draft) edit(change func([]string) ([]string, error)) (Draft, error) {
 	return d, nil
 }
 
-// realPath resolves symlinks in p, or returns p when it cannot.
-func realPath(p string) string {
+// RealPath returns p with its symlinks resolved, or p itself when they
+// cannot be (p does not exist yet, say). Share paths and config paths are
+// compared and stored resolved.
+func RealPath(p string) string {
 	if r, err := filepath.EvalSymlinks(p); err == nil {
 		return r
 	}
@@ -155,7 +149,7 @@ func realPath(p string) string {
 // path), comparing resolved paths rather than how the file spells them.
 func (g *Guest) ShareAt(real string) (Share, bool) {
 	for _, s := range g.Shares {
-		if s.Path != "" && realPath(s.Path) == real {
+		if s.Path != "" && RealPath(s.Path) == real {
 			return s, true
 		}
 	}
@@ -173,7 +167,7 @@ func (d Draft) AddShare(real string, ro bool) (Draft, error) {
 		return d, nil
 	}
 	for _, s := range d.After.Shares {
-		if s.Path != "" && (within(real, realPath(s.Path)) || within(realPath(s.Path), real)) {
+		if s.Path != "" && (within(real, RealPath(s.Path)) || within(RealPath(s.Path), real)) {
 			return d, fmt.Errorf("%s overlaps share %s", real, s.Path)
 		}
 	}
@@ -207,7 +201,7 @@ func (d Draft) RemoveShare(real string) (Draft, error) {
 				dir = base
 			}
 			p, _ := resolvePath(s.Source, d.home, dir, "", nil)
-			return realPath(p) == real
+			return RealPath(p) == real
 		})
 		if removed == 0 {
 			return nil, fmt.Errorf("%s is not a configured share of %s", real, d.Name)

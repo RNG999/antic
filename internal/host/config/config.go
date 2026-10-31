@@ -360,10 +360,7 @@ func (g *Guest) normalize(home string, baseDir ...string) []error {
 		}
 		var p string
 		p, errs = resolvePath(rawPath, home, dir, "flake", errs)
-		if real, err := filepath.EvalSymlinks(p); err == nil {
-			p = real
-		}
-		g.FlakePath = p
+		g.FlakePath = RealPath(p)
 		g.FlakeAttr = attr
 		if len(g.Packages) > 0 {
 			errs = append(errs, errors.New("cannot set both packages and flake"))

@@ -75,7 +75,7 @@ func (f fixture) specConfig(g *config.Guest) (spec.Config, error) {
 		if s.ReadOnly {
 			mode = "ro"
 		}
-		raw.Shares = append(raw.Shares, spec.RawShare{Path: realPath(s.Path), Mode: mode})
+		raw.Shares = append(raw.Shares, spec.RawShare{Path: config.RealPath(s.Path), Mode: mode})
 	}
 	return spec.ParseConfig(f.env, raw)
 }
@@ -100,7 +100,7 @@ func (f fixture) shellCmd(c spec.Cmd) error {
 		}
 	case spec.CmdUnmount:
 		for _, dir := range c.Dirs {
-			if d, err = d.RemoveShare(realPath(dir)); err != nil {
+			if d, err = d.RemoveShare(config.RealPath(dir)); err != nil {
 				return err
 			}
 		}

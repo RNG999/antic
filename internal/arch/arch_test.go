@@ -5,6 +5,7 @@
 package arch
 
 import (
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/build"
@@ -1426,11 +1427,25 @@ func allowedKeys(m map[string]bool) []string {
 }
 
 type repoImporter struct {
-	t        *testing.T
-	root     string
-	fallback types.Importer
-	source   types.Importer
-	cache    map[string]*types.Package
+	t     *testing.T
+	root  string
+	std   types.Importer
+	cache map[string]*types.Package
+}
+
+// firstOf imports with the first importer that can.
+type firstOf []types.Importer
+
+func (is firstOf) Import(path string) (*types.Package, error) {
+	var errs []error
+	for _, i := range is {
+		pkg, err := i.Import(path)
+		if err == nil {
+			return pkg, nil
+		}
+		errs = append(errs, err)
+	}
+	return nil, errors.Join(errs...)
 }
 
 // newRepoImporter type-checks the module from source and the standard
@@ -1447,9 +1462,8 @@ func newRepoImporter(t *testing.T, root string) *repoImporter {
 	return &repoImporter{
 		t:        t,
 		root:     root,
-		fallback: importer.Default(),
-		source:   importer.ForCompiler(token.NewFileSet(), "source", nil),
-		cache:    make(map[string]*types.Package),
+		std:   firstOf{importer.Default(), importer.ForCompiler(token.NewFileSet(), "source", nil)},
+		cache: make(map[string]*types.Package),
 	}
 }
 
@@ -1469,10 +1483,7 @@ func (imp *repoImporter) Import(path string) (*types.Package, error) {
 		imp.cache[path] = pkg
 		return pkg, nil
 	}
-	pkg, err := imp.fallback.Import(path)
-	if err != nil {
-		pkg, err = imp.source.Import(path)
-	}
+	pkg, err := imp.std.Import(path)
 	if err == nil {
 		imp.cache[path] = pkg
 	}

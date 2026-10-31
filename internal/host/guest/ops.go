@@ -226,9 +226,7 @@ func (g *Guest) Dir(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if real, err := filepath.EvalSymlinks(wd); err == nil {
-		wd = real
-	}
+	wd = config.RealPath(wd)
 	var shares []string
 	if bt, err := g.readBoot(ctx); err == nil {
 		for _, s := range bt.Shares {
@@ -306,7 +304,7 @@ type ShareInfo struct {
 func (g *Guest) Shares(ctx context.Context) []ShareInfo {
 	byPath := map[string]ShareInfo{}
 	for _, s := range g.Cfg.Shares {
-		p := realPath(s.Path)
+		p := config.RealPath(s.Path)
 		byPath[p] = ShareInfo{Path: p, ReadOnly: s.ReadOnly}
 	}
 	if g.Created {
@@ -430,7 +428,7 @@ func (g *Guest) Edit(ctx context.Context, old, content []byte) (bool, error) {
 			tx.op.Change.Added, _ = pathSet(added)
 			tx.op.Change.Removed, _ = pathSet(removed)
 			for _, s := range draft.After.Shares {
-				tx.modes[realPath(s.Path)] = s.ReadOnly
+				tx.modes[config.RealPath(s.Path)] = s.ReadOnly
 			}
 		} else {
 			tx.op.Change.Restart = operation.Changed
@@ -439,20 +437,13 @@ func (g *Guest) Edit(ctx context.Context, old, content []byte) (bool, error) {
 	return true, g.commit(ctx, tx)
 }
 
-func realPath(p string) string {
-	if r, err := filepath.EvalSymlinks(p); err == nil {
-		return r
-	}
-	return p
-}
-
 // liveShares returns the shares a running guest with boot record bt must
 // hot-plug and detach to take the shares of c, or false if that needs a
 // restart (a mounted share changes mode, or a new one overlaps a mount).
 func liveShares(bt *boot, c *config.Guest) (added, removed []string, live bool) {
 	want := map[string]bool{}
 	for _, s := range c.Shares {
-		want[realPath(s.Path)] = s.ReadOnly
+		want[config.RealPath(s.Path)] = s.ReadOnly
 	}
 	var mounts []bootShare
 	for _, m := range bt.Shares {
@@ -584,10 +575,7 @@ func (g *Guest) hotplug(ctx context.Context, bt *boot, path string, ro bool) (er
 // It reports the resolved path, and whether the share stays mounted until
 // the guest restarts (it was mounted at boot).
 func (g *Guest) RemoveShare(ctx context.Context, path string) (string, bool, error) {
-	real := path
-	if r, err := filepath.EvalSymlinks(path); err == nil {
-		real = r
-	}
+	real := config.RealPath(path)
 	unlock, err := g.lockAndRecover(ctx)
 	if err != nil {
 		return "", false, err
