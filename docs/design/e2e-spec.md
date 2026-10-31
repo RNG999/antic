@@ -743,3 +743,15 @@ E2E には故障注入のフックを置いた。`ANTIC_SAGA_CRASH_AFTER=k` を�
 
 arch テストの型検査は、標準ライブラリを `importer.Default()`（export data）から読んでいた。Nix のビルドでは、`-trimpath` のためにテストバイナリが GOROOT を知らず、ビルドキャッシュもない。そのため失敗していた（`4616b9b` 以前からの既存の問題）。GOROOT が不明なときは `go env GOROOT` で補い、export data がないときはソースから読む（`importer.ForCompiler(..., "source", nil)`）ようにした。`nix flake check` は通るようになった。
 
+### 検証の段階（`justfile`）
+
+| 段階 | いつ | 中身 | 目安 |
+|---|---|---|---|
+| `quick` | 変更ごと | `nix flake check` と、変更したパッケージの lint（`--new-from-rev`）。flake check には次が入る。単体テスト、PBT（既定の 100 件）、ミュータント、Z3（egress の証明と生成器の差分検査）、TLC（3 つの構成と SagaTrace）、Spacer、TLC 状態グラフの再生、CHC の被覆検査 | 数分 |
+| `e2e` | 実機 | 静的バイナリを `nix develop` の中でビルドし、外で全 E2E を実行する。その後、トレースを `Saga.tla` と照合する（以前は 2 段階に分かれていた手順を 1 コマンドにした） | 約 30 分 |
+| `nightly` | 毎日 | `e2e` に加えて、PBT を 2 万件、生成系列を 20 本（種は日付）、並行実行を 8 ラウンド | 1〜2 時間 |
+
+タスクは `justfile` にまとめた（`just` で一覧を表示する）。`quick`、`e2e`、`nightly` のほかに、`test`、`pbt`、`traces`（直前の E2E のトレース照合）、`random`（生成系列。件数、長さ、種を引数で渡す）、`build-e2e`、`lint`、`check` がある。`just` はホストに入れて使う。rootless Nix では、Nix の名前空間の中から `nix develop` を起動できない（`nix shell nixpkgs#just -c just lint` は "setting up a private mount namespace: Operation not permitted" で失敗した）。E2E は devShell の外で動かす必要もある。devShell にも `just` を入れてあり、その中では `test`、`pbt`、`lint`、`traces` を `nix develop` を介さずに直接実行する。ホストが必要な `check`、`build-e2e`、`e2e` は、明示的なメッセージを出して止まる。
+
+`nix flake check` の `go-tests` には、TLC（`tlaplus`）と `formal/saga` を加えた。パッケージ本体のソースには含めていないので、モデルを編集してもパッケージは再ビルドされない。E2E は KVM と `systemd --user` を必要とするので、一般的なホスト型 CI では動かない。`nightly` は、この host の systemd timer などで回す想定である。
+

@@ -220,6 +220,18 @@ For full NixOS configuration beyond a package list, set `flake = "/path/to/flake
 - **Guest flakes must live outside writable shares:** `antic` refuses to build a local flake input located inside a shared directory, and refuses to share hidden directories in `$HOME` or `$PATH` directories.
 - **Shared CDN IPs with `allow`:** Because `allow` rules permit resolved IP addresses in `nftables`, other domains hosted behind the same shared CDN IP addresses become reachable at the IP layer while the entry is active.
 
+## Development & Verification
+
+The top-level behavior is a state-transition specification (`internal/spec`, see `docs/design/e2e-spec.md`) that serves as the test oracle; the command saga is model-checked (`formal/`). The tasks are in the `justfile` (`just` lists them). Install `just` on the host: a rootless Nix cannot start `nix develop` from inside another Nix shell, and the E2E tests must run outside it.
+
+```bash
+just quick     # every change: nix flake check (unit tests, property-based tests, Z3, TLC, Spacer) and lint
+just e2e       # this host: every E2E test against real antic, with saga traces validated against the TLA+ model
+just nightly   # e2e plus larger property-based tests, generated command sequences and more concurrent rounds
+```
+
+The E2E tests run antic for real (KVM, `systemd --user`) and only touch guests named `e2e-*`; run them from a plain shell, not inside `nix develop`.
+
 [cloud-hypervisor]: https://www.cloudhypervisor.org/
 [virtiofsd]: https://gitlab.com/virtio-fs/virtiofsd
 [passt]: https://passt.top/

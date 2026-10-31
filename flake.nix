@@ -30,6 +30,8 @@
             # specification; TLC model-checks the command saga (formal/).
             pkgs.z3
             pkgs.tlaplus
+            # Task runner (justfile).
+            pkgs.just
           ];
         };
       });
