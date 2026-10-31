@@ -5,14 +5,17 @@
 package arch
 
 import (
+	"errors"
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -45,6 +48,7 @@ var allowedPureStdlib = map[string]bool{
 //	Rank -2 (pure types):  internal/types
 //	Rank -1 (pure domain): internal/proto, internal/domain
 //	Rank 0  (pure TEA):    internal/tea/*
+//	Rank 0  (pure spec):   internal/spec (top-level specification; test oracle only)
 //	Rank 1  (host domain): internal/host/config, internal/host/share
 //	Rank 2  (host infra):  internal/host/chv, internal/host/systemd, internal/host/transport,
 //	                       internal/host/egress, internal/host/instance, internal/host/nixbuild
@@ -59,6 +63,11 @@ func packageLayerRank(relPkg string) (domain string, rank int, ok bool) {
 	case relPkg == "internal/domain":
 		return "pure", -1, true
 	case strings.HasPrefix(relPkg, "internal/tea/"):
+		return "pure", 0, true
+	case relPkg == "internal/spec":
+		return "pure", 0, true
+	case relPkg == "internal/spec/refine":
+		// Test-only: checks that internal/tea/operation refines internal/spec.
 		return "pure", 0, true
 	case relPkg == "internal/host/config" || relPkg == "internal/host/share":
 		return "host", 1, true
@@ -125,6 +134,17 @@ func TestLayerDependencies(t *testing.T) {
 					continue
 				}
 				targetRel := strings.TrimPrefix(impPath, modulePrefix+"/")
+				// The specification is written independently of the implementation
+				// so that it can be its oracle: it may not import internal/tea, and
+				// no implementation package may import it (only tests do).
+				if relPkg == "internal/spec" && strings.HasPrefix(targetRel, "internal/tea/") {
+					t.Errorf("independence violation: internal/spec imports implementation model %s", targetRel)
+					continue
+				}
+				if targetRel == "internal/spec" {
+					t.Errorf("independence violation: %s imports internal/spec (only tests may use the specification)", relPkg)
+					continue
+				}
 				targetDom, targetRank, ok := packageLayerRank(targetRel)
 				if !ok {
 					t.Errorf("%s imports unclassified package %s", relPkg, targetRel)
@@ -171,6 +191,9 @@ func TestTEAPurityAndFormalConstraints(t *testing.T) {
 	})
 	t.Run("internal/domain", func(t *testing.T) {
 		checkDomainPackage(t, root)
+	})
+	t.Run("internal/spec", func(t *testing.T) {
+		checkPureFiles(t, root, "internal/spec")
 	})
 
 	for _, relPkg := range teaPkgs {
@@ -543,7 +566,7 @@ func checkDomainPackage(t *testing.T, root string) {
 								posStr(fset, ts.Pos()), name)
 						}
 					case "predicates.go":
-						if ! ts.Assign.IsValid() && (strings.HasSuffix(name, "Tag") || strings.HasSuffix(name, "State") || strings.HasSuffix(name, "Prop")) {
+						if !ts.Assign.IsValid() && (strings.HasSuffix(name, "Tag") || strings.HasSuffix(name, "State") || strings.HasSuffix(name, "Prop")) {
 							t.Errorf("%s: %s does not belong in internal/domain/predicates.go (only *Pred, *Order, and Refined type aliases belong here)",
 								posStr(fset, ts.Pos()), name)
 						}
@@ -993,7 +1016,7 @@ func TestNamingAndExportConventions(t *testing.T) {
 		files := parseNonTestFiles(t, fset, filepath.Join(root, relPkg))
 		testFiles := parseTestFiles(t, fset, filepath.Join(root, relPkg))
 
-		isPureSpec := strings.HasPrefix(relPkg, "internal/tea/") || relPkg == "internal/proto" || relPkg == "internal/types" || relPkg == "internal/domain"
+		isPureSpec := strings.HasPrefix(relPkg, "internal/tea/") || relPkg == "internal/proto" || relPkg == "internal/types" || relPkg == "internal/domain" || relPkg == "internal/spec"
 		refsInOtherPkgs := markTransitiveExportedTypes(files, externalRefs[relPkg])
 
 		receiverNames := map[string]string{}           // typeName -> first receiver ident
@@ -1404,18 +1427,43 @@ func allowedKeys(m map[string]bool) []string {
 }
 
 type repoImporter struct {
-	t        *testing.T
-	root     string
-	fallback types.Importer
-	cache    map[string]*types.Package
+	t     *testing.T
+	root  string
+	std   types.Importer
+	cache map[string]*types.Package
 }
 
+// firstOf imports with the first importer that can.
+type firstOf []types.Importer
+
+func (is firstOf) Import(path string) (*types.Package, error) {
+	var errs []error
+	for _, i := range is {
+		pkg, err := i.Import(path)
+		if err == nil {
+			return pkg, nil
+		}
+		errs = append(errs, err)
+	}
+	return nil, errors.Join(errs...)
+}
+
+// newRepoImporter type-checks the module from source and the standard
+// library from export data, or from its source where export data is not
+// available (the Nix build sandbox has no build cache to produce it).
 func newRepoImporter(t *testing.T, root string) *repoImporter {
+	// A test binary built with -trimpath (as Nix builds it) does not know
+	// GOROOT; the go command does.
+	if build.Default.GOROOT == "" {
+		if out, err := exec.Command("go", "env", "GOROOT").Output(); err == nil {
+			build.Default.GOROOT = strings.TrimSpace(string(out))
+		}
+	}
 	return &repoImporter{
-		t:        t,
-		root:     root,
-		fallback: importer.Default(),
-		cache:    make(map[string]*types.Package),
+		t:     t,
+		root:  root,
+		std:   firstOf{importer.Default(), importer.ForCompiler(token.NewFileSet(), "source", nil)},
+		cache: make(map[string]*types.Package),
 	}
 }
 
@@ -1435,7 +1483,7 @@ func (imp *repoImporter) Import(path string) (*types.Package, error) {
 		imp.cache[path] = pkg
 		return pkg, nil
 	}
-	pkg, err := imp.fallback.Import(path)
+	pkg, err := imp.std.Import(path)
 	if err == nil {
 		imp.cache[path] = pkg
 	}

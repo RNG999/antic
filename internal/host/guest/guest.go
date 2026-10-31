@@ -6,7 +6,6 @@ package guest
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -53,13 +52,10 @@ func FindBinaries(d instance.Dirs) Binaries {
 		return name
 	}
 	self, err := os.Executable()
-	if err == nil {
-		if real, err := filepath.EvalSymlinks(self); err == nil {
-			self = real
-		}
-	} else {
+	if err != nil {
 		self = "antic"
 	}
+	self = config.RealPath(self)
 	return Binaries{
 		CloudHypervisor: filepath.Join(d.Libexec, "cloud-hypervisor"),
 		Virtiofsd:       find("virtiofsd", "/usr/lib/virtiofsd", "/usr/libexec/virtiofsd"),
@@ -71,8 +67,13 @@ func FindBinaries(d instance.Dirs) Binaries {
 }
 
 // confine returns systemd sandbox properties for a unit, also binding the
-// rootless Nix store at /nix when helpers link against /nix/store.
+// rootless Nix store at /nix when helpers link against /nix/store. The user
+// manager cannot create the /nix mount point, so the bind needs an existing
+// /nix; without one, the unit would fail to set up its namespace.
 func (m *Manager) confine(rw, ro []string) []systemd.Property {
+	if fi, err := os.Stat("/nix"); err != nil || !fi.IsDir() {
+		return systemd.Confine(rw, ro)
+	}
 	if nix, err := m.nixBuilder(); err == nil && nix.Root() != "" {
 		ro = append(append([]string{}, ro...), filepath.Join(nix.Root(), "nix")+":/nix")
 	}
@@ -153,10 +154,14 @@ func (m *Manager) Get(name string) (*Guest, error) {
 	return &Guest{m: m, Cfg: c, Inst: inst, Created: ok}, nil
 }
 
-// All returns every configured guest.
+// All returns every configured guest whose config loads (the others are
+// in m.Config.Errors).
 func (m *Manager) All() ([]*Guest, error) {
 	var out []*Guest
 	for _, n := range m.Config.Names() {
+		if m.Config.Errors[n] != nil {
+			continue
+		}
 		g, err := m.Get(n)
 		if err != nil {
 			return nil, err
@@ -164,6 +169,19 @@ func (m *Manager) All() ([]*Guest, error) {
 		out = append(out, g)
 	}
 	return out, nil
+}
+
+// GetUnloadable returns guest name whose config file does not load, so
+// that it can still be stopped and removed (D17).
+func (m *Manager) GetUnloadable(name string) (*Guest, error) {
+	if m.Config.Errors[name] == nil {
+		return nil, fmt.Errorf("no such guest %q", name)
+	}
+	inst, ok, err := m.Dirs.Lookup(name)
+	if err != nil {
+		return nil, err
+	}
+	return &Guest{m: m, Cfg: &config.Guest{Name: name, Path: m.Config.GuestPath(name)}, Inst: inst, Created: ok}, nil
 }
 
 func (g *Guest) Name() string { return g.Cfg.Name }
@@ -174,7 +192,7 @@ func (g *Guest) netUnit() string { return "antic-net@" + g.Inst.ID + ".service" 
 func (g *Guest) shareUnit(tag string) string {
 	return "antic-share@" + g.Inst.ID + ":" + tag + ".service"
 }
-func (g *Guest) slice() string              { return "antic-" + g.Inst.ID + ".slice" }
+func (g *Guest) slice() string { return "antic-" + g.Inst.ID + ".slice" }
 func (g *Guest) CgroupDir() string {
 	uid := os.Getuid()
 	return filepath.Join("/sys/fs/cgroup/user.slice", fmt.Sprintf("user-%d.slice", uid), fmt.Sprintf("user@%d.service", uid), "antic.slice", g.slice())
@@ -262,7 +280,7 @@ func (g *Guest) writeBoot(bt *boot) error {
 // guest's flake.
 func (m *Manager) policy() share.Policy {
 	extra := []string{m.Dirs.ConfigDir, m.Dirs.StateRoot, m.Dirs.Libexec}
-	if real, err := filepath.EvalSymlinks(m.Config.Dir()); err == nil {
+	if real := config.RealPath(m.Config.Dir()); real != m.Config.Dir() {
 		extra = append(extra, real)
 	}
 	for _, c := range m.Config.Guests {
@@ -277,5 +295,3 @@ func (m *Manager) policy() share.Policy {
 func (m *Manager) protectedNames() []string {
 	return append([]string{}, proto.ProtectedNames...)
 }
-
-var errNotRunning = errors.New("not running")

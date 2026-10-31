@@ -34,7 +34,9 @@ let
   };
   goModule = args: pkgs.buildGoModule ({
     version = "0.4.0";
-    vendorHash = "sha256-NsfRxs8rzbkXYlacpudkT52zBldyzEbZYIKPOeMxmPA=";
+    # The host's and the agent's sources import different modules (the
+    # host's tests use pgregory.net/rapid), so each has its own vendorHash.
+    vendorHash = "sha256-W61RMiU093FlFvABovS0+dFoMMUVolWHU1+rUvBeigw=";
     env.CGO_ENABLED = 0;
     ldflags = [ "-s" "-w" ];
   } // args);
@@ -49,6 +51,7 @@ in
   antic-agent = goModule {
     pname = "antic-agent";
     src = agentSrc;
+    vendorHash = "sha256-K8+KuNbnkdEAsxWOZEmSGVmtiS6fdqVb4oxshhEM8RU=";
     subPackages = [ "cmd/antic-agent" ];
   };
 
@@ -56,11 +59,14 @@ in
 
   libexec = pkgs.symlinkJoin {
     name = "antic-libexec";
+    # Static, like antic itself: the helpers run outside any Nix environment
+    # (under systemd --user), where /nix/store may not exist (a rootless
+    # Nix keeps its store elsewhere), so they must not need its glibc.
     paths = [
       pkgs.pkgsStatic.cloud-hypervisor
-      pkgs.virtiofsd
-      pkgs.passt
-      pkgs.nftables
+      pkgs.pkgsStatic.virtiofsd
+      pkgs.pkgsStatic.passt
+      pkgs.pkgsStatic.nftables
     ];
     postBuild = ''
       for f in "$out/bin"/*; do

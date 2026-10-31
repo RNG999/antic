@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"debug/elf"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,24 +29,57 @@ func (a *app) editGuestCmd(use string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			g, err := a.cfg.Get(name)
+			g, err := a.get(c.Context(), name)
 			if err != nil {
 				return err
 			}
-			editor := os.Getenv("EDITOR")
-			if editor == "" {
-				editor = "vi"
-			}
-			cmd := exec.Command(editor, g.Path)
-			cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-			if err := cmd.Run(); err != nil {
+			old, err := os.ReadFile(g.Cfg.Path)
+			if err != nil {
 				return err
 			}
-			cwd, _ := os.Getwd()
-			_, err = config.LoadWithProject(a.dirs.GuestsConfigDir(), a.dirs.Home, cwd)
-			return err
+			// The user edits a copy; the file changes only if the result
+			// loads and takes effect (D10).
+			tmp, err := os.CreateTemp("", "antic-"+g.Name()+"-*.toml")
+			if err != nil {
+				return err
+			}
+			_, werr := tmp.Write(old)
+			if err := errors.Join(werr, tmp.Close()); err != nil {
+				return err
+			}
+			if err := runEditor(tmp.Name()); err != nil {
+				return err
+			}
+			edited, err := os.ReadFile(tmp.Name())
+			if err != nil {
+				return err
+			}
+			changed, err := g.Edit(c.Context(), old, edited)
+			if err != nil {
+				return fmt.Errorf("%w\n(your edits are kept in %s)", err, tmp.Name())
+			}
+			os.Remove(tmp.Name())
+			if !changed {
+				fmt.Fprintf(os.Stderr, "antic: %s is unchanged\n", g.Cfg.Path)
+			}
+			return nil
 		},
 	}
+}
+
+// runEditor edits path with $VISUAL or $EDITOR, which may carry arguments
+// (as git runs them, D12), or vi.
+func runEditor(path string) error {
+	editor := os.Getenv("VISUAL")
+	if editor == "" {
+		editor = os.Getenv("EDITOR")
+	}
+	if editor == "" {
+		editor = "vi"
+	}
+	cmd := exec.Command("sh", "-c", editor+` "$@"`, editor, path)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	return cmd.Run()
 }
 
 func (a *app) versionCmd() *cobra.Command {
@@ -160,6 +195,9 @@ func (a *app) updateCmd() *cobra.Command {
 					}
 					return err
 				}
+				if err := runsHere(sp); err != nil {
+					return fmt.Errorf("refusing to install %s: %w", name, err)
+				}
 				dp := filepath.Join(a.dirs.Libexec, name)
 				if err := install(sp, dp); err != nil {
 					return err
@@ -173,6 +211,32 @@ func (a *app) updateCmd() *cobra.Command {
 	}
 	c.Flags().StringVar(&source, "source", "github:RNG999/antic", "flake URI or local checkout path to build from")
 	return c
+}
+
+// runsHere checks that the executable at path can run on this host outside
+// Nix: a dynamically linked one needs its program interpreter, which a
+// helper linked against a Nix store does not find where that store is not
+// at /nix (a rootless Nix).
+func runsHere(path string) error {
+	f, err := elf.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	for _, p := range f.Progs {
+		if p.Type != elf.PT_INTERP {
+			continue
+		}
+		b, err := io.ReadAll(p.Open())
+		if err != nil {
+			return err
+		}
+		interp := strings.TrimRight(string(b), "\x00")
+		if _, err := os.Stat(interp); err != nil {
+			return fmt.Errorf("it needs the program interpreter %s, which this host does not have (build it static)", interp)
+		}
+	}
+	return nil
 }
 
 func install(src, dst string) error {

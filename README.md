@@ -11,7 +11,7 @@ Everything runs rootless as your own user with no privileged daemon. Host direct
 - **Linux** (`x86_64` or `aarch64`) with KVM (`/dev/kvm`) and **systemd ≥ 257** (user units with `PrivatePIDs`).
 - **Nix** with flakes.
 
-`antic update` installs `antic` (`~/.local/bin/antic`) along with `cloud-hypervisor`, `virtiofsd`, `passt`/`pasta`, and `nft` into `~/.local/libexec/antic/` from `nixpkgs`, so no extra virtualization or firewall packages need to be installed on the host.
+`antic update` installs `antic` (`~/.local/bin/antic`) along with `cloud-hypervisor`, `virtiofsd`, `passt`/`pasta`, and `nft` into `~/.local/libexec/antic/` from `nixpkgs`, so no extra virtualization or firewall packages need to be installed on the host. All of them are statically linked, so they also run on hosts whose Nix store is not at `/nix` (a rootless Nix).
 
 ## Setup & Quickstart
 
@@ -57,6 +57,12 @@ antic shell [NAME]                                    # Open an interactive logi
 - Commands run in your current directory if it lies inside a shared path, or in the guest's `~` otherwise (override with `-w DIR`).
 - `antic run` exits with the command's own exit code (`antic`'s own errors exit with `125`).
 
+### What Every Command Guarantees
+
+- **All or nothing:** a command that fails (exit `125`) leaves the guest as it was: its config file, installed system, running system, mounts and port forwards. A command that is interrupted (killed, or the host crashes) is undone by the next `antic` command on that guest.
+- **Several guests or items:** `start`/`stop`/`restart NAME...`, `mount DIR...` and `kill SESSION...` stop at the first one that fails; the ones before it stay done.
+- **Success means done:** `antic` exits `0` only when the guest is in the requested state; doing again what is already done (sharing a directory again with the same mode, forwarding the same port) succeeds without changing anything.
+
 ### Managing Packages, Shares, and Ports
 
 ```sh
@@ -73,6 +79,11 @@ antic guest forward [NAME] PORT... [-p tcp|udp|tcp,udp] [-d DESC]   # e.g. 3000,
 antic guest unforward [NAME] PORT...
 ```
 
+- A new system that boots differently (another kernel, initrd or kernel parameters) cannot be switched to: the guest restarts instead, which ends its running commands.
+- Changing a running guest's ports, CPUs, memory or network (`forward`, `unforward`, `set`) restarts it.
+- Sharing a directory again with another mode is an error (unmount it first). A share removed from a running guest that was mounted at boot stays mounted until the guest restarts.
+- A host port another guest forwards cannot be forwarded.
+
 ### Guest Lifecycle & Inspection
 
 ```sh
@@ -82,16 +93,16 @@ antic guest stats [NAME] [-w] [--json]                # Live CPU, memory, and se
 
 antic guest create NAME [-p PKG...] [--cpus N] [--memory SIZE] [--network MODE] [--port PORT...]
 antic guest set [NAME] [--cpus N] [--memory SIZE] [--network MODE]
-antic guest edit [NAME]                               # Edit TOML config in $EDITOR and validate
+antic guest edit [NAME]                               # Edit a copy of the config in $VISUAL/$EDITOR; applied only if valid
 antic guest apply [NAME]                              # Rebuild NixOS closure and switch running guest
 
 antic guest start [NAME...]
 antic guest stop [NAME...] | --all
 antic guest restart [NAME...]
-antic guest rm NAME... [-y]
+antic guest rm NAME... [-y]                           # Also removes guests whose config no longer loads
 
-antic guest ps [NAME] [--json]                        # List active command sessions
-antic guest kill [NAME] SESSION...                    # Stop a running session unit
+antic guest ps [NAME] [--json]                        # List running command sessions
+antic guest kill [NAME] SESSION...                    # Stop running sessions (an unknown one is an error)
 antic guest logs [NAME] [-f] [--journal [-u UNIT] [-n N]]
 ```
 
@@ -129,6 +140,7 @@ memory = "8G"
 
 [network]
 mode = "internet"   # "internet" (default) | "lan" | "none"
+# default = "deny"  # "allow" (default) | "deny": what destinations no allow entry names get
 # allow = ["github.com", "*.githubusercontent.com", "1.1.1.1/32"]
 # deny = ["10.0.0.0/8"]
 
@@ -153,7 +165,7 @@ You can place an `antic.toml` file at the root of a project repository. When you
 ```toml
 name = "my-project"
 description = "Project-specific guest environment"
-flake = "nix/guest#my-project"   # or: packages = ["git", "nodejs"]
+packages = ["git", "nodejs"]   # or: flake = "~/.config/antic/flakes/my-project#my-project" (outside the shared project)
 
 [spec]
 cpus = 4
@@ -168,6 +180,10 @@ mode = "rw"
 ```
 
 In `antic.toml`, `name` is required, and relative paths in `flake` and `[[shares]]` are resolved relative to the directory containing `antic.toml`.
+
+- `antic.toml` is read-only inside the guest's shares, so a guest cannot change how it is run.
+- A project `antic.toml` cannot define a guest that is also defined elsewhere (for example in `~/.config/antic/guests/`): both are refused until one is removed.
+- The guest's flake must not lie inside a writable share (see [Caveats](#caveats)); keep it outside the project, e.g. in `~/.config/antic/flakes/`.
 
 ### Custom NixOS Flakes
 
@@ -200,20 +216,40 @@ For full NixOS configuration beyond a package list, set `flake = "/path/to/flake
 ## Architecture & Security Model
 
 - **Stateless microVM:** Boots directly from a kernel and initrd via `cloud-hypervisor`. `/` is `tmpfs` (reset on every boot) and `/nix` is a per-guest store (`~/.local/state/antic/guests/<ID>/store/nix`) mounted read-only over `virtiofs`. The guest has no Nix daemon, no bootloader, no SSH daemon, no `sudo`, and no setuid wrappers.
-- **Live switching with rollback:** `antic guest apply` builds the NixOS system on the host, copies the closure into the guest store, and switches the running guest over vsock. If switching fails, it automatically rolls back to the previous generation.
-- **Protected paths in writable shares:** Each share runs an isolated rootless `virtiofsd` mapping only your UID/GID. Inside writable shares, sensitive files and directories that already exist on the host—such as `.git` (including bare repos), `.claude`, `.mcp.json`, `CLAUDE.md`, `AGENTS.md`, `.envrc`, `.vscode`, `.devcontainer`, `mise.toml`, etc.—are bound **read-only** by the host so even guest `root` cannot modify them.
+- **Live switching with rollback:** `antic guest apply` builds the NixOS system on the host, copies the closure into the guest store, and switches the running guest over vsock. If any step fails, every step before it is undone, including the guest store's system profile.
+- **Crash-safe commands:** each command records what it is about to change in a journal before changing it; the next command on the guest undoes an interrupted one.
+- **Protected paths in writable shares:** Each share runs an isolated rootless `virtiofsd` mapping only your UID/GID. Inside writable shares, sensitive files and directories that already exist on the host—such as `.git` (including bare repos), `.claude`, `.mcp.json`, `CLAUDE.md`, `AGENTS.md`, `.envrc`, `.vscode`, `.devcontainer`, `mise.toml`, `antic.toml`, etc.—are bound **read-only** by the host so even guest `root` cannot modify them. This keeps the guest from tampering with configuration you already trust; files the guest creates are untrusted output like any other (see [Caveats](#caveats)).
+- **Guest text on the host's terminal:** session command lines (`guest ps`), journal lines and the agent's messages are printed with control characters escaped, so a guest cannot send escape sequences to your terminal. `antic run` and `antic shell` pass the command's output through as is.
 - **Host-side egress filtering:** Networking runs via [passt] inside a rootless `pasta` network namespace. Firewall rules (`nftables`) and DNS filtering live outside the guest:
   - `"internet"` (default): allows internet access while blocking LAN subnets, CGNAT/Tailscale (`100.64.0.0/10`), link-local/cloud metadata (`169.254.0.0/16`), and host loopback.
   - `"lan"`: allows internet and LAN, while still blocking host addresses, loopback, and link-local.
   - `"none"`: attaches no network device to the VM.
-  - `allow` / `deny`: filters domains (including `*.example.com` wildcards) and CIDRs. When `allow` is set, an in-namespace DNS proxy resolves allowed domains and dynamically populates an `nftables` IP set before returning answers; direct IP connections bypassing DNS (except static CIDR entries) are rejected.
+  - `default`, `allow` and `deny` refine the mode independently:
+    - `deny` entries (domains, including `*.example.com` wildcards, and CIDRs) are never reachable.
+    - `allow` CIDRs are always reachable, even inside the LAN in `"internet"` mode.
+    - `default = "allow"` (the default) reaches the mode's base set. `default = "deny"` reaches only `allow` CIDRs and the addresses `allow` domains resolve to: an in-namespace DNS proxy resolves allowed domains and adds their addresses to an `nftables` set before answering, and refuses every other name. Resolved addresses never open the LAN in `"internet"` mode.
+    - An `allow` list requires an explicit `default` (older configs where `allow` implied "deny everything else" must add `default = "deny"`), and `allow` domains require `default = "deny"`.
 - **Host sandboxing:** Every host helper unit (`antic-vm@`, `antic-net@`, `antic-share@`) runs under `systemd --user` with `ProtectHome=tmpfs`, `ProtectSystem=strict`, `PrivateTmp`, `PrivatePIDs`, and explicit bind mounts for only the paths it needs.
 
 ### Caveats
 
-- **Writable shares are untrusted output:** Files created by the guest inside a writable share (new build scripts, binaries, or newly created dotfiles) remain on the host filesystem. Review changes before executing them on the host, and use `--ro` (`mode = "ro"`) where possible.
+- **Writable shares are untrusted output:** Files created by the guest inside a writable share (new build scripts, binaries, or newly created dotfiles) remain on the host filesystem. This includes files that host tools load on their own when they did not exist before, such as a new `CLAUDE.md`, `.claude/settings.json`, `.envrc` or `.git`. Review changes before executing them on the host or pointing host tools at them, and use `--ro` (`mode = "ro"`) where possible.
 - **Guest flakes must live outside writable shares:** `antic` refuses to build a local flake input located inside a shared directory, and refuses to share hidden directories in `$HOME` or `$PATH` directories.
 - **Shared CDN IPs with `allow`:** Because `allow` rules permit resolved IP addresses in `nftables`, other domains hosted behind the same shared CDN IP addresses become reachable at the IP layer while the entry is active.
+
+## Development & Verification
+
+The top-level behavior is a state-transition specification (`internal/spec`, see `docs/design/spec.md`) that serves as the test oracle; the command saga is model-checked (`formal/`). The tasks are in the `justfile` (`just` lists them). Install `just` on the host: a rootless Nix cannot start `nix develop` from inside another Nix shell, and the E2E tests must run outside it.
+
+```bash
+just check              # every change: nix flake check (unit tests, property-based tests, Z3, TLC, Spacer) and lint
+just e2e run            # this host: every E2E test against real antic, with saga traces validated against the TLA+ model
+just e2e run 'TestE2E$/sessions'   # one test (a -test.run filter)
+just test pbt 20000     # property-based tests with more cases
+just nightly            # larger property-based tests, then every E2E test with generated command sequences
+```
+
+The E2E tests run antic for real (KVM, `systemd --user`) and only touch guests named `e2e-*`; run them from a plain shell, not inside `nix develop`.
 
 [cloud-hypervisor]: https://www.cloudhypervisor.org/
 [virtiofsd]: https://gitlab.com/virtio-fs/virtiofsd

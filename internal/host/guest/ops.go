@@ -1,6 +1,7 @@
 package guest
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -17,246 +18,136 @@ import (
 	"github.com/RNG999/antic/internal/host/share"
 	"github.com/RNG999/antic/internal/host/transport"
 	"github.com/RNG999/antic/internal/proto"
-	"github.com/RNG999/antic/internal/tea/lifecycle"
-	"github.com/RNG999/antic/internal/types"
+	"github.com/RNG999/antic/internal/tea/operation"
 )
 
-// lifecycleModel reconstructs the pure TEA lifecycle.Model from the host's
-// current configuration, instance store, and boot state.
-func (g *Guest) lifecycleModel(ctx context.Context) (lifecycle.Model, *boot) {
-	name, _ := domain.ParseGuestName(g.Name())
-	m := lifecycle.Init(name)
-	var bt *boot
-	if g.Created {
-		installed, _ := g.store().Current()
-		if instPath, err := domain.ParseStorePath(installed); err == nil {
-			m.Installed = types.Some(types.NewIndexed[domain.StorePath, domain.InstalledState](instPath))
-			if b, err := g.readBoot(ctx); err == nil {
-				if bootSys, err := domain.ParseStorePath(b.System); err == nil {
-					bt = b
-					m.Boot = types.Some(lifecycle.BootedVM{
-						System:    bootSys,
-						KernelSig: g.kernelSignature(b.System),
-					})
-				}
-			}
-		}
-	}
-
-	byPath := map[string]lifecycle.Share{}
-	for _, s := range g.Cfg.Shares {
-		p := s.Path
-		if real, err := filepath.EvalSymlinks(p); err == nil {
-			p = real
-		}
-		absPath, err := domain.ParseAbsPath(p)
-		if err != nil {
-			continue
-		}
-		tag, err := domain.ParseShareTag(share.Tag(p))
-		if err != nil {
-			continue
-		}
-		byPath[p] = lifecycle.Share{
-			Path:     absPath,
-			Tag:      tag,
-			Mount:    lifecycle.MountNone,
-			ReadOnly: s.ReadOnly,
-		}
-	}
-	if bt != nil {
-		for _, bs := range bt.Shares {
-			absPath, err := domain.ParseAbsPath(bs.Path)
-			if err != nil {
-				continue
-			}
-			rawTag := bs.Tag
-			if rawTag == "" {
-				rawTag = share.Tag(bs.Path)
-			}
-			tag, err := domain.ParseShareTag(rawTag)
-			if err != nil {
-				continue
-			}
-			sh, ok := byPath[bs.Path]
-			if !ok {
-				sh = lifecycle.Share{
-					Path:     absPath,
-					Tag:      tag,
-					ReadOnly: bs.ReadOnly,
-				}
-			}
-			if bs.Runtime {
-				sh.Mount = lifecycle.MountRuntime
-			} else {
-				sh.Mount = lifecycle.MountBoot
-			}
-			byPath[bs.Path] = sh
-		}
-	}
-	var shares []lifecycle.Share
-	for _, sh := range byPath {
-		shares = append(shares, sh)
-	}
-	m.Shares = types.BuildSet[lifecycle.Share, domain.AbsPath, lifecycle.ShareByPath](shares)
-	return m, bt
-}
-
-// kernelSignature returns a deterministic signature of a NixOS system's kernel,
-// initrd, and kernel-params so the pure TEA model can compare kernel identity.
-func (g *Guest) kernelSignature(system string) domain.KernelSig {
+// bootSignature returns a deterministic signature of what a NixOS system
+// boots with: its kernel, initrd and kernel parameters, read through real
+// (the guest's store or the host's). A switch cannot change any of them.
+func bootSignature(real func(string) string, system string) domain.KernelSig {
 	if system == "" {
 		return domain.NewKernelSig("")
 	}
-	s := g.store()
-	kern, _ := os.Readlink(s.Real(system + "/kernel"))
-	initrd, _ := os.Readlink(s.Real(system + "/initrd"))
-	params, _ := os.ReadFile(s.Real(system + "/kernel-params"))
+	kern, _ := os.Readlink(real(system + "/kernel"))
+	initrd, _ := os.Readlink(real(system + "/initrd"))
+	params, _ := os.ReadFile(real(system + "/kernel-params"))
 	return domain.NewKernelSig(kern + "\x00" + initrd + "\x00" + string(params))
 }
 
-// Apply builds the guest's system on the host, installs it into the guest's
-// store and, if the guest is running, switches it there. A guest without an
-// ID gets one (this is how a guest is first built).
-func (g *Guest) Apply(ctx context.Context) error {
-	unlock, err := g.lock()
-	if err != nil {
-		return err
-	}
-	defer unlock()
-
-	unlockBuild, err := g.m.Dirs.LockNixBuild()
-	if err != nil {
-		return err
-	}
-	defer unlockBuild()
-
+// prebuild builds the new system of a change to running guest g ahead of
+// its saga (whose Build step then has nothing to do) and plans a restart
+// instead of a switch when the new system boots differently.
+func (g *Guest) prebuild(ctx context.Context, tx *txn, bt *boot) error {
 	nix, err := g.m.nixBuilder()
 	if err != nil {
 		return err
 	}
-	var system string
-	if g.Cfg.FlakePath != "" {
-		if err := nixbuild.CheckLocks(g.Cfg.FlakePath, g.m.allSharePaths()); err != nil {
-			return err
-		}
-		g.m.logf("building %s#nixosConfigurations.%s...", g.Cfg.FlakePath, g.Cfg.FlakeAttr)
-		system, err = nix.BuildFlakeCached(ctx, g.m.Dirs.CacheDir(), g.Cfg.FlakePath, g.Cfg.FlakeAttr)
-		if err != nil {
-			return err
-		}
-	} else {
-		var hit bool
-		system, hit, err = nix.BuildBuiltinCached(ctx, g.m.Dirs.CacheDir(), g.m.User, g.Cfg.Packages, func() {
-			g.m.logf("building guest %s (%s)...", g.Name(), g.osDesc())
-		})
-		if err != nil {
-			return err
-		}
-		if hit {
-			g.m.logf("using cached guest %s (%s): %s", g.Name(), g.osDesc(), system)
-		}
-	}
-
-	sysPath, err := domain.ParseStorePath(system)
-	if err != nil {
+	if tx.newSystem, err = g.build(ctx, tx.draft.After); err != nil {
 		return err
 	}
-	m, bt := g.lifecycleModel(ctx)
-	m, effects := lifecycle.Update(m, lifecycle.MsgApplyBuilt{
-		System:    sysPath,
-		KernelSig: g.kernelSignature(system),
-	})
-
-	for _, eff := range effects {
-		switch e := eff.(type) {
-		case lifecycle.EffectAssignInstance:
-			inst, err := g.m.Dirs.Assign(e.Guest.Get())
-			if err != nil {
-				return err
-			}
-			g.Inst, g.Created = inst, true
-			g.m.logf("guest %s has ID %s", g.Name(), inst.ID)
-			_ = os.WriteFile(g.Inst.OriginFile(), []byte(g.Cfg.Path+"\n"), 0o600)
-
-		case lifecycle.EffectInstallStore:
-			_ = os.WriteFile(g.Inst.OriginFile(), []byte(g.Cfg.Path+"\n"), 0o600)
-			g.m.logf("installing %s into the guest store...", e.System.Get().Get())
-			if err := nix.Install(ctx, g.store(), e.System.Get().Get()); err != nil {
-				return err
-			}
-
-		case lifecycle.EffectLog:
-			g.m.logf("%s", e.Message.Get())
-
-		case lifecycle.EffectAgentSwitch:
-			if err := g.execSwitch(ctx, m, bt, e.Toplevel); err != nil {
-				return err
-			}
-		}
-	}
-	if g.Created {
-		_ = os.WriteFile(g.Inst.OriginFile(), []byte(g.Cfg.Path+"\n"), 0o600)
+	if bootSignature(g.store().Real, bt.System) != bootSignature(nix.Real, tx.newSystem) {
+		g.m.logf("the new system boots another kernel; guest %s restarts to take it", g.Name())
+		tx.op.Change.Restart = operation.Changed
+		tx.op.Change.Added, tx.op.Change.Removed = operation.PathSet{}, operation.PathSet{}
 	}
 	return nil
 }
 
-func (g *Guest) execSwitch(ctx context.Context, m lifecycle.Model, bt *boot, system domain.StorePath) error {
-	var oldSystem string
-	if bvm, ok := m.Boot.Get(); ok {
-		oldSystem = bvm.System.Get()
+// Apply builds the guest's system on the host, installs it into the guest's
+// store and, if the guest is running, switches it there, atomically. A guest
+// without an ID gets one (this is how a guest is first built).
+func (g *Guest) Apply(ctx context.Context) error {
+	return g.applyWith(ctx, func(d config.Draft) (config.Draft, error) { return d, nil })
+}
+
+// SetPackages changes the guest's packages and applies them, atomically.
+func (g *Guest) SetPackages(ctx context.Context, pkgs []string) error {
+	return g.applyWith(ctx, func(d config.Draft) (config.Draft, error) { return d.SetPackages(pkgs) })
+}
+
+// applyWith edits the guest's config under its lock and applies it.
+func (g *Guest) applyWith(ctx context.Context, edit func(config.Draft) (config.Draft, error)) error {
+	unlock, err := g.lockAndRecover(ctx)
+	if err != nil {
+		return err
 	}
-	g.m.logf("switching the running guest...")
-	err := g.vsock().Agent(ctx, proto.Request{Op: proto.OpApply, Toplevel: system.Get()}, func(r proto.Response) {
+	defer unlock()
+	draft, err := config.ReadDraft(g.Cfg, g.m.Dirs.Home)
+	if err != nil {
+		return err
+	}
+	if draft, err = edit(draft); err != nil {
+		return err
+	}
+	tx, bt := g.planChange(ctx, draft)
+	tx.op.Change.System = operation.Changed
+	if bt != nil && tx.op.Change.Restart == operation.Unchanged {
+		if err := g.prebuild(ctx, tx, bt); err != nil {
+			return err
+		}
+	}
+	if err := g.runChange(ctx, tx); err != nil {
+		return err
+	}
+	switch tx.op.Phase {
+	case operation.GuestRunning:
+	case operation.GuestAbsent, operation.GuestUncreated, operation.GuestOff:
+		g.m.logf("%s is ready; it boots on the next \"antic guest start %s\"", tx.newSystem, g.Name())
+	}
+	return nil
+}
+
+// build builds the system of guest config c.
+func (g *Guest) build(ctx context.Context, c *config.Guest) (string, error) {
+	unlockBuild, err := g.m.Dirs.LockNixBuild()
+	if err != nil {
+		return "", err
+	}
+	defer unlockBuild()
+	nix, err := g.m.nixBuilder()
+	if err != nil {
+		return "", err
+	}
+	if c.FlakePath != "" {
+		if err := nixbuild.CheckLocks(c.FlakePath, g.m.allSharePaths()); err != nil {
+			return "", err
+		}
+		g.m.logf("building %s#nixosConfigurations.%s...", c.FlakePath, c.FlakeAttr)
+		return nix.BuildFlakeCached(ctx, g.m.Dirs.CacheDir(), c.FlakePath, c.FlakeAttr)
+	}
+	system, hit, err := nix.BuildBuiltinCached(ctx, g.m.Dirs.CacheDir(), g.m.User, c.Packages, func() {
+		g.m.logf("building guest %s (%s)...", g.Name(), g.osDesc())
+	})
+	if err != nil {
+		return "", err
+	}
+	if hit {
+		g.m.logf("using cached guest %s (%s): %s", g.Name(), g.osDesc(), system)
+	}
+	return system, nil
+}
+
+// switchTo switches the running guest to system and records it as booted.
+// Switching to the system it runs already does nothing.
+func (g *Guest) switchTo(ctx context.Context, system string) error {
+	bt, err := g.readBoot(ctx)
+	if err != nil {
+		return err
+	}
+	if bt.System == system {
+		return nil
+	}
+	g.m.logf("switching the running guest to %s...", system)
+	err = g.vsock().Agent(ctx, proto.Request{Op: proto.OpApply, Toplevel: system}, func(r proto.Response) {
 		if r.Line != "" {
-			fmt.Fprintln(g.m.Log, r.Line)
+			fmt.Fprintln(g.m.Log, domain.Printable(r.Line))
 		}
 	})
 	if err != nil {
-		_, rbEffects := lifecycle.Update(m, lifecycle.MsgSwitchFailed{Reason: domain.NewText(err.Error())})
-		for _, eff := range rbEffects {
-			sw, ok := eff.(lifecycle.EffectAgentSwitch)
-			if !ok || sw.Mode != lifecycle.SwitchRollback || !sw.Toplevel.Valid() || sw.Toplevel == system {
-				continue
-			}
-			g.m.logf("switch failed (%v); rolling back to %s...", err, sw.Toplevel.Get())
-			rbCtx, rbCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer rbCancel()
-			rbErr := g.vsock().Agent(rbCtx, proto.Request{Op: proto.OpApply, Toplevel: sw.Toplevel.Get()}, func(r proto.Response) {
-				if r.Line != "" {
-					fmt.Fprintln(g.m.Log, r.Line)
-				}
-			})
-			if rbErr != nil {
-				return fmt.Errorf("switch failed: %w (rollback to %s also failed: %v)", err, sw.Toplevel.Get(), rbErr)
-			}
-			g.m.logf("successfully rolled back to %s", sw.Toplevel.Get())
-			return fmt.Errorf("switch to configuration failed (rolled back to %s): %w", sw.Toplevel.Get(), err)
-		}
 		return err
 	}
-
-	_, okEffects := lifecycle.Update(m, lifecycle.MsgSwitchSucceeded{
-		KernelSig: g.kernelSignature(system.Get()),
-	})
-	for _, eff := range okEffects {
-		switch e := eff.(type) {
-		case lifecycle.EffectWriteBoot:
-			if bt != nil {
-				bt.System = e.System.Get()
-				if err := g.writeBoot(bt); err != nil {
-					if oldSystem != "" && oldSystem != system.Get() {
-						g.m.logf("recording boot configuration failed (%v); rolling back to %s...", err, oldSystem)
-						_ = g.vsock().Agent(context.Background(), proto.Request{Op: proto.OpApply, Toplevel: oldSystem}, nil)
-					}
-					return fmt.Errorf("failed to record boot configuration: %w", err)
-				}
-			}
-		case lifecycle.EffectLog:
-			g.m.logf("%s", e.Message.Get())
-		}
-	}
-	return nil
+	bt.System = system
+	return g.writeBoot(bt)
 }
 
 func (m *Manager) allSharePaths() []string {
@@ -269,65 +160,83 @@ func (m *Manager) allSharePaths() []string {
 	return out
 }
 
-// Create adds the guest config file if needed, builds it, and starts it.
-func (m *Manager) Create(ctx context.Context, name string, spec config.Guest) (*Guest, error) {
+// Create writes the guest's config file unless it has one, builds the
+// guest, and starts it, atomically. Flags (a spec for the new file) are an
+// error when the config exists already: they would be ignored (D3).
+func (m *Manager) Create(ctx context.Context, name string, spec config.Guest, flags bool) (*Guest, error) {
 	if !config.ValidName(name) {
 		return nil, fmt.Errorf("invalid guest name %q (a-z, 0-9 and -, up to 32 characters)", name)
 	}
-	if m.Config.Guests[name] == nil {
-		if err := m.Config.CreateGuest(name, spec, m.Dirs.Home); err != nil {
+	if err := m.RecoverOrphan(ctx, name); err != nil {
+		return nil, err
+	}
+	var g *Guest
+	var draft config.Draft
+	if m.Config.Guests[name] != nil {
+		if flags {
+			return nil, fmt.Errorf("guest %s already has a config (%s); edit it instead of passing flags", name, m.Config.Guests[name].Path)
+		}
+		var err error
+		if g, err = m.Get(name); err != nil {
 			return nil, err
 		}
-		c, err := config.Load(m.Config.Dir(), m.Dirs.Home)
+		if draft, err = config.ReadDraft(g.Cfg, m.Dirs.Home); err != nil {
+			return nil, err
+		}
+	} else {
+		var err error
+		if draft, err = m.Config.NewGuestDraft(name, spec, m.Dirs.Home); err != nil {
+			return nil, err
+		}
+		inst, ok, err := m.Dirs.Lookup(name)
 		if err != nil {
 			return nil, err
 		}
-		m.Config = c
-		m.logf("created %s", c.GuestPath(name))
+		g = &Guest{m: m, Cfg: draft.After, Inst: inst, Created: ok}
 	}
-	g, err := m.Get(name)
+	unlock, err := g.lockAndRecover(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if g.Created {
-		if cur, _ := g.store().Current(); cur != "" {
-			return nil, fmt.Errorf("guest %s already exists", name)
-		}
+	defer unlock()
+	tx, _ := g.planChange(ctx, draft)
+	switch {
+	case draft.NewFile && tx.oldProfile == "":
+		tx.op.Phase = operation.GuestAbsent
+	case tx.oldProfile == "":
+		tx.op.Phase = operation.GuestUncreated
 	}
-	if err := g.Apply(ctx); err != nil {
+	tx.op.Kind, tx.op.Change = operation.OpCreate, operation.Change{}
+	if err := g.runChange(ctx, tx); err != nil {
 		return nil, err
 	}
-	m.logf("starting guest %s...", g.Name())
-	if err := g.Start(ctx); err != nil {
-		return nil, err
+	if draft.NewFile {
+		m.logf("created %s", draft.Path)
 	}
 	return g, nil
 }
 
-// Remove deletes the guest's state, its config file, and any orphaned guest
-// state directories.
+// Remove deletes the guest: it stops it, moves its config file and state
+// to the trash, and empties the trash once both moved, atomically.
 func (g *Guest) Remove(ctx context.Context) error {
-	if g.Created {
-		if err := g.Stop(ctx); err != nil {
-			return err
-		}
-		unlock, err := g.lock()
-		if err != nil {
-			return err
-		}
-		defer unlock()
-		if err := g.m.Dirs.Remove(g.Inst); err != nil {
-			return err
-		}
-	}
-	if err := g.m.Config.RemoveGuest(g.Name()); err != nil {
+	unlock, err := g.lockAndRecover(ctx)
+	if err != nil {
 		return err
 	}
-	if orphans, err := g.m.Dirs.Orphans(); err == nil {
-		for _, p := range orphans {
-			instance.RemoveDir(p)
-		}
+	defer unlock()
+	// Removing needs the file's bytes (for the journal), not its meaning:
+	// a guest whose config does not load can be removed too (D17).
+	draft, err := config.ReadRawDraft(g.Cfg.Path, g.Name(), g.m.Dirs.Home)
+	if err != nil {
+		return err
 	}
+	tx, _ := g.planChange(ctx, draft)
+	tx.op.Kind, tx.op.Change = operation.OpRemove, operation.Change{}
+	if err := g.runSaga(ctx, tx, operation.MsgCommand{Op: tx.op}); err != nil {
+		return err
+	}
+	delete(g.m.Config.Guests, g.Name())
+	g.Inst, g.Created = instance.Instance{}, false
 	return nil
 }
 
@@ -338,9 +247,7 @@ func (g *Guest) Dir(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if real, err := filepath.EvalSymlinks(wd); err == nil {
-		wd = real
-	}
+	wd = config.RealPath(wd)
 	var shares []string
 	if bt, err := g.readBoot(ctx); err == nil {
 		for _, s := range bt.Shares {
@@ -412,65 +319,251 @@ type ShareInfo struct {
 	Mounted  bool   `json:"mounted"`
 }
 
-// Shares lists configured and runtime shares.
+// Shares lists the configured shares and the running guest's mounts, by
+// resolved path: a share removed from the config that stays mounted until
+// the guest restarts is listed as mounted.
 func (g *Guest) Shares(ctx context.Context) []ShareInfo {
-	m, _ := g.lifecycleModel(ctx)
-	var out []ShareInfo
-	for _, s := range m.Shares.All() {
-		out = append(out, ShareInfo{
-			Path:     s.Path.Get(),
-			ReadOnly: s.ReadOnly,
-			Mounted:  s.Mounted(),
-		})
+	byPath := map[string]ShareInfo{}
+	for _, s := range g.Cfg.Shares {
+		p := config.RealPath(s.Path)
+		byPath[p] = ShareInfo{Path: p, ReadOnly: s.ReadOnly}
+	}
+	if g.Created {
+		if bt, err := g.readBoot(ctx); err == nil {
+			for _, m := range bt.Shares {
+				info, ok := byPath[m.Path]
+				if !ok {
+					info = ShareInfo{Path: m.Path, ReadOnly: m.ReadOnly}
+				}
+				info.Mounted = true
+				byPath[m.Path] = info
+			}
+		}
+	}
+	out := make([]ShareInfo, 0, len(byPath))
+	for _, info := range byPath {
+		out = append(out, info)
+	}
+	slices.SortFunc(out, func(a, b ShareInfo) int { return strings.Compare(a.Path, b.Path) })
+	return out
+}
+
+// planChange plans the operation that makes draft take effect on g, with
+// the concrete old artifacts it needs, and returns the running guest's boot
+// record (nil when it is not running). It must run under the guest's lock.
+func (g *Guest) planChange(ctx context.Context, draft config.Draft) (*txn, *boot) {
+	tx := &txn{draft: draft, modes: map[string]bool{},
+		op: operation.Op{Kind: operation.OpChangeConfig, Phase: operation.GuestUncreated}}
+	if g.Created {
+		tx.op.Phase = operation.GuestOff
+		tx.oldProfile, _ = g.store().Current()
+	}
+	if draft.Changed() {
+		tx.op.Change.Config = operation.Changed
+	}
+	bt, err := g.readBoot(ctx)
+	if err != nil {
+		return tx, nil
+	}
+	tx.op.Phase, tx.oldBooted = operation.GuestRunning, bt.System
+	var runtime []string
+	for _, s := range bt.Shares {
+		tx.modes[s.Path] = s.ReadOnly
+		if s.Runtime {
+			runtime = append(runtime, s.Path)
+		}
+	}
+	tx.op.Runtime, _ = pathSet(runtime)
+	if draft.Before != nil && draft.After != nil && config.NeedsRestart(draft.Before, draft.After) {
+		tx.op.Change.Restart = operation.Changed
+	}
+	return tx, bt
+}
+
+// runChange runs the saga of tx and adopts the config it leaves.
+func (g *Guest) runChange(ctx context.Context, tx *txn) error {
+	err := g.runSaga(ctx, tx, operation.MsgCommand{Op: tx.op})
+	g.Cfg = tx.draft.After
+	if err != nil {
+		g.Cfg = tx.draft.Before
+	}
+	g.m.Config.Guests[g.Name()] = g.Cfg
+	return err
+}
+
+// Reconfigure edits the guest's config under its lock and makes it take
+// effect, restarting a running guest when the change needs it, atomically.
+// It reports whether anything changed.
+func (g *Guest) Reconfigure(ctx context.Context, edit func(config.Draft) (config.Draft, error)) (bool, error) {
+	unlock, err := g.lockAndRecover(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+	draft, err := config.ReadDraft(g.Cfg, g.m.Dirs.Home)
+	if err != nil {
+		return false, err
+	}
+	if draft, err = edit(draft); err != nil {
+		return false, err
+	}
+	if !draft.Changed() {
+		return false, nil
+	}
+	tx, _ := g.planChange(ctx, draft)
+	return true, g.runChange(ctx, tx)
+}
+
+// Edit replaces the guest's config file with content, provided it still
+// holds old (what the user started editing from), and makes it take effect
+// as the specification's edit does: an unbuilt guest only changes its
+// config, a stopped one is rebuilt, and a running one is rebuilt and
+// switched with its shares hot-plugged, or restarted when the change
+// cannot be made live. A content that does not load changes nothing.
+func (g *Guest) Edit(ctx context.Context, old, content []byte) (bool, error) {
+	unlock, err := g.lockAndRecover(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+	draft, err := config.ReadDraft(g.Cfg, g.m.Dirs.Home)
+	if err != nil {
+		return false, err
+	}
+	if !bytes.Equal(draft.Old, old) {
+		return false, fmt.Errorf("%s changed while it was being edited; edit it again", draft.Path)
+	}
+	if draft, err = draft.Replace(content); err != nil {
+		return false, err
+	}
+	if !draft.Changed() {
+		return false, nil
+	}
+	tx, bt := g.planChange(ctx, draft)
+	if tx.op.Phase != operation.GuestUncreated {
+		tx.op.Change.System = operation.Changed
+	}
+	if bt != nil && tx.op.Change.Restart == operation.Unchanged {
+		added, removed, live := liveShares(bt, draft.After)
+		if live {
+			tx.op.Change.Added, _ = pathSet(added)
+			tx.op.Change.Removed, _ = pathSet(removed)
+			for _, s := range draft.After.Shares {
+				tx.modes[config.RealPath(s.Path)] = s.ReadOnly
+			}
+		} else {
+			tx.op.Change.Restart = operation.Changed
+		}
+	}
+	if bt != nil && tx.op.Change.Restart == operation.Unchanged {
+		if err := g.prebuild(ctx, tx, bt); err != nil {
+			return false, err
+		}
+	}
+	return true, g.runChange(ctx, tx)
+}
+
+// liveShares returns the shares a running guest with boot record bt must
+// hot-plug and detach to take the shares of c, or false if that needs a
+// restart (a mounted share changes mode, or a new one overlaps a mount).
+func liveShares(bt *boot, c *config.Guest) (added, removed []string, live bool) {
+	want := map[string]bool{}
+	for _, s := range c.Shares {
+		want[config.RealPath(s.Path)] = s.ReadOnly
+	}
+	var mounts []bootShare
+	for _, m := range bt.Shares {
+		if _, keep := want[m.Path]; !keep && m.Runtime {
+			removed = append(removed, m.Path)
+			continue
+		}
+		mounts = append(mounts, m)
+	}
+	for p, ro := range want {
+		i := slices.IndexFunc(mounts, func(m bootShare) bool { return m.Path == p })
+		if i >= 0 {
+			if mounts[i].ReadOnly != ro {
+				return nil, nil, false
+			}
+			continue
+		}
+		if slices.ContainsFunc(mounts, func(m bootShare) bool { return within(p, m.Path) || within(m.Path, p) }) {
+			return nil, nil, false
+		}
+		added = append(added, p)
+	}
+	return added, removed, true
+}
+
+// OtherPorts are the port forwards configured on every other guest.
+func (g *Guest) OtherPorts() []config.Port {
+	var out []config.Port
+	for name, c := range g.m.Config.Guests {
+		if name != g.Name() {
+			out = append(out, c.Ports...)
+		}
 	}
 	return out
 }
 
-// AddShare records path in the guest's config file and, if the guest is running, hot-plugs
-// it immediately.
-func (g *Guest) AddShare(ctx context.Context, path string, ro bool) (string, error) {
+// AddShare records path in the guest's config file and, if the guest is
+// running, hot-plugs it, atomically. It reports the resolved path and
+// whether anything changed (sharing a directory again with the same mode
+// changes nothing).
+func (g *Guest) AddShare(ctx context.Context, path string, ro bool) (string, bool, error) {
 	real, err := g.m.policy().Resolve(path)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	absPath, err := domain.ParseAbsPath(real)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	tag, err := domain.ParseShareTag(share.Tag(real))
+	unlock, err := g.lockAndRecover(ctx)
 	if err != nil {
-		return "", err
-	}
-	unlock, err := g.lock()
-	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	defer unlock()
 
-	m, bt := g.lifecycleModel(ctx)
+	draft, err := config.ReadDraft(g.Cfg, g.m.Dirs.Home)
+	if err != nil {
+		return "", false, err
+	}
+	if draft, err = draft.AddShare(real, ro); err != nil {
+		return "", false, err
+	}
+	if !draft.Changed() {
+		return real, false, nil
+	}
+	tx, bt := g.planChange(ctx, draft)
+	tx.modes[absPath.Get()] = ro
 	if bt != nil {
+		mounted := false
 		for _, s := range bt.Shares {
-			if s.Path != real && (within(real, s.Path) || within(s.Path, real)) {
-				return "", fmt.Errorf("%s overlaps share %s", real, s.Path)
+			switch {
+			case s.Path == real && s.ReadOnly != ro:
+				return "", false, fmt.Errorf("%s is still mounted %s until guest %s restarts", real, modeName(s.ReadOnly), g.Name())
+			case s.Path == real:
+				mounted = true
+			case within(real, s.Path) || within(s.Path, real):
+				return "", false, fmt.Errorf("%s overlaps mounted share %s", real, s.Path)
 			}
 		}
-	}
-	_, effects := lifecycle.Update(m, lifecycle.MsgMountShare{
-		Path:     absPath,
-		Tag:      tag,
-		ReadOnly: ro,
-	})
-	for _, eff := range effects {
-		if hp, ok := eff.(lifecycle.EffectHotplugShare); ok && bt != nil {
-			if err := g.hotplug(ctx, bt, hp.Path.Get(), hp.ReadOnly); err != nil {
-				return "", err
-			}
+		if !mounted {
+			tx.op.Change.Added, _ = pathSet([]string{real})
 		}
 	}
-	if err := g.m.Config.AddShare(g.Name(), config.Share{Path: real, ReadOnly: ro}, g.m.Dirs.Home); err != nil {
-		return real, err
+	if err := g.runChange(ctx, tx); err != nil {
+		return "", false, err
 	}
-	return real, nil
+	return real, true, nil
+}
+
+func modeName(ro bool) string {
+	if ro {
+		return "read-only"
+	}
+	return "read-write"
 }
 
 func (g *Guest) hotplug(ctx context.Context, bt *boot, path string, ro bool) (err error) {
@@ -503,61 +596,40 @@ func (g *Guest) hotplug(ctx context.Context, bt *boot, path string, ro bool) (er
 	return g.writeBoot(bt)
 }
 
-// RemoveShare removes a share from the guest's config file and, if it was hot-plugged on
-// the running guest, unmounts and detaches it immediately.
-func (g *Guest) RemoveShare(ctx context.Context, path string) error {
-	real := path
-	if r, err := filepath.EvalSymlinks(path); err == nil {
-		real = r
-	}
-	unlock, err := g.lock()
+// RemoveShare removes a share from the guest's config file and, if it was
+// hot-plugged on the running guest, unmounts and detaches it, atomically.
+// It reports the resolved path, and whether the share stays mounted until
+// the guest restarts (it was mounted at boot).
+func (g *Guest) RemoveShare(ctx context.Context, path string) (string, bool, error) {
+	real := config.RealPath(path)
+	unlock, err := g.lockAndRecover(ctx)
 	if err != nil {
-		return err
+		return "", false, err
 	}
 	defer unlock()
 
-	m, bt := g.lifecycleModel(ctx)
-	var effects []lifecycle.Effect
-	if absPath, err := domain.ParseAbsPath(real); err == nil {
-		_, effects = lifecycle.Update(m, lifecycle.MsgUnmountShare{Path: absPath})
+	draft, err := config.ReadDraft(g.Cfg, g.m.Dirs.Home)
+	if err != nil {
+		return "", false, err
 	}
-	removedRuntime := false
-	for _, eff := range effects {
-		switch e := eff.(type) {
-		case lifecycle.EffectHotunplugShare:
-			if bt == nil {
-				continue
+	if draft, err = draft.RemoveShare(real); err != nil {
+		return "", false, err
+	}
+	tx, bt := g.planChange(ctx, draft)
+	lingers := false
+	if bt != nil {
+		for _, s := range bt.Shares {
+			if s.Path == real && s.Runtime {
+				tx.op.Change.Removed, _ = pathSet([]string{real})
+			} else if s.Path == real {
+				lingers = true
 			}
-			tagStr := e.Tag.Get()
-			pathStr := e.Path.Get()
-			if err := g.vsock().Agent(ctx, proto.Request{Op: proto.OpUnmount, Tag: tagStr}, nil); err != nil {
-				return err
-			}
-			if err := g.api().RemoveDevice(ctx, "fs-"+tagStr); err != nil {
-				return err
-			}
-			time.Sleep(2 * time.Second) // see hotplug
-			if err := g.m.Units.Stop(ctx, g.shareUnit(tagStr)); err != nil {
-				return err
-			}
-			for i, s := range bt.Shares {
-				if s.Path == pathStr {
-					bt.Shares = slices.Delete(bt.Shares, i, i+1)
-					break
-				}
-			}
-			if err := g.writeBoot(bt); err != nil {
-				return err
-			}
-			removedRuntime = true
-		case lifecycle.EffectLog:
-			defer g.m.logf("%s", e.Message.Get())
 		}
 	}
-	if err := g.m.Config.RemoveShare(g.Name(), real, g.m.Dirs.Home); err != nil && !removedRuntime {
-		return err
+	if err := g.runChange(ctx, tx); err != nil {
+		return "", false, err
 	}
-	return nil
+	return real, lingers, nil
 }
 
 func within(path, dir string) bool { return path == dir || strings.HasPrefix(path, dir+"/") }
@@ -594,7 +666,7 @@ type Info struct {
 func (g *Guest) Inspect(ctx context.Context) (Info, error) {
 	i := Info{
 		Name: g.Name(), ID: g.Inst.ID,
-		Description: g.Cfg.Description, State: lifecycle.PhaseUncreated.String(),
+		Description: g.Cfg.Description, State: "-",
 		OS: g.osDesc(), Packages: g.Cfg.Packages,
 		CPUs: g.Cfg.CPUs, Memory: g.Cfg.Memory, Network: g.Cfg.Network.Mode, Ports: g.Cfg.Ports,
 		Shares: g.Shares(ctx),
@@ -602,14 +674,14 @@ func (g *Guest) Inspect(ctx context.Context) (Info, error) {
 	if !g.Created {
 		return i, nil
 	}
-	i.State = lifecycle.PhaseStopped.String()
+	i.State = "stopped"
 	i.System, _ = g.store().Current()
 	st, err := g.m.Units.State(ctx, g.vmUnit())
 	if err != nil {
 		return i, err
 	}
 	if st.Running() {
-		i.State, i.Since = lifecycle.PhaseRunning.String(), &st.Since
+		i.State, i.Since = "running", &st.Since
 		if bt, err := g.readBoot(ctx); err == nil {
 			i.System = bt.System
 		}
@@ -634,7 +706,7 @@ func (g *Guest) Journal(ctx context.Context, units []string, lines int, line fun
 	}
 	return g.vsock().Agent(ctx, proto.Request{Op: proto.OpJournal, Units: units, Lines: lines}, func(r proto.Response) {
 		if r.Line != "" {
-			line(r.Line)
+			line(domain.Printable(r.Line))
 		}
 	})
 }

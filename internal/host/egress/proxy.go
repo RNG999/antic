@@ -47,10 +47,12 @@ const (
 // Config configures a Proxy.
 type Config struct {
 	Upstream netip.AddrPort // the namespace's resolver address (pasta forwards it)
-	Allow    []string       // allowed domains (lowercase, no trailing dot; empty means allow all except Deny)
+	Allow    []string       // allowed domains (lowercase, no trailing dot)
 	Deny     []string       // denied domains (lowercase, no trailing dot)
-	NFT      string         // nft binary
-	Log      io.Writer
+	// DefaultDeny refuses names Allow does not match (network.default = "deny").
+	DefaultDeny bool
+	NFT         string // nft binary
+	Log         io.Writer
 }
 
 // Proxy is a filtering DNS forwarder whose domain policy, refused-domain log,
@@ -61,8 +63,8 @@ type Proxy struct {
 	udp *net.UDPConn
 	tcp *net.TCPListener
 
-	mu    sync.Mutex
-	model teaegress.Model
+	mu     sync.Mutex
+	model  teaegress.Model
 	inited bool
 }
 
@@ -78,7 +80,11 @@ func initModel(cfg Config) teaegress.Model {
 			deny = append(deny, p)
 		}
 	}
-	return teaegress.Init(allow, deny)
+	def := teaegress.DefaultAllow
+	if cfg.DefaultDeny {
+		def = teaegress.DefaultDeny
+	}
+	return teaegress.Init(def, allow, deny)
 }
 
 func (p *Proxy) ensureModel() {
@@ -121,10 +127,18 @@ func (p *Proxy) Serve(ctx context.Context) error {
 	err := <-errc
 	p.udp.Close()
 	p.tcp.Close()
-	if ctx.Err() != nil {
+	return stopped(ctx, err)
+}
+
+// stopped is err, unless ctx was cancelled: then the listeners were closed
+// on purpose and the error only reports that.
+func stopped(ctx context.Context, err error) error {
+	select {
+	case <-ctx.Done():
 		return nil
+	default:
+		return err
 	}
-	return err
 }
 
 func (p *Proxy) serveUDP(ctx context.Context) error {
@@ -133,10 +147,7 @@ func (p *Proxy) serveUDP(ctx context.Context) error {
 	for {
 		n, from, err := p.udp.ReadFromUDPAddrPort(buf)
 		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			return err
+			return stopped(ctx, err)
 		}
 		msg := bytes.Clone(buf[:n])
 		select {
@@ -158,10 +169,7 @@ func (p *Proxy) serveTCP(ctx context.Context) error {
 	for {
 		c, err := p.tcp.Accept()
 		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			return err
+			return stopped(ctx, err)
 		}
 		select {
 		case sem <- struct{}{}:
@@ -423,7 +431,7 @@ func (p *Proxy) allow(ctx context.Context, addrs []answer) error {
 		cmd := exec.CommandContext(ctx, p.cfg.NFT, "-f", "-")
 		cmd.Stdin = strings.NewReader(script.String())
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("nft: %v: %s", err, strings.TrimSpace(string(out)))
+			return fmt.Errorf("nft: %w: %s", err, strings.TrimSpace(string(out)))
 		}
 	}
 	p.model = next

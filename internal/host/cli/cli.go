@@ -155,11 +155,14 @@ func (a *app) resolveTargetGuest(ctx context.Context, args []string, usage strin
 
 // resolveGuestAndItems resolves a target guest and trailing items (e.g. packages, ports, dirs).
 // If args has at least 1 element and matches an existing guest name:
-//   that guest is selected and args[1:] are items.
+//
+//	that guest is selected and args[1:] are items.
+//
 // Otherwise:
 //   - If exactly one guest exists: that guest is selected and all args are items.
 //   - If multiple guests exist: returns an error listing the available guests.
 //   - If no guests exist: returns an error saying no guests are defined.
+//
 // Finally, if len(items) == 0: returns a syntax error indicating itemNoun is required.
 func (a *app) resolveGuestAndItems(ctx context.Context, args []string, usage, itemNoun string) (string, []string, error) {
 	if err := a.loadConfig(); err != nil {

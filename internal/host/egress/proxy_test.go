@@ -7,7 +7,8 @@ import (
 func TestDomainAllowed(t *testing.T) {
 	// Case 1: Allow list only (Default Deny)
 	pAllowOnly := &Proxy{cfg: Config{
-		Allow: []string{"*.github.com", "anthropic.com"},
+		Allow:       []string{"*.github.com", "anthropic.com"},
+		DefaultDeny: true,
 	}}
 	if !pAllowOnly.domainAllowed("github.com") {
 		t.Error("expected github.com allowed (apex matches wildcard)")
@@ -41,8 +42,9 @@ func TestDomainAllowed(t *testing.T) {
 
 	// Case 3: Allow + Deny list (Deny takes priority)
 	pBoth := &Proxy{cfg: Config{
-		Allow: []string{"*.github.com"},
-		Deny:  []string{"gist.github.com"},
+		Allow:       []string{"*.github.com"},
+		Deny:        []string{"gist.github.com"},
+		DefaultDeny: true,
 	}}
 	if !pBoth.domainAllowed("github.com") {
 		t.Error("expected github.com allowed")

@@ -26,8 +26,8 @@ antic run dev -- cargo test
 antic run dev -w /tmp -- sh -c "uname -a"  # Explicit working directory in the guest
 ```
 
-- Exit code `125` means an `antic` error occurred; any other exit code is the command's own exit status.
-- Inside writable shares, sensitive paths (`.git`, `.claude`, `CLAUDE.md`, `AGENTS.md`, `.envrc`, `.vscode`, `mise.toml`, etc.) are automatically mounted **read-only** so processes inside the guest cannot tamper with git hooks or agent configs.
+- Exit code `125` means an `antic` error occurred; any other exit code is the command's own exit status. A failed `antic` command changes nothing, so it is safe to fix the cause and run it again.
+- Inside writable shares, sensitive paths that already exist (`.git`, `.claude`, `CLAUDE.md`, `AGENTS.md`, `.envrc`, `.vscode`, `mise.toml`, `antic.toml`, etc.) are automatically mounted **read-only** so processes inside the guest cannot tamper with git hooks, agent configs or the guest's own config.
 
 ## 2. Installing Packages (`antic guest install`)
 
@@ -38,7 +38,7 @@ antic guest install <name> ripgrep jq nodejs python3
 antic guest uninstall <name> nodejs
 ```
 
-`antic guest install` updates `~/.config/antic/guests/<name>.toml`, builds the new NixOS closure on the host, copies it into the guest store, and live-switches the running guest without rebooting.
+`antic guest install` updates `~/.config/antic/guests/<name>.toml`, builds the new NixOS closure on the host, copies it into the guest store, and live-switches the running guest without rebooting (a new kernel restarts it, which ends running commands). If the build fails, nothing changes.
 
 ## 3. Sharing Directories (`antic guest mount`)
 
@@ -50,7 +50,7 @@ antic guest mount <name> ~/Docs/reference --ro    # Read-only share
 antic guest unmount <name> ~/Docs/reference
 ```
 
-`antic guest mount` persists the share in `~/.config/antic/guests/<name>.toml` and hot-plugs it into the running guest immediately.
+`antic guest mount` persists the share in `~/.config/antic/guests/<name>.toml` and hot-plugs it into the running guest immediately. Mounting an already shared directory with the same mode does nothing; with the other mode it is an error (unmount it first).
 
 ## 4. Forwarding Ports (`antic guest forward`)
 
@@ -71,15 +71,15 @@ antic guest show <name>                  # Status, resources, ports, and mounts 
 # Create a new guest (automatically builds and starts it)
 antic guest create dev -p git -p ripgrep --cpus 4 --memory 8G --network internet
 
-# Change vCPUs, RAM, or network mode ("internet" | "lan" | "none")
+# Change vCPUs, RAM, or network mode ("internet" | "lan" | "none"); a running guest restarts
 antic guest set <name> --cpus 4 --memory 8G --network internet
 
 # Lifecycle & debugging
 antic guest start <name>
 antic guest stop <name>
 antic guest restart <name>
-antic guest ps <name>                    # List active command sessions
-antic guest kill <name> <session-unit>   # Terminate hung session
+antic guest ps <name>                    # List running command sessions
+antic guest kill <name> <session-unit>   # Terminate a hung session (unit name from ps)
 antic guest logs <name>                  # Kernel/console log (--journal for systemd journal)
 ```
 
@@ -97,7 +97,8 @@ memory = "4G"
 
 [network]
 mode = "internet"   # none | internet | lan
-# allow = ["github.com", "*.githubusercontent.com", "1.1.1.1/32"]  # Optional: default deny whitelist
+# default = "deny"  # Optional: "deny" reaches only the allow list (an allow list needs an explicit default)
+# allow = ["github.com", "*.githubusercontent.com", "1.1.1.1/32"]
 # deny = ["10.0.0.0/8"]                 # Optional: blacklist (CIDR or domain)
 
 [[network.ports]]

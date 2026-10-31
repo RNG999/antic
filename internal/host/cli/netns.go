@@ -31,16 +31,17 @@ func netnsMain(args []string) int {
 	fs.StringVar(&domains, "allow-domains", "", "file with allowed domains")
 	fs.StringVar(&domains, "dns-domains", "", "alias for --allow-domains")
 	denyDomains := fs.String("deny-domains", "", "file with denied domains")
+	defaultDeny := fs.Bool("default-deny", false, "refuse names the allow list does not match")
 	upstream := fs.String("upstream", "", "upstream resolver address")
 	if err := fs.Parse(args); err != nil {
 		return exitError
 	}
 	argv := fs.Args()
 	if *nft == "" || *rules == "" || len(argv) == 0 {
-		fmt.Fprintln(os.Stderr, "antic netns: usage: --nft PATH --rules FILE [--allow-domains FILE] [--deny-domains FILE] [--upstream ADDR] -- PASST...")
+		fmt.Fprintln(os.Stderr, "antic netns: usage: --nft PATH --rules FILE [--allow-domains FILE] [--deny-domains FILE] [--default-deny] [--upstream ADDR] -- PASST...")
 		return exitError
 	}
-	if err := netnsRun(*nft, *rules, domains, *denyDomains, *upstream, argv); err != nil {
+	if err := netnsRun(*nft, *rules, domains, *denyDomains, *defaultDeny, *upstream, argv); err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
 			return ee.ExitCode()
@@ -51,15 +52,15 @@ func netnsMain(args []string) int {
 	return 0
 }
 
-func netnsRun(nft, rules, domainsFile, denyFile, upstream string, argv []string) error {
+func netnsRun(nft, rules, domainsFile, denyFile string, defaultDeny bool, upstream string, argv []string) error {
 	if out, err := exec.Command(nft, "-f", rules).CombinedOutput(); err != nil {
-		return fmt.Errorf("nft -f %s: %v: %s", rules, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("nft -f %s: %w: %s", rules, err, strings.TrimSpace(string(out)))
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	var proxy *egress.Proxy
-	if domainsFile != "" || denyFile != "" {
+	if domainsFile != "" || denyFile != "" || defaultDeny {
 		var allowList, denyList []string
 		if domainsFile != "" {
 			b, err := os.ReadFile(domainsFile)
@@ -80,11 +81,12 @@ func netnsRun(nft, rules, domainsFile, denyFile, upstream string, argv []string)
 			return fmt.Errorf("--upstream: %w", err)
 		}
 		proxy, err = egress.New(egress.Config{
-			Upstream: netip.AddrPortFrom(up, 53),
-			Allow:    allowList,
-			Deny:     denyList,
-			NFT:      nft,
-			Log:      os.Stderr,
+			Upstream:    netip.AddrPortFrom(up, 53),
+			Allow:       allowList,
+			Deny:        denyList,
+			DefaultDeny: defaultDeny,
+			NFT:         nft,
+			Log:         os.Stderr,
 		})
 		if err != nil {
 			return fmt.Errorf("dns filter: %w", err)

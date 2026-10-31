@@ -81,3 +81,21 @@ func TestTypeTheoryAndDomainPrimitives(t *testing.T) {
 		t.Fatalf("expected 93.184.216.34 to be usable: %v", err)
 	}
 }
+
+// TestPrintable: control characters a guest could send to the host's
+// terminal are escaped; ordinary text, tabs and non-ASCII letters are not.
+func TestPrintable(t *testing.T) {
+	for in, want := range map[string]string{
+		"sleep 600":              "sleep 600",
+		"a\tb":                   "a\tb",
+		"日本語":                    "日本語",
+		"\x1b]0;pwned\x07title":  `\x1b]0;pwned\atitle`,
+		"\x1b]52;c;aGVsbG8=\x07": `\x1b]52;c;aGVsbG8=\a`,
+		"line\nbreak\r":          `line\nbreak\r`,
+		"\u009b31m":              `\u009b31m`,
+	} {
+		if got := domain.Printable(in); got != want {
+			t.Errorf("Printable(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

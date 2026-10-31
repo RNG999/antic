@@ -193,4 +193,3 @@ func notifyReady() {
 		_ = c.Close()
 	}
 }
-

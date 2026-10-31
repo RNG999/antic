@@ -40,6 +40,9 @@ var ProtectedNames = []string{
 	".devcontainer", ".husky", ".githooks", ".mise", ".mcp.json", "CLAUDE.md",
 	"CLAUDE.local.md", "AGENTS.md", "GEMINI.md", ".cursorrules", ".envrc",
 	"mise.toml", ".mise.toml",
+	// antic's own project config: a guest sharing its project must not
+	// rewrite how it is run (its network policy, shares or flake) (D22).
+	"antic.toml",
 }
 
 // SessionReq is the JSON header sent at the start of a session connection on

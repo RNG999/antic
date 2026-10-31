@@ -65,15 +65,7 @@ func (a *app) editPkgs(c *cobra.Command, name string, pkgs []string, add bool) e
 			next = slices.DeleteFunc(next, func(s string) bool { return s == p })
 		}
 	}
-	if err := a.cfg.SetPackages(g.Name(), next, a.dirs.Home); err != nil {
-		return err
-	}
-	a.mgr, a.cfg = nil, nil
-	g, err = a.get(c.Context(), name)
-	if err != nil {
-		return err
-	}
-	if err := g.Apply(c.Context()); err != nil {
+	if err := g.SetPackages(c.Context(), next); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "antic: updated packages of %s: %v\n", name, next)

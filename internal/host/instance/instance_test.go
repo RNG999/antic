@@ -158,3 +158,51 @@ func TestLockContextCancel(t *testing.T) {
 		t.Fatalf("unexpected error message: %v", err)
 	}
 }
+
+// TestTrashRestore: trashing and restoring an instance are inverse, and
+// repeating either does nothing (recovery may repeat them).
+func TestTrashRestore(t *testing.T) {
+	d := testDirs(t)
+	inst, err := d.Assign("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(inst.StateDir(), "marker")
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := d.TrashInstance(inst); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, ok, _ := d.Lookup("dev"); ok {
+		t.Fatal("a trashed instance is still named")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("a trashed instance's state is still in place")
+	}
+	for range 2 {
+		if err := d.RestoreInstance(inst); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, ok, _ := d.Lookup("dev"); !ok || got.ID != inst.ID {
+		t.Fatal("a restored instance is not named")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("a restored instance lost its state: %v", err)
+	}
+	if err := d.TrashInstance(inst); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.EmptyTrash("dev"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RestoreInstance(inst); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := d.Lookup("dev"); ok {
+		t.Fatal("an emptied trash was restored")
+	}
+}

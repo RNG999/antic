@@ -175,11 +175,18 @@ func runCmd(r io.Reader, fw *frameWriter, req proto.SessionReq) error {
 		}
 	}()
 
-	err := cmd.Wait()
-	if master != nil {
+	// Without a PTY, the pipes must be read to the end before Wait, which
+	// closes them: waiting first loses output the command wrote just before
+	// it exited (D18). A PTY's master is read until it is closed after Wait.
+	var err error
+	if master == nil {
+		outWG.Wait()
+		err = cmd.Wait()
+	} else {
+		err = cmd.Wait()
 		_ = master.Close()
+		outWG.Wait()
 	}
-	outWG.Wait()
 
 	var code [4]byte
 	binary.BigEndian.PutUint32(code[:], uint32(exitStatus(err)))

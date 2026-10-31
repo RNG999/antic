@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/RNG999/antic/internal/domain"
 	"github.com/RNG999/antic/internal/host/config"
 	"github.com/RNG999/antic/internal/host/guest"
 )
@@ -68,7 +70,7 @@ func (a *app) guestPs() *cobra.Command {
 			return a.out(ss, func(w io.Writer) {
 				fmt.Fprintln(w, "SESSION\tSTARTED\tCOMMAND")
 				for _, s := range ss {
-					fmt.Fprintf(w, "%s\t%s ago\t%s\n", s.Unit, age(time.Since(time.Unix(s.Started, 0))), s.Command)
+					fmt.Fprintf(w, "%s\t%s ago\t%s\n", domain.Printable(s.Unit), age(time.Since(time.Unix(s.Started, 0))), domain.Printable(s.Command))
 				}
 			})
 		},
@@ -201,7 +203,8 @@ func (a *app) guestCreate() *cobra.Command {
 				Network:  config.NetworkConfig{Mode: network},
 				Ports:    ports,
 			}
-			_, err := a.mgr.Create(c.Context(), name, spec)
+			flags := slices.ContainsFunc([]string{"pkg", "cpus", "memory", "network", "port"}, c.Flags().Changed)
+			_, err := a.mgr.Create(c.Context(), name, spec, flags)
 			return err
 		},
 	}
@@ -251,23 +254,11 @@ func (a *app) guestSet() *cobra.Command {
 			if !changed {
 				return errors.New("specify at least one of --cpus, --memory, or --network")
 			}
-			name = g.Name()
-			if err := a.cfg.SetResources(name, u, a.dirs.Home); err != nil {
-				return err
+			changed, err = g.Reconfigure(c.Context(), func(d config.Draft) (config.Draft, error) { return d.SetResources(u) })
+			if err == nil && !changed {
+				fmt.Fprintf(os.Stderr, "antic: %s already has these settings\n", g.Name())
 			}
-			a.mgr, a.cfg = nil, nil
-			g, err = a.get(c.Context(), name)
-			if err != nil {
-				return err
-			}
-			if up, err := g.Running(c.Context()); err == nil && up {
-				fmt.Fprintf(os.Stderr, "antic: restarting %s to apply updated settings...\n", name)
-				if err := g.Stop(c.Context()); err != nil {
-					return err
-				}
-				return g.Start(c.Context())
-			}
-			return nil
+			return err
 		},
 	}
 	c.Flags().IntVar(&cpus, "cpus", 0, "number of vCPUs")
@@ -295,7 +286,13 @@ func (a *app) guestRm() *cobra.Command {
 				return err
 			}
 			for _, n := range args {
+				if err := a.mgr.RecoverOrphan(c.Context(), n); err != nil {
+					return err
+				}
 				g, err := a.mgr.Get(n)
+				if err != nil && a.cfg.Errors[n] != nil {
+					g, err = a.mgr.GetUnloadable(n)
+				}
 				if err != nil {
 					return err
 				}
@@ -346,13 +343,13 @@ func (a *app) eachGuest(c *cobra.Command, args []string, all bool, fn func(*gues
 			gs = append(gs, g)
 		}
 	}
-	var errs []error
+	// P2: stop at the first guest that fails; the ones before it stay done.
 	for _, g := range gs {
 		if err := fn(g); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", g.Name(), err))
+			return fmt.Errorf("%s: %w", g.Name(), err)
 		}
 	}
-	return errors.Join(errs...)
+	return nil
 }
 
 func (a *app) guestStart() *cobra.Command {
@@ -402,10 +399,7 @@ func (a *app) guestRestart() *cobra.Command {
 		ValidArgsFunction: a.guestsArgs,
 		RunE: func(c *cobra.Command, args []string) error {
 			return a.eachGuest(c, args, false, func(g *guest.Guest) error {
-				if err := g.Stop(c.Context()); err != nil {
-					return err
-				}
-				if err := g.Start(c.Context()); err != nil {
+				if err := g.Restart(c.Context()); err != nil {
 					return err
 				}
 				fmt.Fprintf(os.Stderr, "antic: restarted guest %s\n", g.Name())

@@ -2,7 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"debug/elf"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -103,4 +105,41 @@ func TestSkillFilesMatch(t *testing.T) {
 	if !bytes.Equal(repoSkill, skillMarkdown) {
 		t.Error("skills/antic/SKILL.md differs from internal/host/cli/skill/SKILL.md; keep them synchronized")
 	}
+}
+
+// TestRunsHere: a static helper runs anywhere; one whose program
+// interpreter this host lacks (linked against a Nix store that is not at
+// /nix) is refused.
+func TestRunsHere(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runsHere(self); err != nil {
+		t.Fatalf("the test binary itself: %v", err)
+	}
+	b, err := os.ReadFile(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := elf.NewFile(bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range f.Progs {
+		if p.Type == elf.PT_INTERP {
+			// Point the interpreter somewhere that does not exist.
+			missing := []byte("/nonexistent/ld-linux-x86-64.so.2")
+			copy(b[p.Off:p.Off+p.Filesz], append(missing, make([]byte, int(p.Filesz)-len(missing))...))
+			path := filepath.Join(t.TempDir(), "helper")
+			if err := os.WriteFile(path, b, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := runsHere(path); err == nil {
+				t.Fatal("a helper whose interpreter is missing was accepted")
+			}
+			return
+		}
+	}
+	t.Skip("the test binary is static; nothing to rewrite")
 }

@@ -11,11 +11,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/RNG999/antic/internal/domain"
 	"github.com/RNG999/antic/internal/host/chv"
 	"github.com/RNG999/antic/internal/host/config"
 	"github.com/RNG999/antic/internal/host/share"
 	"github.com/RNG999/antic/internal/host/systemd"
 	"github.com/RNG999/antic/internal/proto"
+	"github.com/RNG999/antic/internal/tea/operation"
 )
 
 // Start boots the guest unless it is running, and waits until it is ready.
@@ -23,12 +25,34 @@ func (g *Guest) Start(ctx context.Context) error {
 	if err := g.requireCreated(); err != nil {
 		return err
 	}
-	unlock, err := g.lock()
+	return g.power(ctx, operation.OpStart)
+}
+
+// Restart reboots the guest with its current config (or boots it).
+func (g *Guest) Restart(ctx context.Context) error {
+	if err := g.requireCreated(); err != nil {
+		return err
+	}
+	return g.power(ctx, operation.OpRestart)
+}
+
+// power runs a start, stop or restart saga under the guest's lock.
+func (g *Guest) power(ctx context.Context, kind operation.OpKind) error {
+	unlock, err := g.lockAndRecover(ctx)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	return g.startLocked(ctx)
+	draft, err := config.ReadDraft(g.Cfg, g.m.Dirs.Home)
+	if err != nil {
+		return err
+	}
+	tx, _ := g.planChange(ctx, draft)
+	if tx.op.Phase == operation.GuestOff && tx.oldProfile == "" {
+		tx.op.Phase = operation.GuestUncreated
+	}
+	tx.op.Kind, tx.op.Change = kind, operation.Change{}
+	return g.runSaga(ctx, tx, operation.MsgCommand{Op: tx.op})
 }
 
 // EnsureRunning starts the guest if needed (for "run" and "shell").
@@ -40,17 +64,15 @@ func (g *Guest) EnsureRunning(ctx context.Context) error {
 	return g.Start(ctx)
 }
 
-func (g *Guest) startLocked(ctx context.Context) error {
+// startSystem boots system with g.Cfg unless the guest is running, and
+// waits until it is ready; it stops everything it started on failure.
+func (g *Guest) startSystem(ctx context.Context, system string) error {
 	st, err := g.m.Units.State(ctx, g.vmUnit())
 	if err != nil {
 		return err
 	}
 	if st.Running() {
 		return g.waitReady(ctx)
-	}
-	system, err := g.store().Current()
-	if err != nil {
-		return err
 	}
 	if system == "" {
 		return fmt.Errorf("guest %s has no system yet; run \"antic guest apply %s\"", g.Name(), g.Name())
@@ -103,7 +125,7 @@ func (g *Guest) showAgentLog(ctx context.Context) {
 		Units: []string{"antic-agent.service", "antic-ready.target"}},
 		func(r proto.Response) {
 			if r.Line != "" {
-				fmt.Fprintln(g.m.Log, "  "+r.Line)
+				fmt.Fprintln(g.m.Log, "  "+domain.Printable(r.Line))
 			}
 		})
 }
@@ -357,11 +379,11 @@ func (g *Guest) Stop(ctx context.Context) error {
 	if !g.Created {
 		return nil
 	}
-	unlock, err := g.lock()
-	if err != nil {
-		return err
-	}
-	defer unlock()
+	return g.power(ctx, operation.OpStop)
+}
+
+// stopLocked shuts the guest down, if it runs, and stops its units.
+func (g *Guest) stopLocked(ctx context.Context) error {
 	up, err := g.Running(ctx)
 	if err != nil {
 		return err

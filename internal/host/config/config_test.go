@@ -86,29 +86,29 @@ func TestLoadDefaults(t *testing.T) {
 
 func TestLoadRejects(t *testing.T) {
 	for name, tc := range map[string]struct{ content, want string }{
-		"unknown key":             {validDev + "\nunknown_field = true\n", "unknown key"},
-		"bad memory":              {strings.Replace(validDev, `"8G"`, `"8GiB"`, 1), "memory"},
-		"bad port":                {strings.Replace(validDev, `host = 3000`, `host = 70000`, 1), "network.ports"},
-		"dup port":                {strings.Replace(validDev, `host = 3000`, `host = 8080`, 1), "duplicate host port"},
-		"relative":                {strings.Replace(validLab, `"/srv/guest#lab"`, `"guest#lab"`, 1), "must be absolute"},
-		"network":                 {strings.Replace(validLab, `"none"`, `"off"`, 1), "network.mode must be"},
-		"overlap":                 {validDev + "\n[[shares]]\nsource = \"~/Work/sub\"\nmode = \"rw\"\n", "overlap"},
-		"reject top-level cpus":   {validDev + "\ncpus = 2\n", "unknown key"},
-		"reject top-level memory": {validDev + "\nmemory = \"4G\"\n", "unknown key"},
-		"reject top-level ports":  {validDev + "\n[[ports]]\nhost = 8080\n", "unknown key"},
+		"unknown key":                  {validDev + "\nunknown_field = true\n", "unknown key"},
+		"bad memory":                   {strings.Replace(validDev, `"8G"`, `"8GiB"`, 1), "memory"},
+		"bad port":                     {strings.Replace(validDev, `host = 3000`, `host = 70000`, 1), "network.ports"},
+		"dup port":                     {strings.Replace(validDev, `host = 3000`, `host = 8080`, 1), "duplicate host port"},
+		"relative":                     {strings.Replace(validLab, `"/srv/guest#lab"`, `"guest#lab"`, 1), "must be absolute"},
+		"network":                      {strings.Replace(validLab, `"none"`, `"off"`, 1), "network.mode must be"},
+		"overlap":                      {validDev + "\n[[shares]]\nsource = \"~/Work/sub\"\nmode = \"rw\"\n", "overlap"},
+		"reject top-level cpus":        {validDev + "\ncpus = 2\n", "unknown key"},
+		"reject top-level memory":      {validDev + "\nmemory = \"4G\"\n", "unknown key"},
+		"reject top-level ports":       {validDev + "\n[[ports]]\nhost = 8080\n", "unknown key"},
 		"reject legacy share path":     {validDev + "\n[[shares]]\npath = \"~/tmp\"\n", "unknown key"},
 		"reject legacy share readonly": {validDev + "\n[[shares]]\nsource = \"~/tmp\"\nreadonly = true\n", "unknown key"},
 		"reject scalar network":        {"description = \"test\"\nnetwork = \"internet\"\n[spec]\ncpus = 4\nmemory = \"8G\"\n", "type mismatch"},
-		"allow none":              {validLab + "allow = [\"github.com\"]\n", "network.allow cannot be used"},
-		"allow bare ip":           {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"1.1.1.1\"]\n", "IP addresses must use CIDR notation"},
-		"allow lo":                {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"127.0.0.1/32\"]\n", "never reach"},
-		"allow all":               {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"0.0.0.0/0\"]\n", "never reach"},
-		"allow all6":              {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"::/0\"]\n", "never reach"},
-		"allow meta":              {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"169.254.169.254/32\"]\n", "never reach"},
-		"allow tld":               {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"com\"]\n", "at least two labels"},
-		"allow bad":               {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"git hub.com\"]\n", "invalid domain"},
-		"allow cidr":              {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"10.0.0.0/33\"]\n", "invalid CIDR"},
-		"allow empty":             {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"\"]\n", "empty"},
+		"allow none":                   {validLab + "allow = [\"github.com\"]\n", "network.allow cannot be used"},
+		"allow bare ip":                {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"1.1.1.1\"]\n", "IP addresses must use CIDR notation"},
+		"allow lo":                     {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"127.0.0.1/32\"]\n", "never reach"},
+		"allow all":                    {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"0.0.0.0/0\"]\n", "never reach"},
+		"allow all6":                   {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"::/0\"]\n", "never reach"},
+		"allow meta":                   {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"169.254.169.254/32\"]\n", "never reach"},
+		"allow tld":                    {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"com\"]\n", "at least two labels"},
+		"allow bad":                    {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"git hub.com\"]\n", "invalid domain"},
+		"allow cidr":                   {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"10.0.0.0/33\"]\n", "invalid CIDR"},
+		"allow empty":                  {"[spec]\ncpus = 2\nmemory = \"2G\"\n\n[network]\nmode = \"internet\"\nallow = [\"\"]\n", "empty"},
 	} {
 		dir := t.TempDir()
 		writeGuest(t, dir, "dev", tc.content)
@@ -138,14 +138,26 @@ func TestEdits(t *testing.T) {
 		func(c *Config) error {
 			return c.CreateGuest("new", Guest{Packages: []string{"git"}}, home)
 		},
-		func(c *Config) error { return c.AddShare("new", Share{Source: "/home/alice/a b", Mode: "ro"}, home) },
-		func(c *Config) error { return c.SetPackages("dev", []string{"git", "jq"}, home) },
-		func(c *Config) error { return c.AddPort("new", Port{Host: 5173, Guest: 5173}, home) },
-		func(c *Config) error { return c.RemovePort("dev", 3000, home) },
 		func(c *Config) error {
-			return c.SetResources("new", ResourceUpdates{CPUs: &cpus, Memory: &mem, Network: &net}, home)
+			return draftEdit(c, "new", func(d Draft) (Draft, error) { return d.AddShare("/home/alice/a b", true) })
 		},
-		func(c *Config) error { return c.RemoveShare("dev", "/home/alice/Work", home) },
+		func(c *Config) error {
+			return draftEdit(c, "dev", func(d Draft) (Draft, error) { return d.SetPackages([]string{"git", "jq"}) })
+		},
+		func(c *Config) error {
+			return draftEdit(c, "new", func(d Draft) (Draft, error) { return d.AddPorts([]Port{{Host: 5173, Guest: 5173}}, nil) })
+		},
+		func(c *Config) error {
+			return draftEdit(c, "dev", func(d Draft) (Draft, error) { return d.RemovePorts([]int{3000}) })
+		},
+		func(c *Config) error {
+			return draftEdit(c, "new", func(d Draft) (Draft, error) {
+				return d.SetResources(ResourceUpdates{CPUs: &cpus, Memory: &mem, Network: &net})
+			})
+		},
+		func(c *Config) error {
+			return draftEdit(c, "dev", func(d Draft) (Draft, error) { return d.RemoveShare("/home/alice/Work") })
+		},
 		func(c *Config) error { return c.RemoveGuest("lab") },
 	}
 	for i, step := range steps {
@@ -166,6 +178,88 @@ func TestEdits(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(devPath); !strings.Contains(string(b), "# the dev guest") {
 		t.Fatalf("comment lost:\n%s", b)
+	}
+}
+
+func draftEdit(c *Config, name string, edit func(Draft) (Draft, error)) error {
+	d, err := ReadDraft(c.Guests[name], home)
+	if err != nil {
+		return err
+	}
+	if d, err = edit(d); err != nil {
+		return err
+	}
+	return d.Write(false)
+}
+
+// TestDraftShares: a share is found by its resolved path however the file
+// spells it (D16), sharing again with the same mode changes nothing, and
+// with another mode is an error (D2).
+func TestDraftShares(t *testing.T) {
+	dir := t.TempDir()
+	writeGuest(t, dir, "dev", validDev)
+	c, err := Load(dir, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := ReadDraft(c.Guests["dev"], home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	have, ok := d.Before.ShareAt("/home/alice/Work")
+	if !ok {
+		t.Fatalf("~/Work is not found by its full path: %+v", d.Before.Shares)
+	}
+	same, err := d.AddShare("/home/alice/Work", have.ReadOnly)
+	if err != nil || same.Changed() {
+		t.Fatalf("sharing again with the same mode: changed=%v, %v", same.Changed(), err)
+	}
+	if _, err := d.AddShare("/home/alice/Work", !have.ReadOnly); err == nil || !strings.Contains(err.Error(), "already shared") {
+		t.Fatalf("sharing again with another mode: %v", err)
+	}
+	if _, err := d.AddShare("/home/alice/Work/sub", false); err == nil || !strings.Contains(err.Error(), "overlaps") {
+		t.Fatalf("sharing a subdirectory: %v", err)
+	}
+	if _, err := d.RemoveShare("/home/alice/elsewhere"); err == nil {
+		t.Fatal("removing a share that is not configured succeeded")
+	}
+	added, err := d.AddShare("/home/alice/new", true)
+	if err != nil || !added.Changed() || len(added.After.Shares) != len(d.Before.Shares)+1 {
+		t.Fatalf("adding a share: %v", err)
+	}
+	if b, _ := os.ReadFile(c.Guests["dev"].Path); string(b) != string(d.Old) {
+		t.Fatal("a draft wrote the file before Write")
+	}
+}
+
+// TestDraftPorts: an identical forward changes nothing, and a host port
+// forwarded by this or another guest is rejected (D7).
+func TestDraftPorts(t *testing.T) {
+	dir := t.TempDir()
+	writeGuest(t, dir, "dev", validDev)
+	c, err := Load(dir, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := ReadDraft(c.Guests["dev"], home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	have := d.Before.Ports[0]
+	if same, err := d.AddPorts([]Port{{Host: have.Host, Guest: have.Guest, Proto: have.Proto}}, nil); err != nil || same.Changed() {
+		t.Fatalf("an identical forward: changed=%v, %v", same.Changed(), err)
+	}
+	if _, err := d.AddPorts([]Port{{Host: have.Host, Guest: have.Guest + 1}}, nil); err == nil {
+		t.Fatal("forwarding the same host port to another guest port succeeded")
+	}
+	if _, err := d.AddPorts([]Port{{Host: 4000, Guest: 4000}}, []Port{{Host: 4000, Guest: 80}}); err == nil {
+		t.Fatal("forwarding a host port another guest forwards succeeded (D7)")
+	}
+	if _, err := d.AddPorts([]Port{{Host: 4000, Guest: 4000, Proto: "udp"}}, []Port{{Host: 4000, Guest: 80}}); err != nil {
+		t.Fatalf("udp next to another guest's tcp: %v", err)
+	}
+	if _, err := d.RemovePorts([]int{4999}); err == nil {
+		t.Fatal("removing a port that is not configured succeeded")
 	}
 }
 
@@ -341,5 +435,32 @@ func TestParsePort(t *testing.T) {
 		if p.Host != tc.wantHost || p.Guest != tc.wantGuest || p.Proto != tc.wantProto {
 			t.Errorf("ParsePort(%q) = %+v, want Host=%d, Guest=%d, Proto=%q", tc.raw, p, tc.wantHost, tc.wantGuest, tc.wantProto)
 		}
+	}
+}
+
+// TestProjectConfigCannotRedefineAGuest: a project antic.toml, which a guest
+// sharing the project may have written, cannot take over a guest defined
+// elsewhere: both definitions are refused. A new name loads.
+func TestProjectConfigCannotRedefineAGuest(t *testing.T) {
+	dir := t.TempDir()
+	writeGuest(t, dir, "dev", validDev)
+	proj := t.TempDir()
+	write := func(name string) {
+		content := "name = \"" + name + "\"\npackages = [\"git\"]\n\n[spec]\nmemory = \"1G\"\n"
+		if err := os.WriteFile(filepath.Join(proj, "antic.toml"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("dev")
+	c, err := LoadWithProject(dir, home, proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Guests["dev"] != nil || c.Errors["dev"] == nil || !strings.Contains(c.Errors["dev"].Error(), "defined twice") {
+		t.Fatalf("a project file redefining dev: guest %v, error %v", c.Guests["dev"], c.Errors["dev"])
+	}
+	write("proj")
+	if c, err = LoadWithProject(dir, home, proj); err != nil || c.Guests["proj"] == nil || c.Guests["dev"] == nil {
+		t.Fatalf("a project file with a new name: %v, %v", c.Guests, err)
 	}
 }

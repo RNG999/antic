@@ -42,17 +42,20 @@ type SpecConfig struct {
 
 // NetworkConfig holds network settings in [network].
 type NetworkConfig struct {
-	Mode  string   `toml:"mode" json:"mode"`
-	Allow []string `toml:"allow" json:"allow,omitempty"`
-	Deny  []string `toml:"deny" json:"deny,omitempty"`
-	Ports []Port   `toml:"ports" json:"ports,omitempty"`
+	Mode string `toml:"mode" json:"mode"`
+	// Default is "allow" (the mode's base set, plus allow exceptions) or
+	// "deny" (only allow entries and what allowed domains resolve to).
+	Default string   `toml:"default" json:"default,omitempty"`
+	Allow   []string `toml:"allow" json:"allow,omitempty"`
+	Deny    []string `toml:"deny" json:"deny,omitempty"`
+	Ports   []Port   `toml:"ports" json:"ports,omitempty"`
 }
 
 // Port is one host-to-guest port mapping (127.0.0.1:Host -> Guest).
 type Port struct {
-	Host        int    `toml:"host" json:"host"`                                     // 1..65535
-	Guest       int    `toml:"guest" json:"guest"`                                   // 1..65535 (defaults to Host if omitted)
-	Proto       string `toml:"proto,omitempty" json:"proto,omitempty"`               // "tcp", "udp", or "tcp,udp" (defaults to "tcp")
+	Host        int    `toml:"host" json:"host"`                                   // 1..65535
+	Guest       int    `toml:"guest" json:"guest"`                                 // 1..65535 (defaults to Host if omitted)
+	Proto       string `toml:"proto,omitempty" json:"proto,omitempty"`             // "tcp", "udp", or "tcp,udp" (defaults to "tcp")
 	Description string `toml:"description,omitempty" json:"description,omitempty"` // optional explanation
 }
 
@@ -189,16 +192,17 @@ func parseEntry(raw string) (netip.Prefix, string, error) {
 	return netip.Prefix{}, d, nil
 }
 
-var pkgRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.+-]*$`)
-
 // ValidName reports whether s can name a guest (delegates to SSOT domain.ParseGuestName).
 func ValidName(s string) bool {
 	_, err := domain.ParseGuestName(s)
 	return err == nil
 }
 
-// ValidPackage reports whether s is a valid nixpkgs attribute name.
-func ValidPackage(s string) bool { return pkgRE.MatchString(s) }
+// ValidPackage reports whether s is a valid nixpkgs attribute name (delegates to SSOT domain.ParsePackageName).
+func ValidPackage(s string) bool {
+	_, err := domain.ParsePackageName(s)
+	return err == nil
+}
 
 // Load reads and validates all *.toml guest files in dir. If dir does not
 // exist yet, an empty Config is returned without error.
@@ -242,10 +246,15 @@ func LoadWithProject(dir, home, startDir string) (*Config, error) {
 				c.Errors[filepath.Base(ppath)] = err
 			} else {
 				if existing, ok := c.Guests[g.Name]; ok && existing.Path != g.Path {
-					fmt.Fprintf(os.Stderr, "antic: warning: guest %q in %s shadows %s\n", g.Name, g.Path, existing.Path)
+					// A project file inside a directory a guest shares may
+					// have been written by that guest: it must not take over
+					// a guest defined elsewhere (its shares, network and
+					// flake). Two definitions are an error, not a choice.
+					delete(c.Guests, g.Name)
+					c.Errors[g.Name] = fmt.Errorf("guest %q is defined twice, in %s and in %s; remove one", g.Name, existing.Path, g.Path)
+				} else {
+					c.Guests[g.Name] = g
 				}
-				// Project guest takes precedence or adds to guests
-				c.Guests[g.Name] = g
 			}
 		}
 	}
@@ -356,17 +365,14 @@ func (g *Guest) normalize(home string, baseDir ...string) []error {
 		}
 		var p string
 		p, errs = resolvePath(rawPath, home, dir, "flake", errs)
-		if real, err := filepath.EvalSymlinks(p); err == nil {
-			p = real
-		}
-		g.FlakePath = p
+		g.FlakePath = RealPath(p)
 		g.FlakeAttr = attr
 		if len(g.Packages) > 0 {
 			errs = append(errs, errors.New("cannot set both packages and flake"))
 		}
 	}
 	for _, p := range g.Packages {
-		if !pkgRE.MatchString(p) {
+		if !ValidPackage(p) {
 			errs = append(errs, fmt.Errorf("packages: invalid package attribute %q", p))
 		}
 	}
@@ -407,6 +413,20 @@ func (g *Guest) normalize(home string, baseDir ...string) []error {
 		if len(g.Network.Deny) > 0 {
 			errs = append(errs, errors.New("network.deny cannot be used when network.mode is \"none\""))
 		}
+		if g.Network.Default != "" {
+			errs = append(errs, errors.New("network.default cannot be used when network.mode is \"none\""))
+		}
+	}
+	switch g.Network.Default {
+	case "", "allow", "deny":
+	default:
+		errs = append(errs, fmt.Errorf("network.default must be \"allow\" or \"deny\", not %q", g.Network.Default))
+	}
+	if g.Network.Default == "" && len(g.Network.Allow) > 0 {
+		// Before network.default existed, any allow entry meant "deny
+		// everything else"; reading such a file as "allow" would silently
+		// widen what the guest can reach.
+		errs = append(errs, errors.New("network.allow requires network.default: set it to \"deny\" to keep allowing only the allow list, or \"allow\" to add exceptions to the mode"))
 	}
 	g.AllowDomains, g.AllowNets = nil, nil
 	for i, raw := range g.Network.Allow {
@@ -423,6 +443,10 @@ func (g *Guest) normalize(home string, baseDir ...string) []error {
 				g.AllowNets = append(g.AllowNets, p)
 			}
 		}
+	}
+	if !g.Network.DefaultDeny() && len(g.AllowDomains) > 0 {
+		// Public names are reachable anyway, and DNS answers never open the LAN.
+		errs = append(errs, fmt.Errorf("network.allow: domain %q has no effect unless network.default is \"deny\"", g.AllowDomains[0]))
 	}
 	g.DenyDomains, g.DenyNets = nil, nil
 	for i, raw := range g.Network.Deny {
@@ -587,12 +611,6 @@ func resolvePath(p, home, baseDir, where string, errs []error) (string, []error)
 	return filepath.Clean(p), errs
 }
 
-// absPath expands "~" and requires an absolute path without control
-// characters.
-func absPath(p, home, where string, errs []error) (string, []error) {
-	return resolvePath(p, home, "", where, errs)
-}
-
 func within(path, dir string) bool { return path == dir || strings.HasPrefix(path, dir+"/") }
 
 // Names returns the guest names (both valid and erroneous), sorted.
@@ -661,10 +679,13 @@ func parseSize(s string) (int64, error) {
 var knownKeys = []string{
 	"description", "packages", "flake",
 	"spec", "cpus", "memory",
-	"network", "mode", "allow", "deny", "ports",
+	"network", "mode", "default", "allow", "deny", "ports",
 	"shares", "source", "target", "mode", "credentials",
 	"host", "guest", "env",
 }
+
+// DefaultDeny reports whether network.default is "deny".
+func (n NetworkConfig) DefaultDeny() bool { return n.Default == "deny" }
 
 // suggest proposes the closest known key for a misspelled one.
 func suggest(k toml.Key) string {
