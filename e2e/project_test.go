@@ -23,9 +23,6 @@ func TestE2EProjectGuest(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(proj, "data"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(proj, "more"), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	file := filepath.Join(proj, "antic.toml")
 	const content = `# the project's guest
 name = "` + name + `"
@@ -35,7 +32,7 @@ packages = ["git"]
 memory = "1G"
 
 [[shares]]
-source = "./data"
+source = "."
 mode = "rw"
 `
 	if err := os.WriteFile(file, []byte(content), 0o644); err != nil {
@@ -76,20 +73,33 @@ mode = "rw"
 	if _, code, stderr := run("guest", "create", name); code != 0 {
 		t.Fatalf("create: exit %d: %s", code, stderr)
 	}
-	if i := show(); i.State != "running" || !mounted(i, filepath.Join(proj, "data")) {
+	if i := show(); i.State != "running" || !mounted(i, proj) {
 		t.Fatalf("after create: %+v (the relative share must resolve against antic.toml)", i)
 	}
-	if _, code, stderr := run("guest", "mount", name, filepath.Join(proj, "more")); code != 0 {
+	// The guest shares its project read-write but cannot rewrite the
+	// project's antic.toml, which says how the host runs it (D22).
+	if _, code, _ := run("run", name, "-T", "--", "sh", "-c", "echo '[[shares]]' >> "+file); code == 0 {
+		t.Fatal("the guest rewrote its own antic.toml")
+	}
+	if _, code, stderr := run("run", name, "-T", "--", "sh", "-c", "echo ok > "+filepath.Join(proj, "data", "note")); code != 0 {
+		t.Fatalf("the guest cannot write the rest of its project: exit %d: %s", code, stderr)
+	}
+	if b, _ := os.ReadFile(file); string(b) != content {
+		t.Fatalf("antic.toml changed:\n%s", b)
+	}
+	// A directory outside the project (sharing one inside would overlap).
+	other := h.path("A")
+	if _, code, stderr := run("guest", "mount", name, other); code != 0 {
 		t.Fatalf("mount: exit %d: %s", code, stderr)
 	}
 	b, err := os.ReadFile(file)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), "# the project's guest") || !strings.Contains(string(b), "more") {
+	if !strings.Contains(string(b), "# the project's guest") || !strings.Contains(string(b), "e2e-work/A") {
 		t.Fatalf("mount did not edit antic.toml in place:\n%s", b)
 	}
-	if i := show(); !mounted(i, filepath.Join(proj, "more")) {
+	if i := show(); !mounted(i, other) {
 		t.Fatalf("after mount: %+v", i)
 	}
 	for _, c := range [][]string{{"guest", "stop", name}, {"guest", "start", name}} {
@@ -97,7 +107,7 @@ mode = "rw"
 			t.Fatalf("%v: exit %d: %s", c, code, stderr)
 		}
 	}
-	if i := show(); i.State != "running" || !mounted(i, filepath.Join(proj, "more")) {
+	if i := show(); i.State != "running" || !mounted(i, other) {
 		t.Fatalf("after a restart the edited antic.toml must still load and mount both: %+v", i)
 	}
 	if _, code, stderr := run("guest", "rm", name, "-y"); code != 0 {
