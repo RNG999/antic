@@ -630,3 +630,44 @@ cd e2e && ANTIC_E2E_BIN=~/.cache/antic-e2e/bin/antic ~/.cache/antic-e2e/e2e.test
 | Spacer（改訂） | 約 3 秒（以前は約 18 秒） | Saga.tla の改訂に合わせて CHC を書き直した。不変条件の述語をフェーズごとに分けたことで、改訂後 216 秒かかっていたものが約 3 秒になった。ジャーナルなしの場合は unsat になる |
 
 前提：TLA+ モデルは、逆操作（補償・回復）の失敗と、effect の途中でのクラッシュを扱わない。再生側もこの 2 つを生成しない。前者は L1a の故障注入（Broken）で、後者は殻の原子性の要求（§13 段階 3）で別に扱う。
+
+### 段階 5：殻をコアに移す（mutating コマンドは完了）
+
+各コマンドは次の順で動く。
+
+1. ゲストのロックを取る。前のプロセスのジャーナルが残っていれば、それを回復する（`lockAndRecover`）。
+2. ロックの下で設定ファイルを読み、変更案を作る（`config.Draft`）。
+3. 計画を立てる（`planChange`）。旧・新の実体を集めて `txn` にまとめ、`operation.Op` を作る。
+4. コアの effect を 1 つずつ実行する（`runSaga` / `execute`）。
+
+設定ファイルは、検証済みの変更案として保持し、saga の `WriteConfig` ステップでだけ書く。そのため、失敗すれば元の内容に戻る（D5、D10）。
+
+| 手順 | コマンド | 直した差分 | 主な変更 |
+|---|---|---|---|
+| A | mount / unmount | D16、D2 の理由、P2 | `Draft.AddShare` / `RemoveShare`。比較は解決済みの実パスで行う。Running なら Hotplug / Hotunplug を冪等な ensure 形にした |
+| B | install / uninstall / apply | D1（プロファイルの戻し） | `nixbuild` の `Install` を `SetProfile` / `RemoveProfile` / `GCGuest` に分けた。switch は boot 記録の更新まで含めて 1 effect にした |
+| C | set / forward / unforward | D5、D7 | `Draft.SetResources` / `AddPorts`（他のゲストとの衝突を拒否） / `RemovePorts`。再起動が要るかは `config.NeedsRestart` で判定する。`CheckPorts` は、自分が既に転送しているポートを除いて調べる |
+| D | start / stop / restart | D8（P2） | `power` が `OpStart` / `OpStop` / `OpRestart` をコアに渡す。`eachGuest` は最初の失敗で中断する |
+| E | edit | D9、D10、D12 | 一時ファイルの写しを `sh -c '$EDITOR "$@"'` で編集させる（`VISUAL` を優先する）。終了後、ロックの下で元の内容と変わっていないことを確かめてから置き換える。Running なら `liveShares` でホットプラグできるかを判定し、できなければ再起動する |
+| F | create / rm | D3、ゴミ箱 | `DraftCreate`（旧版は「ファイルなし」）。rm は Trash（設定とインスタンス）→ EmptyTrash（finalize）。設定がゴミ箱に入ったまま中断したゲストは、`RecoverOrphan` で戻す |
+
+E2E には故障注入のフックを置いた。`ANTIC_SAGA_CRASH_AFTER=k` を付けると、k 番目の effect を実行した直後に exit 137 で終わる。`TestE2ECrashRecovery` は、実機上でクラッシュ → 回復 → 観測が元の状態と一致することを確かめる。
+
+#### 検証
+
+| 検査 | 結果 |
+|---|---|
+| E2E（手順 A の後、約 7 分） | 16 シナリオ。D16 と、複数ディレクトリの mount が P2 で止まるシナリオを含めて PASS |
+| E2E（手順 B〜E の後、約 8 分） | 18 シナリオ。D5、D7、D8、D9、D10、D12 が既知の差分から外れて PASS。残る既知の差分は D3 だけ |
+| E2E（手順 F の後、約 8 分） | 18 シナリオがすべて PASS（既知の差分 0 件）。`TestE2ECrashRecovery` も PASS：mount のクラッシュ点 3 つと、再起動を伴う set のクラッシュ点 3 つ（設定を書いた後、VM を止めた後、新しい設定で起動した後）。いずれも次のコマンドで回復し、観測がクラッシュ前の状態と一致した |
+| 単体テスト | `TestDraftShares`、`TestDraftPorts`（D2、D7、D16）、`TestJournalRoundTrip`、`TestLiveShares`、`TestTrashRestore` |
+
+注記：B〜E は同じファイル群にまたがって変更したため、E2E は手順ごとではなく、B〜E をまとめて 1 回実行した。
+
+#### 残り
+
+- D1 は、switch の失敗を実機で再現するための故障注入が要る。`ANTIC_SAGA_CRASH_AFTER` と同じ形で effect の失敗を注入するフックを足せば検査できる。
+- 推奨 4（殻のトレースを TLC で照合する）はまだ入れていない。今回は、クラッシュの注入による実機での P1 検査で代えた。
+- `lifecycle` パッケージは、表示用の `Shares` / `Inspect` でしか使わなくなった。D4 はこの表示にしか影響しない。
+- D17（壊れた設定ファイルのゲストを rm / ls できない）は未対応。
+

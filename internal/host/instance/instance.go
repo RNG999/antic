@@ -137,6 +137,62 @@ func (d Dirs) Remove(inst Instance) error {
 	return nil
 }
 
+// InstanceOf returns the instance of name with a known ID (a journal
+// records it while the name link is in the trash).
+func (d Dirs) InstanceOf(name, id string) Instance { return Instance{Name: name, ID: id, d: d} }
+
+// TrashDir holds what "guest rm" moved aside until it succeeds.
+func (d Dirs) TrashDir(name string) string { return filepath.Join(d.StateRoot, "trash", name) }
+
+// TrashInstance moves the instance's state and name link to the trash.
+// Moving an instance that is already there does nothing.
+func (d Dirs) TrashInstance(inst Instance) error {
+	if !idRE.MatchString(inst.ID) {
+		return fmt.Errorf("refusing to move guest state with ID %q", inst.ID)
+	}
+	trash := d.TrashDir(inst.Name)
+	if err := os.MkdirAll(trash, 0o700); err != nil {
+		return err
+	}
+	if err := renameIfExists(inst.StateDir(), filepath.Join(trash, inst.ID)); err != nil {
+		return err
+	}
+	link := filepath.Join(d.namesDir(), inst.Name)
+	if dst, err := os.Readlink(link); err == nil && filepath.Base(dst) == inst.ID {
+		if err := os.Rename(link, filepath.Join(trash, "name")); err != nil {
+			return err
+		}
+	}
+	os.RemoveAll(inst.RunDir())
+	return nil
+}
+
+// RestoreInstance moves a trashed instance back. Restoring an instance
+// that is not in the trash does nothing.
+func (d Dirs) RestoreInstance(inst Instance) error {
+	trash := d.TrashDir(inst.Name)
+	if err := renameIfExists(filepath.Join(trash, inst.ID), inst.StateDir()); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(d.namesDir(), 0o700); err != nil {
+		return err
+	}
+	return renameIfExists(filepath.Join(trash, "name"), filepath.Join(d.namesDir(), inst.Name))
+}
+
+// EmptyTrash deletes what "guest rm" moved aside for name.
+func (d Dirs) EmptyTrash(name string) error { return removeAll(d.TrashDir(name)) }
+
+func renameIfExists(from, to string) error {
+	if _, err := os.Lstat(from); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(to), 0o700); err != nil {
+		return err
+	}
+	return os.Rename(from, to)
+}
+
 // removeAll deletes dir, including the guest store, whose directories Nix
 // makes read-only.
 func removeAll(dir string) error {

@@ -30,9 +30,13 @@ func (a *app) guestMount() *cobra.Command {
 			}
 			for _, d := range dirs {
 				abs, _ := filepath.Abs(d)
-				p, err := g.AddShare(c.Context(), abs, ro)
+				p, changed, err := g.AddShare(c.Context(), abs, ro)
 				if err != nil {
 					return err
+				}
+				if !changed {
+					fmt.Fprintf(os.Stderr, "antic: %s is already shared with %s (%s)\n", p, g.Name(), mode(ro))
+					continue
 				}
 				fmt.Fprintf(os.Stderr, "antic: shared %s with %s (%s)\n", p, g.Name(), mode(ro))
 			}
@@ -66,9 +70,15 @@ func (a *app) guestUnmount() *cobra.Command {
 			}
 			for _, d := range dirs {
 				abs, _ := filepath.Abs(d)
-				if err := g.RemoveShare(c.Context(), abs); err != nil {
+				p, lingers, err := g.RemoveShare(c.Context(), abs)
+				if err != nil {
 					return err
 				}
+				if lingers {
+					fmt.Fprintf(os.Stderr, "antic: stopped sharing %s with %s (it stays mounted until the guest restarts)\n", p, g.Name())
+					continue
+				}
+				fmt.Fprintf(os.Stderr, "antic: stopped sharing %s with %s\n", p, g.Name())
 			}
 			return nil
 		},

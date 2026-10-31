@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -19,13 +17,35 @@ import (
 
 // CreateGuest writes a new ~/.config/antic/guests/<name>.toml file.
 func (c *Config) CreateGuest(name string, g Guest, home string) error {
-	if err := os.MkdirAll(c.dir, 0o755); err != nil {
+	d, err := c.DraftCreate(name, g, home)
+	if err != nil {
 		return err
+	}
+	return d.Write(false)
+}
+
+// DraftCreate drafts a new ~/.config/antic/guests/<name>.toml file (Old is
+// "no file").
+func (c *Config) DraftCreate(name string, g Guest, home string) (Draft, error) {
+	if err := os.MkdirAll(c.dir, 0o755); err != nil {
+		return Draft{}, err
 	}
 	path := c.GuestPath(name)
 	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("guest config %s already exists", path)
+		return Draft{}, fmt.Errorf("guest config %s already exists", path)
 	}
+	d := Draft{Path: path, Name: name, Absent: true, home: home}
+	content := []byte(strings.Join(renderGuest(g, home), "\n") + "\n")
+	after, err := d.parse(content)
+	if err != nil {
+		return Draft{}, err
+	}
+	d.New, d.After = content, after
+	return d, nil
+}
+
+// renderGuest renders the config file of a new guest.
+func renderGuest(g Guest, home string) []string {
 	var lines []string
 	if g.Description != "" {
 		lines = append(lines, "description = "+tomlString(g.Description))
@@ -94,7 +114,7 @@ func (c *Config) CreateGuest(name string, g Guest, home string) error {
 			lines = append(lines, fmt.Sprintf("%s = %s", k, tomlString(g.Env[k])))
 		}
 	}
-	return writeGuestAtomic(path, name, home, lines)
+	return lines
 }
 
 // RemoveGuest deletes ~/.config/antic/guests/<name>.toml.
@@ -107,127 +127,11 @@ func (c *Config) RemoveGuest(name string) error {
 	return nil
 }
 
-// SetPackages updates packages in ~/.config/antic/guests/<name>.toml.
-func (c *Config) SetPackages(guest string, pkgs []string, home string) error {
-	return c.editGuest(guest, home, func(lines []string) ([]string, error) {
-		return setRootKey(lines, "packages", tomlArray(pkgs)), nil
-	})
-}
-
-// AddShare appends a [[shares]] entry unless already configured.
-func (c *Config) AddShare(guest string, s Share, home string) error {
-	sp := s.Source
-	if sp == "" {
-		sp = s.Path
-	}
-	if g := c.Guests[guest]; g != nil {
-		for _, have := range g.Shares {
-			hp := have.Source
-			if hp == "" {
-				hp = have.Path
-			}
-			if hp == sp {
-				return nil
-			}
-		}
-	}
-	return c.editGuest(guest, home, func(lines []string) ([]string, error) {
-		mode := "rw"
-		if s.ReadOnly || s.Mode == "ro" {
-			mode = "ro"
-		}
-		lines = append(lines, "", "[[shares]]",
-			"source = "+tomlString(tildePath(sp, home)),
-			"mode = "+tomlString(mode))
-		return lines, nil
-	})
-}
-
-// RemoveShare removes the [[shares]] entry at path.
-func (c *Config) RemoveShare(guest, path, home string) error {
-	return c.editGuest(guest, home, func(lines []string) ([]string, error) {
-		out, removed := removeBlocks(lines, func(h string) bool {
-			return h == "shares"
-		}, func(body []string) bool {
-			var s Share
-			if _, err := toml.Decode(strings.Join(body, "\n"), &s); err != nil {
-				return false
-			}
-			p, _ := absPath(s.Source, home, "", nil)
-			return p == path
-		})
-		if removed == 0 {
-			return nil, fmt.Errorf("%s is not a configured share of %s", path, guest)
-		}
-		return out, nil
-	})
-}
-
-// AddPort appends a [[network.ports]] entry unless host port is already configured for the same protocol.
-func (c *Config) AddPort(guest string, p Port, home string) error {
-	if g := c.Guests[guest]; g != nil {
-		for _, have := range g.Ports {
-			if have.Host == p.Host {
-				if (p.TCP() && have.TCP()) || (p.UDP() && have.UDP()) {
-					return fmt.Errorf("host port %d is already forwarded on %s", p.Host, guest)
-				}
-			}
-		}
-	}
-	return c.editGuest(guest, home, func(lines []string) ([]string, error) {
-		lines = append(lines, "", "[[network.ports]]",
-			fmt.Sprintf("host = %d", p.Host),
-			fmt.Sprintf("guest = %d", p.Guest))
-		if p.Proto != "" && p.Proto != "tcp" {
-			lines = append(lines, "proto = "+tomlString(p.Proto))
-		}
-		if p.Description != "" {
-			lines = append(lines, "description = "+tomlString(p.Description))
-		}
-		return lines, nil
-	})
-}
-
-// RemovePort removes the [[network.ports]] or [[ports]] entry for hostPort.
-func (c *Config) RemovePort(guest string, hostPort int, home string) error {
-	return c.editGuest(guest, home, func(lines []string) ([]string, error) {
-		out, removed := removeBlocks(lines, func(h string) bool {
-			return h == "ports" || h == "network.ports"
-		}, func(body []string) bool {
-			var p Port
-			if _, err := toml.Decode(strings.Join(body, "\n"), &p); err != nil {
-				return false
-			}
-			return p.Host == hostPort
-		})
-		if removed == 0 {
-			return nil, fmt.Errorf("port %d is not configured on %s", hostPort, guest)
-		}
-		return out, nil
-	})
-}
-
 // ResourceUpdates specifies optional updates to a guest's cpus, memory, and network.
 type ResourceUpdates struct {
 	CPUs    *int
 	Memory  *string
 	Network *string
-}
-
-// SetResources updates cpus, memory, and network for guest.
-func (c *Config) SetResources(guest string, u ResourceUpdates, home string) error {
-	return c.editGuest(guest, home, func(lines []string) ([]string, error) {
-		if u.CPUs != nil {
-			lines = setTableKey(lines, "spec", "cpus", strconv.Itoa(*u.CPUs))
-		}
-		if u.Memory != nil {
-			lines = setTableKey(lines, "spec", "memory", tomlString(*u.Memory))
-		}
-		if u.Network != nil {
-			lines = setTableKey(lines, "network", "mode", tomlString(*u.Network))
-		}
-		return lines, nil
-	})
 }
 
 // setTableKey sets key in [tableName] table. If [tableName] does not exist,
@@ -375,48 +279,6 @@ func bracketDepth(line string) int {
 		}
 	}
 	return depth
-}
-
-func (c *Config) editGuest(guest, home string, change func([]string) ([]string, error)) error {
-	path := c.GuestPath(guest)
-	real, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return err
-	}
-	b, err := os.ReadFile(real)
-	if err != nil {
-		return err
-	}
-	lines, err := change(strings.Split(strings.TrimRight(string(b), "\n"), "\n"))
-	if err != nil {
-		return err
-	}
-	return writeGuestAtomic(real, guest, home, lines)
-}
-
-func writeGuestAtomic(real, name, home string, lines []string) error {
-	out := []byte(strings.Join(lines, "\n") + "\n")
-	tmp, err := os.CreateTemp(filepath.Dir(real), "."+name+".toml.*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(out); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if _, err := loadGuest(tmp.Name(), name, home); err != nil {
-		return fmt.Errorf("refusing to write %s, the result would not load: %w", real, err)
-	}
-	if fi, err := os.Stat(real); err == nil {
-		os.Chmod(tmp.Name(), fi.Mode().Perm())
-	} else {
-		os.Chmod(tmp.Name(), 0o644)
-	}
-	return os.Rename(tmp.Name(), real)
 }
 
 // header returns the table name of a [table] or [[array]] header line.

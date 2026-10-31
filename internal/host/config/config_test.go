@@ -138,14 +138,26 @@ func TestEdits(t *testing.T) {
 		func(c *Config) error {
 			return c.CreateGuest("new", Guest{Packages: []string{"git"}}, home)
 		},
-		func(c *Config) error { return c.AddShare("new", Share{Source: "/home/alice/a b", Mode: "ro"}, home) },
-		func(c *Config) error { return c.SetPackages("dev", []string{"git", "jq"}, home) },
-		func(c *Config) error { return c.AddPort("new", Port{Host: 5173, Guest: 5173}, home) },
-		func(c *Config) error { return c.RemovePort("dev", 3000, home) },
 		func(c *Config) error {
-			return c.SetResources("new", ResourceUpdates{CPUs: &cpus, Memory: &mem, Network: &net}, home)
+			return draftEdit(c, "new", func(d Draft) (Draft, error) { return d.AddShare("/home/alice/a b", true) })
 		},
-		func(c *Config) error { return c.RemoveShare("dev", "/home/alice/Work", home) },
+		func(c *Config) error {
+			return draftEdit(c, "dev", func(d Draft) (Draft, error) { return d.SetPackages([]string{"git", "jq"}) })
+		},
+		func(c *Config) error {
+			return draftEdit(c, "new", func(d Draft) (Draft, error) { return d.AddPorts([]Port{{Host: 5173, Guest: 5173}}, nil) })
+		},
+		func(c *Config) error {
+			return draftEdit(c, "dev", func(d Draft) (Draft, error) { return d.RemovePorts([]int{3000}) })
+		},
+		func(c *Config) error {
+			return draftEdit(c, "new", func(d Draft) (Draft, error) {
+				return d.SetResources(ResourceUpdates{CPUs: &cpus, Memory: &mem, Network: &net})
+			})
+		},
+		func(c *Config) error {
+			return draftEdit(c, "dev", func(d Draft) (Draft, error) { return d.RemoveShare("/home/alice/Work") })
+		},
 		func(c *Config) error { return c.RemoveGuest("lab") },
 	}
 	for i, step := range steps {
@@ -166,6 +178,88 @@ func TestEdits(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(devPath); !strings.Contains(string(b), "# the dev guest") {
 		t.Fatalf("comment lost:\n%s", b)
+	}
+}
+
+func draftEdit(c *Config, name string, edit func(Draft) (Draft, error)) error {
+	d, err := ReadDraft(c.Guests[name], home)
+	if err != nil {
+		return err
+	}
+	if d, err = edit(d); err != nil {
+		return err
+	}
+	return d.Write(false)
+}
+
+// TestDraftShares: a share is found by its resolved path however the file
+// spells it (D16), sharing again with the same mode changes nothing, and
+// with another mode is an error (D2).
+func TestDraftShares(t *testing.T) {
+	dir := t.TempDir()
+	writeGuest(t, dir, "dev", validDev)
+	c, err := Load(dir, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := ReadDraft(c.Guests["dev"], home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	have, ok := d.Before.ShareAt("/home/alice/Work")
+	if !ok {
+		t.Fatalf("~/Work is not found by its full path: %+v", d.Before.Shares)
+	}
+	same, err := d.AddShare("/home/alice/Work", have.ReadOnly)
+	if err != nil || same.Changed() {
+		t.Fatalf("sharing again with the same mode: changed=%v, %v", same.Changed(), err)
+	}
+	if _, err := d.AddShare("/home/alice/Work", !have.ReadOnly); err == nil || !strings.Contains(err.Error(), "already shared") {
+		t.Fatalf("sharing again with another mode: %v", err)
+	}
+	if _, err := d.AddShare("/home/alice/Work/sub", false); err == nil || !strings.Contains(err.Error(), "overlaps") {
+		t.Fatalf("sharing a subdirectory: %v", err)
+	}
+	if _, err := d.RemoveShare("/home/alice/elsewhere"); err == nil {
+		t.Fatal("removing a share that is not configured succeeded")
+	}
+	added, err := d.AddShare("/home/alice/new", true)
+	if err != nil || !added.Changed() || len(added.After.Shares) != len(d.Before.Shares)+1 {
+		t.Fatalf("adding a share: %v", err)
+	}
+	if b, _ := os.ReadFile(c.Guests["dev"].Path); string(b) != string(d.Old) {
+		t.Fatal("a draft wrote the file before Write")
+	}
+}
+
+// TestDraftPorts: an identical forward changes nothing, and a host port
+// forwarded by this or another guest is rejected (D7).
+func TestDraftPorts(t *testing.T) {
+	dir := t.TempDir()
+	writeGuest(t, dir, "dev", validDev)
+	c, err := Load(dir, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := ReadDraft(c.Guests["dev"], home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	have := d.Before.Ports[0]
+	if same, err := d.AddPorts([]Port{{Host: have.Host, Guest: have.Guest, Proto: have.Proto}}, nil); err != nil || same.Changed() {
+		t.Fatalf("an identical forward: changed=%v, %v", same.Changed(), err)
+	}
+	if _, err := d.AddPorts([]Port{{Host: have.Host, Guest: have.Guest + 1}}, nil); err == nil {
+		t.Fatal("forwarding the same host port to another guest port succeeded")
+	}
+	if _, err := d.AddPorts([]Port{{Host: 4000, Guest: 4000}}, []Port{{Host: 4000, Guest: 80}}); err == nil {
+		t.Fatal("forwarding a host port another guest forwards succeeded (D7)")
+	}
+	if _, err := d.AddPorts([]Port{{Host: 4000, Guest: 4000, Proto: "udp"}}, []Port{{Host: 4000, Guest: 80}}); err != nil {
+		t.Fatalf("udp next to another guest's tcp: %v", err)
+	}
+	if _, err := d.RemovePorts([]int{4999}); err == nil {
+		t.Fatal("removing a port that is not configured succeeded")
 	}
 }
 

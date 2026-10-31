@@ -134,8 +134,7 @@ func scenarios() []scenario {
 			},
 		},
 		{
-			name:  "D16 mount the same directory again",
-			known: "D16",
+			name: "D16 mount the same directory again",
 			cmds: func(h *harness) []spec.Cmd {
 				return []spec.Cmd{
 					create(a),
@@ -145,8 +144,18 @@ func scenarios() []scenario {
 			},
 		},
 		{
-			name:  "D3 create flags on an existing config",
-			known: "D3",
+			name: "mount several directories stops at the first failure",
+			cmds: func(h *harness) []spec.Cmd {
+				return []spec.Cmd{
+					create(a),
+					spec.CmdMount{Target: a, Dirs: []string{h.path("A"), h.path("missing"), h.path("B")}},
+					spec.CmdUnmount{Target: a, Dirs: []string{h.path("A"), h.path("B")}},
+					spec.CmdMount{Target: a, Dirs: []string{h.path("A")}, ReadOnly: true},
+				}
+			},
+		},
+		{
+			name: "D3 create flags on an existing config",
 			setup: func(h *harness) { h.fixtureConfig(b, spec.RawConfig{Packages: []string{"git"}, Memory: "1G"}) },
 			cmds: func(*harness) []spec.Cmd {
 				return []spec.Cmd{spec.CmdCreate{Name: b, Packages: []string{"jq"}}}
@@ -166,8 +175,7 @@ func scenarios() []scenario {
 			},
 		},
 		{
-			name:  "D5 unbuildable package",
-			known: "D5",
+			name: "D5 unbuildable package",
 			cmds: func(*harness) []spec.Cmd {
 				return []spec.Cmd{
 					create(a),
@@ -176,8 +184,7 @@ func scenarios() []scenario {
 			},
 		},
 		{
-			name:  "D7 host port used by another guest",
-			known: "D7",
+			name: "D7 host port used by another guest",
 			cmds: func(*harness) []spec.Cmd {
 				return []spec.Cmd{
 					create(a, "8001"),
@@ -187,8 +194,20 @@ func scenarios() []scenario {
 			},
 		},
 		{
+			name: "reconfigure a running guest atomically",
+			cmds: func(*harness) []spec.Cmd {
+				return []spec.Cmd{
+					create(a, "8001"),
+					spec.CmdForward{Target: a, Ports: []string{fmt.Sprint(busyPort)}},
+					spec.CmdForward{Target: a, Ports: []string{"8001"}},
+					spec.CmdSet{Target: a, CPUs: types.Some(2)},
+					spec.CmdUnforward{Target: a, Ports: []string{"8001"}},
+					spec.CmdRun{Target: a, Code: 0},
+				}
+			},
+		},
+		{
 			name:  "D8 multi-guest start stops at the first failure",
-			known: "D8",
 			cmds: func(*harness) []spec.Cmd {
 				return []spec.Cmd{
 					create(a),
@@ -201,7 +220,6 @@ func scenarios() []scenario {
 		},
 		{
 			name:  "D9 edit of a running guest",
-			known: "D9",
 			cmds: func(*harness) []spec.Cmd {
 				return []spec.Cmd{
 					create(a),
@@ -211,7 +229,6 @@ func scenarios() []scenario {
 		},
 		{
 			name:  "D10 invalid edit",
-			known: "D10",
 			cmds: func(*harness) []spec.Cmd {
 				return []spec.Cmd{
 					create(a),
@@ -251,7 +268,6 @@ func scenarios() []scenario {
 		},
 		{
 			name:       "D12 EDITOR with arguments",
-			known:      "D12",
 			editorArgs: true,
 			cmds: func(*harness) []spec.Cmd {
 				return []spec.Cmd{
@@ -290,6 +306,54 @@ func TestE2E(t *testing.T) {
 			}
 			if sc.known != "" {
 				t.Errorf("%s no longer reproduces; remove its known marker", sc.known)
+			}
+		})
+	}
+	h.t = t
+}
+
+// TestE2ECrashRecovery kills antic (ANTIC_SAGA_CRASH_AFTER) right after
+// chosen effects of a command's saga and checks P1 across the crash: the
+// next command on the guest recovers its journal, after which the guest is
+// observed exactly as before the killed command; the command then works.
+func TestE2ECrashRecovery(t *testing.T) {
+	h := newHarness(t)
+	base := h.model
+	for _, c := range []struct {
+		name   string
+		cmd    func(*harness) spec.Cmd
+		points []int // effects executed before the crash
+	}{
+		// Validate, JournalBegin, Intent, WriteConfig, Intent, Hotplug, JournalClear.
+		{"mount on a running guest", func(h *harness) spec.Cmd {
+			return spec.CmdMount{Target: a, Dirs: []string{h.path("A")}}
+		}, []int{2, 4, 6}},
+		// Validate, CheckPorts, JournalBegin, Intent, WriteConfig, Intent,
+		// StopVM, Intent, StartVM, JournalClear.
+		{"set restarting a running guest", func(*harness) spec.Cmd {
+			return spec.CmdSet{Target: a, CPUs: types.Some(3)}
+		}, []int{5, 7, 9}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h.t = t
+			h.cleanup()
+			h.model = base
+			defer h.cleanup()
+			if msg := h.step(create(a)); msg != "" {
+				t.Fatal(msg)
+			}
+			for _, k := range c.points {
+				args, env := h.render(c.cmd(h))
+				_, code, stderr := h.antic(append(env, fmt.Sprintf("ANTIC_SAGA_CRASH_AFTER=%d", k)), args...)
+				if code != 137 {
+					t.Fatalf("crash after effect %d: exit %d, want 137\nstderr: %s", k, code, stderr)
+				}
+				if msg := h.step(spec.CmdStart{Names: []string{a}}); msg != "" {
+					t.Fatalf("recovery after a crash after effect %d: %s", k, msg)
+				}
+			}
+			if msg := h.step(c.cmd(h)); msg != "" {
+				t.Fatalf("after recovery: %s", msg)
 			}
 		})
 	}

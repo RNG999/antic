@@ -72,38 +72,30 @@ func (a *app) editPorts(c *cobra.Command, name string, specs []string, desc, pro
 	if err != nil {
 		return err
 	}
+	var ports []config.Port
+	var hosts []int
 	for _, spec := range specs {
 		pt, err := config.ParsePort(spec)
 		if err != nil {
 			return err
 		}
-		if add {
-			if pt.Proto == "" {
-				pt.Proto = proto
-			}
-			pt.Description = desc
-			if err := a.cfg.AddPort(name, pt, a.dirs.Home); err != nil {
-				return err
-			}
-		} else {
-			if err := a.cfg.RemovePort(name, pt.Host, a.dirs.Home); err != nil {
-				return err
-			}
+		if pt.Proto == "" {
+			pt.Proto = proto
 		}
+		pt.Description = desc
+		ports, hosts = append(ports, pt), append(hosts, pt.Host)
 	}
-	a.mgr, a.cfg = nil, nil
-	g, err = a.get(c.Context(), name)
+	changed, err := g.Reconfigure(c.Context(), func(d config.Draft) (config.Draft, error) {
+		if add {
+			return d.AddPorts(ports, g.OtherPorts())
+		}
+		return d.RemovePorts(hosts)
+	})
 	if err != nil {
 		return err
 	}
-	if up, err := g.Running(c.Context()); err == nil && up {
-		fmt.Fprintf(os.Stderr, "antic: restarting %s to apply port forwards...\n", name)
-		if err := g.Stop(c.Context()); err != nil {
-			return err
-		}
-		if err := g.Start(c.Context()); err != nil {
-			return err
-		}
+	if !changed {
+		fmt.Fprintf(os.Stderr, "antic: %s already forwards these ports\n", g.Name())
 	}
 	return nil
 }

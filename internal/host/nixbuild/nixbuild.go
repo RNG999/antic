@@ -115,12 +115,15 @@ func (g GuestStore) profile() string { return filepath.Join(string(g), "nix/var/
 // Real maps a store path to its location in the guest store.
 func (g GuestStore) Real(storePath string) string { return filepath.Join(string(g), storePath) }
 
-// Install copies the closure of system into the guest store, makes it the
-// current "system" profile (keeping the last 3 generations) and collects
-// garbage.
-func (n *Nix) Install(ctx context.Context, g GuestStore, system string) error {
+// SetProfile copies the closure of system into the guest store and makes
+// it the current "system" profile. Setting the current system again is
+// harmless.
+func (n *Nix) SetProfile(ctx context.Context, g GuestStore, system string) error {
 	if err := os.MkdirAll(string(g), 0o700); err != nil {
 		return err
+	}
+	if cur, err := g.Current(); err == nil && cur == system {
+		return nil
 	}
 	if _, err := n.output(ctx, "copy", "--no-check-sigs", "--to", g.uri(), system); err != nil {
 		return fmt.Errorf("copy %s to the guest store: %w", system, err)
@@ -128,6 +131,21 @@ func (n *Nix) Install(ctx context.Context, g GuestStore, system string) error {
 	if err := n.env(ctx, "--store", g.uri(), "-p", g.profile(), "--set", system); err != nil {
 		return fmt.Errorf("set the guest's system profile: %w", err)
 	}
+	return nil
+}
+
+// RemoveProfile makes the guest store have no current system (the state of
+// a guest that was never built).
+func (n *Nix) RemoveProfile(g GuestStore) error {
+	if err := os.Remove(g.profile()); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// GCGuest keeps the last 3 generations of the system profile and collects the
+// guest store's garbage.
+func (n *Nix) GCGuest(ctx context.Context, g GuestStore) error {
 	if err := n.env(ctx, "--store", g.uri(), "-p", g.profile(), "--delete-generations", "+3"); err != nil {
 		return err
 	}

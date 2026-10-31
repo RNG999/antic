@@ -27,24 +27,57 @@ func (a *app) editGuestCmd(use string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			g, err := a.cfg.Get(name)
+			g, err := a.get(c.Context(), name)
 			if err != nil {
 				return err
 			}
-			editor := os.Getenv("EDITOR")
-			if editor == "" {
-				editor = "vi"
-			}
-			cmd := exec.Command(editor, g.Path)
-			cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-			if err := cmd.Run(); err != nil {
+			old, err := os.ReadFile(g.Cfg.Path)
+			if err != nil {
 				return err
 			}
-			cwd, _ := os.Getwd()
-			_, err = config.LoadWithProject(a.dirs.GuestsConfigDir(), a.dirs.Home, cwd)
-			return err
+			// The user edits a copy; the file changes only if the result
+			// loads and takes effect (D10).
+			tmp, err := os.CreateTemp("", "antic-"+g.Name()+"-*.toml")
+			if err != nil {
+				return err
+			}
+			_, werr := tmp.Write(old)
+			if err := errors.Join(werr, tmp.Close()); err != nil {
+				return err
+			}
+			if err := runEditor(tmp.Name()); err != nil {
+				return err
+			}
+			edited, err := os.ReadFile(tmp.Name())
+			if err != nil {
+				return err
+			}
+			changed, err := g.Edit(c.Context(), old, edited)
+			if err != nil {
+				return fmt.Errorf("%w\n(your edits are kept in %s)", err, tmp.Name())
+			}
+			os.Remove(tmp.Name())
+			if !changed {
+				fmt.Fprintf(os.Stderr, "antic: %s is unchanged\n", g.Cfg.Path)
+			}
+			return nil
 		},
 	}
+}
+
+// runEditor edits path with $VISUAL or $EDITOR, which may carry arguments
+// (as git runs them, D12), or vi.
+func runEditor(path string) error {
+	editor := os.Getenv("VISUAL")
+	if editor == "" {
+		editor = os.Getenv("EDITOR")
+	}
+	if editor == "" {
+		editor = "vi"
+	}
+	cmd := exec.Command("sh", "-c", editor+` "$@"`, editor, path)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	return cmd.Run()
 }
 
 func (a *app) versionCmd() *cobra.Command {

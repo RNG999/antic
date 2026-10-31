@@ -609,12 +609,6 @@ func resolvePath(p, home, baseDir, where string, errs []error) (string, []error)
 	return filepath.Clean(p), errs
 }
 
-// absPath expands "~" and requires an absolute path without control
-// characters.
-func absPath(p, home, where string, errs []error) (string, []error) {
-	return resolvePath(p, home, "", where, errs)
-}
-
 func within(path, dir string) bool { return path == dir || strings.HasPrefix(path, dir+"/") }
 
 // Names returns the guest names (both valid and erroneous), sorted.
