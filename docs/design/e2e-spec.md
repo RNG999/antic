@@ -417,7 +417,14 @@ Effect = Prepare 系   : Resolve(path) / Build(cfg) / CheckPorts / RenderVMConfi
 
 ### 11.6 フェーズ 2 で扱うこと：クラッシュ時の一貫性
 
-antic が commit の途中で kill された場合に備え、`Undo` を各 commit ステップの前にジャーナルとして永続化する（`EffectPersistJournal`）。次にロックを取ったとき、ジャーナルをコアに渡して補償を再開する。この再開は L1a で、「任意のステップで中断してから再開しても、`Post` に含まれる状態になる」ことを検査する。
+antic が commit の途中で kill された場合に備え、コアは write-ahead のジャーナルを effect として出す（段階 5 の準備で実装済み。§13）。
+
+- **開く**：最初の commit ステップの前に `EffectJournalBegin` を出す。シェルはコマンド（`Op`）と旧・新の実体を永続化する。
+- **意図の記録**：各 commit ステップの直前に `EffectJournalIntent{Pos}` を出す。`StepValid` は、意図を記録した直後にしか commit ステップが走らないことを検査する。
+- **閉じる**：全 commit が成功したら `EffectJournalClear` を出し、成功するのはその後である。消せなかった場合は、残ったジャーナルが後で成功を取り消してしまう（P3 に反する）。そのため、補償に入って失敗として報告する。補償を終えたときも `EffectJournalClear` を出す。消せなかった場合も失敗と報告し、ジャーナルは次のコマンドが冪等にもう一度戻す。
+- **回復**：シェルはロックを取ったあとジャーナルが残っていれば、`MsgCommand` の代わりに `MsgRecover{Op, Last}` を送る。コアは記録された意図を逆順に戻し、ジャーナルを消して `Recovered` で終わる。シェルはその後で状態を読み直し、自分のコマンドを計画する（PlanUnderLock）。
+- **冪等性の要求**：逆操作は、元のステップが実行されたかどうかに関わらず資源を Old にしなければならない。記録された意図は、実行されなかったかもしれないからである。
+- **Broken**：補償が失敗したときはジャーナルを消さない。次のコマンドの回復が、もう一度戻すことを試みる。
 
 ## 12. 段階計画（改訂）
 
@@ -557,7 +564,7 @@ cd e2e && ANTIC_E2E_BIN=~/.cache/antic-e2e/bin/antic ~/.cache/antic-e2e/e2e.test
 
 #### 残課題（Broken）
 
-補償が恒久的に失敗した場合（Broken）は、仕様違反として報告するだけである。到達しないこと自体は保証できない。これを減らす手段は 2 つある。補償 effect を冪等にしてシェル側で再試行すること、そしてフェーズ 2 でジャーナルによる再開を入れることである。
+補償が恒久的に失敗した場合（Broken）は、仕様違反として報告するだけである。到達しないこと自体は保証できない。これを減らす手段は 2 つある。補償 effect を冪等にしてシェル側で再試行すること、そしてジャーナルによる再開である。後者は段階 5 の準備で入れた。Broken のときはジャーナルが残り、次のコマンドが回復を試みる。
 
 ### 段階 4：egress のルール中間表現（完了）
 
@@ -583,3 +590,43 @@ cd e2e && ANTIC_E2E_BIN=~/.cache/antic-e2e/bin/antic ~/.cache/antic-e2e/e2e.test
 | E2E（3 回目、約 6.5 分） | 15 シナリオ | 新たに `default = "deny"` と、`lan` + 例外の 2 シナリオを加えた。いずれも生成したルールを実機の namespace に読み込み、ゲストが起動することを確かめた。D11 は既知の差分から外れ、PASS になった。残る既知の差分は D3、D5、D7、D8、D9、D10、D12、D16 |
 
 到達性を実機で観測するプローブ（O3 のネットワーク）は、段階 6 で扱う。
+
+### 段階 5 の準備：ジャーナルと形式モデルとの対応（完了）
+
+文献調査（`reports/形式モデルと実装の対応 文献調査.md`）の推奨 1・2 を実施した。結論は「継ぎ目ごとに閉じる」である。
+
+| 継ぎ目 | 方法 | 状態 |
+|---|---|---|
+| `spec` ↔ `tea/operation` | 足跡の精緻化（`TestCoreRefinesSpec`） | 既存 |
+| egress データ ↔ `spec.Reach` | Z3（`smt_test.go`） | 既存 |
+| `Saga.tla` ↔ `tea/operation` | TLC 状態グラフの再生（`TestGoCoreRefinesSagaModel`） | **今回** |
+| `Saga.tla` ↔ CHC | 手で書き写したもの（規則は action ごとに対応させた） | 検査は推奨 3 で行う予定 |
+| コア ↔ 殻 | NDJSON トレースと TLC による照合 | 段階 5 で行う |
+
+#### コアのジャーナル（§11.6）
+
+- Stage を追加した：`Begin`、`Intent`、`Close`、`Abort`、`Recover`、`RecoverClose`、`Recovered`。
+- Effect を追加した：`JournalBegin`、`JournalIntent{Pos}`、`JournalClear`。Msg として `MsgRecover{Op, Last Option[StepIndex]}` を追加した。
+- `Invariant` と `StepValid` は新しい Stage を扱うようにした。`StepValid` には write-ahead の検査を加えた（commit ステップは、同じ位置の Intent の直後にしか走らない）。
+- 位置の計算は `after` / `before` / `undo` にまとめ、添字の算術が散らばらないようにした。
+
+#### Saga.tla の改訂
+
+- Go コアの 1 遷移（effect 1 つとその結果）が TLA+ の 1 action になる粒度にそろえた。
+  - 追加した action：`PlanCmd`、`Release`、`IntentFail`、`FinishFail`、`CompensateDoneFail`、`RecoverFail`。
+  - 終了は `done` フェーズを経由させ、ロックの解放を `Release` に分けた。
+  - 回復は durable なジャーナルを書き換えず、ローカルのスタックで戻すようにした（Go の実装と同じ）。
+- 資源を `NRes` と `Res == 1..NRes`、`Plan == [i ∈ Res ↦ i]` にした。CHOOSE による不定の順序をなくし、Go の計画の位置と対応させるためである。
+- SagaJournal の結果：3,949 状態、Consistent と Termination が成り立つ。SagaNoJournal と SagaStaleRead では反例が出る。
+
+#### 検証
+
+| 検査 | 規模 | 内容 |
+|---|---|---|
+| `TestGoCoreRefinesSagaModel` | TLC 3,949 状態・6,660 辺、Go 4,511 状態・7,880 遷移 | TLC が出力した状態グラフ（`-dump dot,actionlabels`）を読む。同じ上限（2 プロセス、3 コマンド、2 クラッシュ）で `operation.Update` を動かす。抽象化関数 `alpha` と対応表 `action`（Go の Stage と結果 → TLA+ の action）を通して、Go の全遷移が stutter か、同じ action の TLC の辺であることを確かめる。逆に、TLC の全状態と全辺に Go 側から到達することも確かめる。つまり、この有限の構成で stutter を除いて等価である。上限が cfg と一致することも検査する |
+| ミュータント | 6 種 | ジャーナルを開かない、意図を記録しない、逆操作で New に戻す、回復で最後の意図を飛ばす、ロック前に読んだ状態で計画する、ジャーナルを消す前に成功扱いにする。いずれも検出した。さらに、コアに「回復で最後の意図を飛ばす」バグを直接入れると、`Invariant` と `StepValid` は通る一方で、この検査は検出した |
+| `TestSagaRecoversFromCrashes` | 57,598 実行 | 全コマンド × 故障 1 回 × 全クラッシュ点について、ジャーナルが残れば回復で初期状態に戻ることを確かめる。回復自体を任意の点でクラッシュさせ、もう一度回復させた場合も確かめる。ジャーナルが残っていなければ、旧状態か新状態のどちらかになっている |
+| L1a（改訂） | 6,720 実行 | ジャーナルの effect も故障注入の対象にした。成功時にジャーナルが残らないこと、Broken のときはジャーナルが残っていて回復できることも確かめる |
+| Spacer（改訂） | 約 3 秒（以前は約 18 秒） | Saga.tla の改訂に合わせて CHC を書き直した。不変条件の述語をフェーズごとに分けたことで、改訂後 216 秒かかっていたものが約 3 秒になった。ジャーナルなしの場合は unsat になる |
+
+前提：TLA+ モデルは、逆操作（補償・回復）の失敗と、effect の途中でのクラッシュを扱わない。再生側もこの 2 つを生成しない。前者は L1a の故障注入（Broken）で、後者は殻の原子性の要求（§13 段階 3）で別に扱う。

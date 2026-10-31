@@ -13,35 +13,64 @@ import (
 // commands, crashes and processes.
 //
 // Abstraction: a command plans from the state it reads after taking the
-// guest's lock (PlanUnderLock), so a process without the lock holds no
+// guest's lock and recovering, so a process without the lock holds no
 // state; any number of processes is therefore represented by the current
-// lock holder, and a crash resets it. The plan moves resources 1..3 in
-// order, so the undo stack, the remaining steps and the journal's intents
-// are the counts k and ji. Versions and the command counter are unbounded
-// integers.
-//
-// Phases: 0 idle, 1 recover, 2 prepare, 3 commit, 4 compensate.
+// lock holder, and a crash resets it. The plan moves resources 1..nRes in
+// order (as the harness of saga_refine_test.go), so the undo stack (or, while recovering, the recorded intents
+// still to undo), the remaining steps and the journal's intents are the
+// counts k and ji. Versions and the command counter are unbounded integers.
+// The rules follow Saga.tla action by action; each phase of the lock holder
+// (Saga.tla's pc) has its own invariant predicate, which keeps the
+// inductive invariant Spacer must find small per control location.
+
+// The phases of the lock holder; idle means no process holds the lock.
+const (
+	phIdle       = "Idle"
+	phRecover    = "Recover"
+	phPlan       = "Plan"
+	phPrepare    = "Prepare"
+	phCommit     = "Commit"
+	phCompensate = "Compensate"
+	phDone       = "Done" // reported, still holding the lock
+)
+
+// chcSaga renders the Horn clauses of the saga with or without a journal.
 func chcSaga(journaling bool) string {
-	// State: v1 v2 v3 held ph base target k jon jbase ji cmds lastOk
-	sig := "(v1 Int) (v2 Int) (v3 Int) (held Bool) (ph Int) (base Int) (target Int) (k Int) (jon Bool) (jbase Int) (ji Int) (cmds Int) (lastOk Int)"
-	state := "v1 v2 v3 held ph base target k jon jbase ji cmds lastOk"
-	// rule renders "Inv(s) ∧ guard ⇒ Inv(s')" where s' replaces the named
+	phases := []string{phIdle, phRecover, phPlan, phPrepare, phCommit, phCompensate, phDone}
+	// State: v1..vN base target k jon jbase ji cmds lastOk
+	var vs, vsig, atLast []string
+	for i := 1; i <= nRes; i++ {
+		v := fmt.Sprintf("v%d", i)
+		vs, vsig, atLast = append(vs, v), append(vsig, "("+v+" Int)"), append(atLast, "(= "+v+" lastOk)")
+	}
+	state := strings.Join(vs, " ") + " base target k jon jbase ji cmds lastOk"
+	sig := strings.Join(vsig, " ") + " (base Int) (target Int) (k Int) (jon Bool) (jbase Int) (ji Int) (cmds Int) (lastOk Int)"
+	sorts := strings.Repeat("Int ", nRes) + "Int Int Int Bool Int Int Int Int"
+	initial := strings.Repeat("0 ", nRes) + "0 0 0 false 0 0 0 0"
+	n := fmt.Sprint(nRes)
+	var b strings.Builder
+	b.WriteString("(set-logic HORN)\n")
+	for _, ph := range phases {
+		fmt.Fprintf(&b, "(declare-fun %s (%s) Bool)\n", ph, sorts)
+	}
+	// add renders "from(s) ∧ guard ⇒ to(s')" where s' replaces the named
 	// variables.
-	rule := func(guard string, upd map[string]string) string {
+	add := func(from, guard, to string, upd map[string]string) {
 		next := strings.Fields(state)
 		for i, v := range next {
 			if e, ok := upd[v]; ok {
 				next[i] = e
 			}
 		}
-		return fmt.Sprintf("(assert (forall (%s) (=> (and (Inv %s) %s) (Inv %s))))\n", sig, state, guard, strings.Join(next, " "))
+		fmt.Fprintf(&b, "(assert (forall (%s) (=> (and (%s %s) %s) (%s %s))))\n", sig, from, state, guard, to, strings.Join(next, " "))
 	}
+	// set assigns val to the resource numbered idx.
 	set := func(idx, val string) map[string]string {
-		return map[string]string{
-			"v1": fmt.Sprintf("(ite (= %s 1) %s v1)", idx, val),
-			"v2": fmt.Sprintf("(ite (= %s 2) %s v2)", idx, val),
-			"v3": fmt.Sprintf("(ite (= %s 3) %s v3)", idx, val),
+		out := map[string]string{}
+		for i, v := range vs {
+			out[v] = fmt.Sprintf("(ite (= %s %d) %s %s)", idx, i+1, val, v)
 		}
+		return out
 	}
 	merge := func(ms ...map[string]string) map[string]string {
 		out := map[string]string{}
@@ -52,41 +81,58 @@ func chcSaga(journaling bool) string {
 		}
 		return out
 	}
-	var b strings.Builder
-	b.WriteString("(set-logic HORN)\n(declare-fun Inv (Int Int Int Bool Int Int Int Int Bool Int Int Int Int) Bool)\n")
+	and := func(cs ...string) string { return "(and " + strings.Join(cs, " ") + ")" }
+	none, some, all := "(= k 0)", "(> k 0)", "(= k "+n+")"
+	more := "(< k " + n + ")"
 	// Init.
-	fmt.Fprintf(&b, "(assert (Inv 0 0 0 false 0 0 0 0 false 0 0 0 0))\n")
+	fmt.Fprintf(&b, "(assert (%s %s))\n", phIdle, initial)
 	// Acquire: a new command takes the lock; a pending journal is recovered first.
-	b.WriteString(rule("(and (not held) (= ph 0))", map[string]string{
-		"held": "true", "cmds": "(+ cmds 1)", "target": "(+ cmds 1)", "ph": "(ite jon 1 2)"}))
-	// Recover: undo the last recorded intent (idempotent), then clear the journal.
-	b.WriteString(rule("(and (= ph 1) (> ji 0))", merge(set("ji", "jbase"), map[string]string{"ji": "(- ji 1)"})))
-	b.WriteString(rule("(and (= ph 1) (= ji 0))", map[string]string{"jon": "false", "ph": "2"}))
-	// Prepare (changes nothing observable), or fail and release.
-	prep := map[string]string{"base": "v1", "k": "0", "ph": "3"}
+	acquire := map[string]string{"cmds": "(+ cmds 1)", "target": "(+ cmds 1)"}
+	add(phIdle, "jon", phRecover, merge(acquire, map[string]string{"k": "ji"}))
+	add(phIdle, "(not jon)", phPlan, merge(acquire, map[string]string{"k": "0"}))
+	// Recover: undo the recorded intents in reverse (idempotent), then clear
+	// the journal, or fail to clear it and stop.
+	add(phRecover, some, phRecover, merge(set("k", "jbase"), map[string]string{"k": "(- k 1)"}))
+	add(phRecover, none, phPlan, map[string]string{"jon": "false"})
+	add(phRecover, none, phDone, nil)
+	// Plan from the state read under the lock.
+	add(phPlan, "true", phPrepare, map[string]string{"base": vs[firstRes]})
+	// Prepare (changes nothing observable) and open the journal, or fail.
+	prep := map[string]string{"k": "0"}
 	if journaling {
-		prep = merge(prep, map[string]string{"jon": "true", "jbase": "v1", "ji": "0"})
+		prep = merge(prep, map[string]string{"jon": "true", "jbase": "base", "ji": "0"})
 	}
-	b.WriteString(rule("(= ph 2)", prep))
-	b.WriteString(rule("(= ph 2)", map[string]string{"held": "false", "ph": "0"}))
-	// Commit: record the intent (journaling), then apply the step or fail.
+	add(phPrepare, "true", phCommit, prep)
+	add(phPrepare, "true", phDone, nil)
+	// Commit: record the intent (journaling) or fail to, then apply the step or fail.
 	ready := "true"
 	if journaling {
-		b.WriteString(rule("(and (= ph 3) (< k 3) (= ji k))", map[string]string{"ji": "(+ k 1)"}))
+		add(phCommit, and(more, "(= ji k)"), phCommit, map[string]string{"ji": "(+ k 1)"})
+		add(phCommit, and(more, "(= ji k)"), phCompensate, nil)
 		ready = "(= ji (+ k 1))"
 	}
-	b.WriteString(rule(fmt.Sprintf("(and (= ph 3) (< k 3) %s)", ready), merge(set("(+ k 1)", "target"), map[string]string{"k": "(+ k 1)"})))
-	b.WriteString(rule(fmt.Sprintf("(and (= ph 3) (< k 3) %s)", ready), map[string]string{"ph": "4"}))
-	// Compensate in reverse, then release.
-	b.WriteString(rule("(and (= ph 4) (> k 0))", merge(set("k", "base"), map[string]string{"k": "(- k 1)"})))
-	b.WriteString(rule("(and (= ph 4) (= k 0))", map[string]string{"held": "false", "jon": "false", "ph": "0"}))
-	// Finish.
-	b.WriteString(rule("(and (= ph 3) (= k 3))", map[string]string{"held": "false", "jon": "false", "lastOk": "target", "ph": "0"}))
+	add(phCommit, and(more, ready), phCommit, merge(set("(+ k 1)", "target"), map[string]string{"k": "(+ k 1)"}))
+	add(phCommit, and(more, ready), phCompensate, nil)
+	// Compensate in reverse, then clear the journal (or fail to, leaving it).
+	add(phCompensate, some, phCompensate, merge(set("k", "base"), map[string]string{"k": "(- k 1)"}))
+	add(phCompensate, none, phDone, map[string]string{"jon": "false"})
+	if journaling {
+		add(phCompensate, none, phDone, nil)
+	}
+	// Finish by clearing the journal, or compensate when it cannot be cleared.
+	add(phCommit, all, phDone, map[string]string{"jon": "false", "lastOk": "target", "k": "0"})
+	if journaling {
+		add(phCommit, all, phCompensate, nil)
+	}
+	// Release the lock after reporting.
+	add(phDone, "true", phIdle, nil)
 	// Crash: the holder's memory is lost and its flock released; the journal survives.
-	b.WriteString(rule("(not (= ph 0))", map[string]string{"held": "false", "ph": "0", "k": "0"}))
+	for _, ph := range phases[1:] {
+		add(ph, "true", phIdle, map[string]string{"k": "0"})
+	}
 	// Safety: with the lock free and no journal pending, every resource is
 	// at the version of the last command that succeeded.
-	fmt.Fprintf(&b, "(assert (forall (%s) (=> (and (Inv %s) (not held) (not jon) (not (and (= v1 lastOk) (= v2 lastOk) (= v3 lastOk)))) false)))\n", sig, state)
+	fmt.Fprintf(&b, "(assert (forall (%s) (=> (and (%s %s) (not jon) (not (and %s))) false)))\n", sig, phIdle, state, strings.Join(atLast, " "))
 	b.WriteString("(check-sat)\n")
 	return b.String()
 }

@@ -106,7 +106,9 @@ func apply(s shadow, e operation.Effect, mounts *[]domain.AbsPath) shadow {
 		s.power = powerOff
 		*mounts = nil
 	case operation.EffectHotplug:
-		*mounts = append(*mounts, e.Path)
+		if !slices.Contains(*mounts, e.Path) {
+			*mounts = append(*mounts, e.Path)
+		}
 	case operation.EffectHotunplug:
 		*mounts = slices.DeleteFunc(slices.Clone(*mounts), func(p domain.AbsPath) bool { return p == e.Path })
 	case operation.EffectTrash:
@@ -122,7 +124,8 @@ func apply(s shadow, e operation.Effect, mounts *[]domain.AbsPath) shadow {
 			s.inst = instPresent
 		}
 	case operation.EffectValidate, operation.EffectBuild, operation.EffectCheckPorts,
-		operation.EffectGC, operation.EffectEmptyTrash, operation.EffectReport:
+		operation.EffectGC, operation.EffectEmptyTrash, operation.EffectReport,
+		operation.EffectJournalBegin, operation.EffectJournalIntent, operation.EffectJournalClear:
 	}
 	s.mounts = mountKey(*mounts)
 	return s
@@ -260,25 +263,64 @@ func corpus(t *testing.T) []operation.Op {
 	return ops
 }
 
+// journal is the durable journal as the effects leave it.
+type journal struct {
+	open bool
+	last types.Option[domain.StepIndex]
+}
+
+func (j journal) record(e operation.Effect) journal {
+	switch e := e.(type) {
+	case operation.EffectJournalBegin:
+		return journal{open: true}
+	case operation.EffectJournalIntent:
+		return journal{open: true, last: types.Some(e.Pos)}
+	case operation.EffectJournalClear:
+		return journal{}
+	}
+	return j
+}
+
 type run struct {
-	status operation.ReportStatus
-	final  shadow
-	model  operation.Model
-	trace  []operation.Effect
+	status  operation.ReportStatus
+	final   shadow
+	mounts  []domain.AbsPath
+	journal journal
+	model   operation.Model
+	trace   []operation.Effect
+	crashed bool
+}
+
+// machine is the host a saga runs on.
+type machine struct {
+	host    shadow
+	mounts  []domain.AbsPath
+	journal journal
+}
+
+func start(op operation.Op) machine {
+	return machine{host: initial(op), mounts: op.Runtime.All()}
 }
 
 // simulate runs the saga for op, failing the failFwd-th forward effect and
 // the failComp-th compensation (-1: none), and checks every step.
 func simulate(t *testing.T, op operation.Op, failFwd, failComp int) run {
 	t.Helper()
+	return execute(t, op, start(op), operation.MsgCommand{Op: op}, failFwd, failComp, -1)
+}
+
+// execute feeds msg to an idle saga on machine h and runs it to its report,
+// injecting failures as simulate does, or crashes (the process dies, losing
+// the saga) just before the crashAt-th effect runs (-1: never).
+func execute(t *testing.T, op operation.Op, h machine, msg operation.Msg, failFwd, failComp, crashAt int) run {
+	t.Helper()
 	name, _ := domain.ParseGuestName("e2e-a")
 	m := operation.Init(name)
 	if err := operation.Invariant(m); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	mounts := op.Runtime.All()
-	host := initial(op)
-	var msg operation.Msg = operation.MsgCommand{Op: op}
+	mounts := slices.Clone(h.mounts)
+	host, jr := h.host, h.journal
 	var r run
 	fwd, comp := 0, 0
 	for range 200 {
@@ -297,13 +339,17 @@ func simulate(t *testing.T, op operation.Op, failFwd, failComp int) run {
 			t.Fatalf("%+v: saga stalled in stage %d", op, m.Stage)
 		}
 		e := effects[0]
+		if len(r.trace) == crashAt {
+			r.crashed, r.final, r.mounts, r.journal = true, host, mounts, jr
+			return r
+		}
 		r.trace = append(r.trace, e)
 		if rep, ok := e.(operation.EffectReport); ok {
-			r.status, r.final, r.model = rep.Status, host, m
+			r.status, r.final, r.mounts, r.journal, r.model = rep.Status, host, mounts, jr, m
 			return r
 		}
 		status := operation.ResultOk
-		if m.Stage == operation.StageCompensate {
+		if m.Stage == operation.StageCompensate || m.Stage == operation.StageAbort {
 			if comp == failComp {
 				status = operation.ResultErr
 			}
@@ -316,6 +362,7 @@ func simulate(t *testing.T, op operation.Op, failFwd, failComp int) run {
 		}
 		if status == operation.ResultOk {
 			host = apply(host, e, &mounts)
+			jr = jr.record(e)
 		}
 		msg = operation.MsgResult{Status: status, Reason: domain.NewText("injected")}
 	}
@@ -340,8 +387,8 @@ func TestSagaAtomicityUnderFaultInjection(t *testing.T) {
 			}
 			continue
 		}
-		if clean.status != operation.ReportOk || canon(clean.final, op) != canon(want, op) {
-			t.Fatalf("%+v: success left %+v, want %+v", op, clean.final, want)
+		if clean.status != operation.ReportOk || canon(clean.final, op) != canon(want, op) || clean.journal.open {
+			t.Fatalf("%+v: success left %+v and journal %+v, want %+v", op, clean.final, clean.journal, want)
 		}
 		for res, v := range clean.model.Versions() {
 			if v != operation.VersionNew {
@@ -354,8 +401,8 @@ func TestSagaAtomicityUnderFaultInjection(t *testing.T) {
 			runs++
 			if failed.status == operation.ReportOk {
 				// Only a Finalize failure may still succeed.
-				if canon(failed.final, op) != canon(want, op) {
-					t.Fatalf("%+v: success after finalize failure %d left %+v", op, k, failed.final)
+				if canon(failed.final, op) != canon(want, op) || failed.journal.open {
+					t.Fatalf("%+v: success after finalize failure %d left %+v, journal %+v", op, k, failed.final, failed.journal)
 				}
 				continue
 			}
@@ -394,6 +441,82 @@ func TestSagaAtomicityUnderFaultInjection(t *testing.T) {
 	t.Logf("checked %d saga runs over %d commands", runs, len(corpus(t)))
 }
 
+// recoverFrom runs the recovery saga a crashed or broken run r left, and
+// returns the host it leaves.
+func recoverFrom(t *testing.T, op operation.Op, r run) shadow {
+	t.Helper()
+	if !r.journal.open {
+		return r.final
+	}
+	h := machine{host: r.final, mounts: r.mounts, journal: r.journal}
+	rec := execute(t, op, h, operation.MsgRecover{Op: op, Last: r.journal.last}, -1, -1, -1)
+	if rec.status != operation.ReportOk || rec.model.Stage != operation.StageRecovered || rec.journal.open {
+		t.Fatalf("%+v: recovery ended %d in stage %d, journal %+v", op, rec.status, rec.model.Stage, rec.journal)
+	}
+	return rec.final
+}
+
+// TestSagaRecoversFromCrashes checks P1 across process crashes: for every
+// command, every single injected failure and every crash point, a crash
+// leaves the journal such that recovery, itself crashed at any point and
+// recovered again, restores the old state; a crash with no journal pending
+// leaves the host at the old or the new state.
+func TestSagaRecoversFromCrashes(t *testing.T) {
+	runs := 0
+	for _, op := range corpus(t) {
+		want, accepted := expected(op)
+		if !accepted {
+			continue
+		}
+		old := canon(initial(op), op)
+		clean := simulate(t, op, -1, -1)
+		for k := -1; k < len(clean.trace)-1; k++ {
+			full := simulate(t, op, k, -1)
+			for c := range len(full.trace) {
+				crashed := execute(t, op, start(op), operation.MsgCommand{Op: op}, k, -1, c)
+				runs++
+				if !crashed.journal.open {
+					if got := canon(crashed.final, op); got != old && got != canon(want, op) {
+						t.Fatalf("%+v: crash at %d without a journal left %+v", op, c, crashed.final)
+					}
+					continue
+				}
+				if got := recoverFrom(t, op, crashed); canon(got, op) != old {
+					t.Fatalf("%+v: recovery after crash at %d (failure %d) left %+v, want %+v", op, c, k, got, old)
+				}
+				h := machine{host: crashed.final, mounts: crashed.mounts, journal: crashed.journal}
+				rec := execute(t, op, h, operation.MsgRecover{Op: op, Last: crashed.journal.last}, -1, -1, -1)
+				for rc := range len(rec.trace) {
+					again := execute(t, op, h, operation.MsgRecover{Op: op, Last: crashed.journal.last}, -1, -1, rc)
+					runs++
+					if got := recoverFrom(t, op, again); canon(got, op) != old {
+						t.Fatalf("%+v: recovery crashed at %d, recovered again, left %+v", op, rc, got)
+					}
+				}
+			}
+		}
+	}
+	t.Logf("checked %d crash and recovery runs", runs)
+}
+
+// TestRecoverRejectsMismatchedJournal checks that a journal naming a step
+// that is not a commit step of its command ends the recovery as Broken.
+func TestRecoverRejectsMismatchedJournal(t *testing.T) {
+	name, _ := domain.ParseGuestName("e2e-a")
+	op := operation.Op{Kind: operation.OpStop, Phase: operation.GuestOff}
+	pos, _ := domain.ParseStepIndex(0)
+	for _, msg := range []operation.Msg{
+		operation.MsgRecover{Op: op},
+		operation.MsgRecover{Op: operation.Op{Kind: operation.OpStart, Phase: operation.GuestOff}, Last: types.Some(pos)},
+	} {
+		m := operation.Init(name)
+		next, effects := operation.Update(m, msg)
+		if err := operation.StepValid(m, msg, next, effects); err != nil || next.Stage != operation.StageBroken {
+			t.Fatalf("%+v: stage %d, %v", msg, next.Stage, err)
+		}
+	}
+}
+
 // TestFinishedSagaIgnoresMessages checks that a finished or idle saga does
 // not react to stray messages.
 func TestFinishedSagaIgnoresMessages(t *testing.T) {
@@ -407,7 +530,7 @@ func TestFinishedSagaIgnoresMessages(t *testing.T) {
 	if done.Stage != operation.StageDone {
 		t.Fatalf("stopping a stopped guest should succeed immediately, got stage %d", done.Stage)
 	}
-	for _, msg := range []operation.Msg{operation.MsgResult{}, operation.MsgCommand{Op: operation.Op{Kind: operation.OpRemove, Phase: operation.GuestOff}}} {
+	for _, msg := range []operation.Msg{operation.MsgResult{}, operation.MsgCommand{Op: operation.Op{Kind: operation.OpRemove, Phase: operation.GuestOff}}, operation.MsgRecover{}} {
 		after, effects := operation.Update(done, msg)
 		if err := operation.StepValid(done, msg, after, effects); err != nil || len(effects) != 0 {
 			t.Fatalf("a finished saga reacted to %T: %v", msg, err)

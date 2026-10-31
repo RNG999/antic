@@ -214,21 +214,36 @@ type StepSet = types.SortedSet[Step, domain.StepIndex, StepByIndex]
 type Stage uint8
 
 const (
-	// StageIdle waits for MsgCommand.
+	// StageIdle waits for MsgCommand or MsgRecover.
 	StageIdle Stage = iota
 	// StagePrepare runs the Prepare step at Pos.
 	StagePrepare
+	// StageBegin opens the journal before the first commit step (at Pos).
+	StageBegin
+	// StageIntent records in the journal that the commit step at Pos runs next.
+	StageIntent
 	// StageCommit runs the Commit step at Pos.
 	StageCommit
+	// StageClose clears the journal after every commit step succeeded.
+	StageClose
 	// StageCompensate undoes the committed step at Pos-1.
 	StageCompensate
+	// StageAbort clears the journal after every committed step was undone.
+	StageAbort
 	// StageFinalize runs the Finalize step at Pos.
 	StageFinalize
+	// StageRecover undoes step Pos-1 of an interrupted command's journal.
+	StageRecover
+	// StageRecoverClose clears the journal once the interrupted command is undone.
+	StageRecoverClose
 	// StageDone means the command succeeded: every resource is at New.
 	StageDone
 	// StageFailed means the command failed: every resource is at Old.
 	StageFailed
-	// StageBroken means a compensation failed: resources are mixed (a P1 violation).
+	// StageRecovered means an interrupted command was undone and its journal cleared.
+	StageRecovered
+	// StageBroken means a compensation failed: resources are mixed (a P1
+	// violation); the journal stays, so the next command recovers them.
 	StageBroken
 )
 
@@ -255,6 +270,19 @@ type MsgCommand struct {
 
 func (MsgCommand) isMsg() {}
 
+// MsgRecover undoes a command that a crashed process left in the journal:
+// Op is the command and Last the position of the last commit step whose
+// intent was recorded (it may not have run), or None when the crash came
+// before the first intent. The shell sends it, after
+// taking the guest's lock, instead of MsgCommand while a journal is pending,
+// and plans its own command afresh once the recovery saga is Recovered.
+type MsgRecover struct {
+	Op   Op
+	Last types.Option[domain.StepIndex]
+}
+
+func (MsgRecover) isMsg() {}
+
 // ResultStatus is the outcome of one effect.
 type ResultStatus uint8
 
@@ -267,7 +295,9 @@ const (
 
 // MsgResult reports the outcome of the last effect. Compound effects
 // (StartVM, StopVM, Hotplug, Hotunplug, Switch) must be atomic in the shell:
-// on ResultErr they changed nothing.
+// on ResultErr they changed nothing. Inverse effects (compensation and
+// recovery) must be idempotent: they bring the resource to Old whether or
+// not the step they undo ran, since a recorded intent may not have.
 type MsgResult struct {
 	Status ResultStatus
 	Reason domain.Text
@@ -279,6 +309,17 @@ func (MsgResult) isMsg() {}
 type Effect interface {
 	isEffect()
 }
+
+// EffectJournalBegin durably records the command and its old and new
+// artifacts before the first commit step, so that another process can undo
+// it if this one crashes.
+type EffectJournalBegin struct{}
+
+// EffectJournalIntent durably records that the commit step at Pos runs next.
+type EffectJournalIntent struct{ Pos domain.StepIndex }
+
+// EffectJournalClear durably deletes the journal.
+type EffectJournalClear struct{}
 
 // EffectValidate checks the new config.
 type EffectValidate struct{}
@@ -363,6 +404,9 @@ type EffectReport struct {
 	Reason domain.Text
 }
 
+func (EffectJournalBegin) isEffect()   {}
+func (EffectJournalIntent) isEffect()  {}
+func (EffectJournalClear) isEffect()   {}
 func (EffectValidate) isEffect()       {}
 func (EffectBuild) isEffect()          {}
 func (EffectCheckPorts) isEffect()     {}
@@ -391,6 +435,10 @@ func position(n int) domain.StepIndex {
 	i, _ := domain.ParseStepIndex(n)
 	return i
 }
+
+// after is the position following i; before is the one preceding it.
+func after(i domain.StepIndex) domain.StepIndex  { return position(i.Get() + 1) }
+func before(i domain.StepIndex) domain.StepIndex { return position(i.Get() - 1) }
 
 // maxSteps bounds a plan (a StepIndex also names the position after it).
 const maxSteps = 64
@@ -614,11 +662,24 @@ func firstCommit(plan StepSet) int {
 	return plan.Len()
 }
 
+// commitEnd is the position after the last commit step.
+func commitEnd(plan StepSet) int {
+	for _, s := range plan.All() {
+		if s.Phase == PhaseFinalize {
+			return s.Index.Get()
+		}
+	}
+	return plan.Len()
+}
+
+// hasCommit reports whether the plan changes anything (and so is journaled).
+func hasCommit(plan StepSet) bool { return firstCommit(plan) < commitEnd(plan) }
+
 // Versions derives every committed resource's version from Plan and Pos:
 // a resource is at the target version of the last committed step on it.
 func (m Model) Versions() map[Resource]Version {
 	out := map[Resource]Version{}
-	if m.Stage == StageIdle || m.Stage == StagePrepare {
+	if m.Stage == StageIdle || m.Stage == StagePrepare || m.Stage == StageBegin {
 		return out
 	}
 	for _, s := range m.Plan.All() {
@@ -629,7 +690,8 @@ func (m Model) Versions() map[Resource]Version {
 	return out
 }
 
-// advance runs the step at m.Pos, or ends the saga successfully.
+// advance runs the step at m.Pos (recording a commit step's intent first),
+// or ends the saga successfully.
 func advance(m Model) (Model, []Effect) {
 	steps := m.Plan.All()
 	if m.Pos.Get() >= len(steps) {
@@ -637,14 +699,64 @@ func advance(m Model) (Model, []Effect) {
 		return m, []Effect{EffectReport{Status: ReportOk}}
 	}
 	s := steps[m.Pos.Get()]
+	if s.Phase == PhaseCommit {
+		m.Stage = StageIntent
+		return m, []Effect{EffectJournalIntent{Pos: m.Pos}}
+	}
 	m.Stage = stageOf(s.Phase)
 	return m, []Effect{forward(s)}
 }
+
+// proceed runs the step at m.Pos after a Prepare step, opening the journal
+// before the first commit step.
+func proceed(m Model) (Model, []Effect) {
+	if m.Pos.Get() == firstCommit(m.Plan) && hasCommit(m.Plan) {
+		m.Stage = StageBegin
+		return m, []Effect{EffectJournalBegin{}}
+	}
+	return advance(m)
+}
+
+// unwind undoes the committed step before m.Pos, or clears the journal
+// once none is left.
+func unwind(m Model) (Model, []Effect) {
+	if m.Pos.Get() == firstCommit(m.Plan) {
+		m.Stage = StageAbort
+		return m, []Effect{EffectJournalClear{}}
+	}
+	m.Stage = StageCompensate
+	return m, []Effect{undo(m)}
+}
+
+// undo is the effect that undoes the committed step just before m.Pos.
+func undo(m Model) Effect { return inverse(m.Op, m.Plan.All()[before(m.Pos).Get()]) }
 
 // fail ends the saga after nothing (or everything committed was undone).
 func fail(m Model) (Model, []Effect) {
 	m.Stage = StageFailed
 	return m, []Effect{EffectReport{Status: ReportFailed, Reason: m.Reason}}
+}
+
+// broken ends the saga with mixed resources.
+func broken(m Model, reason string) (Model, []Effect) {
+	m.Stage = StageBroken
+	m.Reason = domain.NewText(reason)
+	return m, []Effect{EffectReport{Status: ReportBroken, Reason: m.Reason}}
+}
+
+func cloneOp(op Op) Op {
+	return Op{
+		Kind:    op.Kind,
+		Phase:   op.Phase,
+		Runtime: op.Runtime.Clone(),
+		Change: Change{
+			Config:  op.Change.Config,
+			System:  op.Change.System,
+			Restart: op.Change.Restart,
+			Added:   op.Change.Added.Clone(),
+			Removed: op.Change.Removed.Clone(),
+		},
+	}
 }
 
 // Update is the pure, total, deterministic Sans-I/O & TEA transition function.
@@ -658,18 +770,7 @@ func Update(m Model, msg Msg) (Model, []Effect) {
 		if m.Stage != StageIdle {
 			return next, nil
 		}
-		next.Op = Op{
-			Kind:    ev.Op.Kind,
-			Phase:   ev.Op.Phase,
-			Runtime: ev.Op.Runtime.Clone(),
-			Change: Change{
-				Config:  ev.Op.Change.Config,
-				System:  ev.Op.Change.System,
-				Restart: ev.Op.Change.Restart,
-				Added:   ev.Op.Change.Added.Clone(),
-				Removed: ev.Op.Change.Removed.Clone(),
-			},
-		}
+		next.Op = cloneOp(ev.Op)
 		steps, err := plan(next.Op)
 		if err != nil {
 			next.Reason = domain.NewText(err.Error())
@@ -677,38 +778,108 @@ func Update(m Model, msg Msg) (Model, []Effect) {
 		}
 		next.Plan = types.BuildSet[Step, domain.StepIndex, StepByIndex](steps)
 		next.Pos = position(0)
-		return advance(next)
+		return proceed(next)
+
+	case MsgRecover:
+		if m.Stage != StageIdle {
+			return next, nil
+		}
+		next.Op = cloneOp(ev.Op)
+		steps, _ := plan(next.Op) // a rejected command has no commit step
+		next.Plan = types.BuildSet[Step, domain.StepIndex, StepByIndex](steps)
+		last, intended := ev.Last.Get()
+		if !hasCommit(next.Plan) || (intended && (last.Get() >= len(steps) || steps[last.Get()].Phase != PhaseCommit)) {
+			next.Plan = StepSet{}
+			return broken(next, "the journal of an interrupted command does not match its plan")
+		}
+		if !intended {
+			next.Pos = position(firstCommit(next.Plan))
+			next.Stage = StageRecoverClose
+			return next, []Effect{EffectJournalClear{}}
+		}
+		next.Pos = after(last)
+		next.Stage = StageRecover
+		return next, []Effect{undo(next)}
 
 	case MsgResult:
-		pos := m.Pos.Get()
+		ok := ev.Status == ResultOk
 		switch m.Stage {
-		case StagePrepare, StageCommit:
-			if ev.Status == ResultOk {
-				next.Pos = position(pos + 1)
-				return advance(next)
-			}
-			next.Reason = ev.Reason
-			if pos == firstCommit(m.Plan) || m.Stage == StagePrepare {
+		case StagePrepare:
+			if !ok {
+				next.Reason = ev.Reason
 				return fail(next)
 			}
-			next.Stage = StageCompensate
-			return next, []Effect{inverse(m.Op, m.Plan.All()[pos-1])}
+			next.Pos = after(m.Pos)
+			return proceed(next)
+		case StageBegin:
+			if !ok {
+				next.Reason = ev.Reason
+				return fail(next)
+			}
+			return advance(next)
+		case StageIntent:
+			if !ok {
+				next.Reason = ev.Reason
+				return unwind(next)
+			}
+			next.Stage = StageCommit
+			return next, []Effect{forward(m.Plan.All()[m.Pos.Get()])}
+		case StageCommit:
+			if !ok {
+				next.Reason = ev.Reason
+				return unwind(next)
+			}
+			next.Pos = after(m.Pos)
+			if next.Pos.Get() == commitEnd(m.Plan) {
+				next.Stage = StageClose
+				return next, []Effect{EffectJournalClear{}}
+			}
+			return advance(next)
+		case StageClose:
+			if !ok {
+				// A journal left behind would undo the command later, so a
+				// command whose journal cannot be cleared must not succeed.
+				next.Reason = ev.Reason
+				return unwind(next)
+			}
+			return advance(next)
 		case StageCompensate:
-			if ev.Status == ResultErr {
-				next.Stage = StageBroken
-				return next, []Effect{EffectReport{Status: ReportBroken, Reason: domain.NewText(fmt.Sprintf("%s; undoing it also failed: %s", m.Reason.Get(), ev.Reason.Get()))}}
+			if !ok {
+				return broken(next, fmt.Sprintf("%s; undoing it also failed: %s", m.Reason.Get(), ev.Reason.Get()))
 			}
-			next.Pos = position(pos - 1)
-			if pos-1 == firstCommit(m.Plan) {
+			next.Pos = before(m.Pos)
+			return unwind(next)
+		case StageAbort:
+			if !ok {
+				// Every committed step is undone; the journal left behind is
+				// undone again, idempotently, by the next command.
+				next.Reason = domain.NewText(fmt.Sprintf("%s (the journal was not cleared: %s)", m.Reason.Get(), ev.Reason.Get()))
+			}
+			return fail(next)
+		case StageRecover:
+			if !ok {
+				return broken(next, "undoing an interrupted command failed: "+ev.Reason.Get())
+			}
+			next.Pos = before(m.Pos)
+			if next.Pos.Get() == firstCommit(m.Plan) {
+				next.Stage = StageRecoverClose
+				return next, []Effect{EffectJournalClear{}}
+			}
+			next.Stage = StageRecover
+			return next, []Effect{undo(next)}
+		case StageRecoverClose:
+			if !ok {
+				next.Reason = domain.NewText("an interrupted command was undone but its journal was not cleared: " + ev.Reason.Get())
 				return fail(next)
 			}
-			return next, []Effect{inverse(m.Op, m.Plan.All()[pos-2])}
+			next.Stage = StageRecovered
+			return next, []Effect{EffectReport{Status: ReportOk}}
 		case StageFinalize:
 			// Finalize steps are irreversible clean-up; a failure changes
 			// nothing the user observes, so the saga still succeeds.
-			next.Pos = position(pos + 1)
+			next.Pos = after(m.Pos)
 			return advance(next)
-		case StageIdle, StageDone, StageFailed, StageBroken:
+		case StageIdle, StageDone, StageFailed, StageRecovered, StageBroken:
 		}
 		return next, nil
 	}
@@ -735,11 +906,12 @@ func Invariant(m Model) error {
 			return fmt.Errorf("invariant violation: step %d names a path if and only if it is a mount step", i)
 		}
 	}
-	pos, n, first := m.Pos.Get(), len(steps), firstCommit(m.Plan)
+	pos, n, first, end := m.Pos.Get(), len(steps), firstCommit(m.Plan), commitEnd(m.Plan)
 	if pos > n {
 		return fmt.Errorf("invariant violation: position %d beyond plan of %d steps", pos, n)
 	}
 	at := func(ph StepPhase) bool { return pos < n && steps[pos].Phase == ph }
+	undoing := pos > first && pos <= end && steps[pos-1].Phase == PhaseCommit
 	switch m.Stage {
 	case StageIdle:
 		if n != 0 || pos != 0 {
@@ -749,13 +921,25 @@ func Invariant(m Model) error {
 		if !at(PhasePrepare) {
 			return errors.New("invariant violation: preparing outside the prepare phase")
 		}
-	case StageCommit:
+	case StageBegin:
+		if pos != first || !at(PhaseCommit) {
+			return errors.New("invariant violation: opening the journal away from the first commit step")
+		}
+	case StageIntent, StageCommit:
 		if !at(PhaseCommit) {
 			return errors.New("invariant violation: committing outside the commit phase")
 		}
-	case StageCompensate:
-		if pos <= first || pos > n || steps[pos-1].Phase != PhaseCommit {
-			return errors.New("invariant violation: compensating without a committed step")
+	case StageClose:
+		if pos != end || !hasCommit(m.Plan) {
+			return errors.New("invariant violation: closing the journal before the last commit step")
+		}
+	case StageCompensate, StageRecover:
+		if !undoing {
+			return errors.New("invariant violation: undoing without a committed step")
+		}
+	case StageAbort, StageRecoverClose:
+		if pos != first || !hasCommit(m.Plan) {
+			return errors.New("invariant violation: clearing the journal with steps left to undo")
 		}
 	case StageFinalize:
 		if !at(PhaseFinalize) {
@@ -765,7 +949,7 @@ func Invariant(m Model) error {
 		if pos != n {
 			return errors.New("invariant violation: done before the end of the plan")
 		}
-	case StageFailed:
+	case StageFailed, StageRecovered:
 		if pos > first {
 			return errors.New("invariant violation: failed with committed steps (P1)")
 		}
@@ -801,15 +985,17 @@ func FrameValid(prev Model, msg Msg, next Model) error {
 		if !sameOp(prev.Op, next.Op) || !slices.Equal(prev.Plan.All(), next.Plan.All()) {
 			return errors.New("frame violation: MsgResult changed the command or its plan")
 		}
-	case MsgCommand:
+	case MsgCommand, MsgRecover:
 		if prev.Stage != StageIdle && !sameModel(prev, next) {
-			return errors.New("frame violation: MsgCommand changed a saga that already started")
+			return errors.New("frame violation: a command changed a saga that already started")
 		}
 	}
 	return nil
 }
 
-func terminal(s Stage) bool { return s == StageDone || s == StageFailed || s == StageBroken }
+func terminal(s Stage) bool {
+	return s == StageDone || s == StageFailed || s == StageRecovered || s == StageBroken
+}
 
 // reportFor is the report status a terminal stage ends with.
 func reportFor(s Stage) ReportStatus {
@@ -818,7 +1004,8 @@ func reportFor(s Stage) ReportStatus {
 		return ReportFailed
 	case StageBroken:
 		return ReportBroken
-	case StageIdle, StagePrepare, StageCommit, StageCompensate, StageFinalize, StageDone:
+	case StageIdle, StagePrepare, StageBegin, StageIntent, StageCommit, StageClose, StageCompensate,
+		StageAbort, StageFinalize, StageRecover, StageRecoverClose, StageDone, StageRecovered:
 	}
 	return ReportOk
 }
@@ -852,17 +1039,33 @@ func StepValid(prev Model, msg Msg, next Model, effects []Effect) error {
 	}
 	steps := next.Plan.All()
 	pos := next.Pos.Get()
+	var want Effect
 	switch next.Stage {
 	case StagePrepare, StageCommit, StageFinalize:
-		if pos >= len(steps) || !sameEffect(effects[0], forward(steps[pos])) {
-			return errors.New("step violation: effect is not the planned step at the position")
+		if pos >= len(steps) {
+			return errors.New("step violation: no planned step at the position")
 		}
-	case StageCompensate:
-		if pos == 0 || !sameEffect(effects[0], inverse(next.Op, steps[pos-1])) {
-			return errors.New("step violation: compensation is not the inverse of the last committed step")
+		want = forward(steps[pos])
+	case StageBegin:
+		want = EffectJournalBegin{}
+	case StageIntent:
+		want = EffectJournalIntent{Pos: next.Pos}
+	case StageClose, StageAbort, StageRecoverClose:
+		want = EffectJournalClear{}
+	case StageCompensate, StageRecover:
+		if pos == 0 {
+			return errors.New("step violation: undoing before the first step")
 		}
-	case StageIdle, StageDone, StageFailed, StageBroken:
+		want = undo(next)
+	case StageIdle, StageDone, StageFailed, StageRecovered, StageBroken:
 		return fmt.Errorf("step violation: effect emitted in stage %d", next.Stage)
+	}
+	if !sameEffect(effects[0], want) {
+		return fmt.Errorf("step violation: stage %d at %d emitted %T, want %T", next.Stage, pos, effects[0], want)
+	}
+	// Write-ahead: a commit step runs only right after its intent is recorded.
+	if next.Stage == StageCommit && (prev.Stage != StageIntent || prev.Pos != next.Pos) {
+		return errors.New("step violation: a commit step ran without recording its intent first")
 	}
 	return nil
 }
