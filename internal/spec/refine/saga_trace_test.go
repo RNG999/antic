@@ -163,12 +163,12 @@ func (tg traceGraph) validate(actions []traceAction) error {
 	return nil
 }
 
-// TestShellTracesRefineSagaModel validates the traces in $ANTIC_SAGA_TRACES
+// TestSagaShellTracesRefineModel validates the traces in $ANTIC_E2E_TRACES
 // (the E2E tests write them; see formal/README.md).
-func TestShellTracesRefineSagaModel(t *testing.T) {
-	dir := os.Getenv("ANTIC_SAGA_TRACES")
+func TestSagaShellTracesRefineModel(t *testing.T) {
+	dir := os.Getenv("ANTIC_E2E_TRACES")
 	if dir == "" {
-		t.Skip("ANTIC_SAGA_TRACES is not set (run the E2E tests with traces first)")
+		t.Skip("ANTIC_E2E_TRACES is not set (run the E2E tests with traces first)")
 	}
 	files, err := filepath.Glob(filepath.Join(dir, "*.ndjson"))
 	if err != nil || len(files) == 0 {
@@ -203,10 +203,10 @@ func TestShellTracesRefineSagaModel(t *testing.T) {
 	t.Logf("validated %d events in %d traces", total, len(files))
 }
 
-// TestTraceValidationRejects checks that the validator can fail: a shell
+// TestSagaTraceValidationRejectsWrongTraces checks that the validator can fail: a shell
 // that plans without recovering a pending journal, or that writes before
 // recording the intent, is not a behavior of the model.
-func TestTraceValidationRejects(t *testing.T) {
+func TestSagaTraceValidationRejectsWrongTraces(t *testing.T) {
 	tg := indexGraph(readTLCGraph(t, "SagaTrace.cfg"))
 	act := func(as ...string) []traceAction {
 		var out []traceAction

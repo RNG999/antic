@@ -17,52 +17,7 @@ import (
 	"github.com/RNG999/antic/internal/host/share"
 	"github.com/RNG999/antic/internal/host/systemd"
 	"github.com/RNG999/antic/internal/proto"
-	"github.com/RNG999/antic/internal/tea/operation"
 )
-
-// Start boots the guest unless it is running, and waits until it is ready.
-func (g *Guest) Start(ctx context.Context) error {
-	if err := g.requireCreated(); err != nil {
-		return err
-	}
-	return g.power(ctx, operation.OpStart)
-}
-
-// Restart reboots the guest with its current config (or boots it).
-func (g *Guest) Restart(ctx context.Context) error {
-	if err := g.requireCreated(); err != nil {
-		return err
-	}
-	return g.power(ctx, operation.OpRestart)
-}
-
-// power runs a start, stop or restart saga under the guest's lock.
-func (g *Guest) power(ctx context.Context, kind operation.OpKind) error {
-	unlock, err := g.lockAndRecover(ctx)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	draft, err := config.ReadDraft(g.Cfg, g.m.Dirs.Home)
-	if err != nil {
-		return err
-	}
-	tx, _ := g.planChange(ctx, draft)
-	if tx.op.Phase == operation.GuestOff && tx.oldProfile == "" {
-		tx.op.Phase = operation.GuestUncreated
-	}
-	tx.op.Kind, tx.op.Change = kind, operation.Change{}
-	return g.runSaga(ctx, tx, operation.MsgCommand{Op: tx.op})
-}
-
-// EnsureRunning starts the guest if needed (for "run" and "shell").
-func (g *Guest) EnsureRunning(ctx context.Context) error {
-	if up, err := g.Running(ctx); err != nil || up {
-		return err
-	}
-	g.m.logf("starting guest %s...", g.Name())
-	return g.Start(ctx)
-}
 
 // startSystem boots system with g.Cfg unless the guest is running, and
 // waits until it is ready; it stops everything it started on failure.
@@ -372,33 +327,4 @@ func (g *Guest) waitReady(ctx context.Context) error {
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-}
-
-// Stop shuts the guest down (ACPI power button, then the units).
-func (g *Guest) Stop(ctx context.Context) error {
-	if !g.Created {
-		return nil
-	}
-	return g.power(ctx, operation.OpStop)
-}
-
-// stopLocked shuts the guest down, if it runs, and stops its units.
-func (g *Guest) stopLocked(ctx context.Context) error {
-	up, err := g.Running(ctx)
-	if err != nil {
-		return err
-	}
-	if up {
-		if err := g.api().PowerButton(ctx); err != nil {
-			g.m.logf("power button for %s failed (%v); stopping its units", g.Name(), err)
-		} else {
-			for i := 0; i < 120; i++ {
-				if up, err := g.Running(ctx); err != nil || !up {
-					break
-				}
-				time.Sleep(500 * time.Millisecond)
-			}
-		}
-	}
-	return g.m.Units.Stop(ctx, g.slice())
 }

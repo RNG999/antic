@@ -122,7 +122,7 @@ func TestLoadRejects(t *testing.T) {
 	}
 }
 
-func TestEdits(t *testing.T) {
+func TestDraftEditSequence(t *testing.T) {
 	dir := t.TempDir()
 	devPath := writeGuest(t, dir, "dev", validDev)
 	writeGuest(t, dir, "lab", validLab)
@@ -136,7 +136,11 @@ func TestEdits(t *testing.T) {
 	net := "lan"
 	steps := []func(*Config) error{
 		func(c *Config) error {
-			return c.CreateGuest("new", Guest{Packages: []string{"git"}}, home)
+			d, err := c.NewGuestDraft("new", Guest{Packages: []string{"git"}}, home)
+			if err != nil {
+				return err
+			}
+			return d.Write(false)
 		},
 		func(c *Config) error {
 			return draftEdit(c, "new", func(d Draft) (Draft, error) { return d.AddShare("/home/alice/a b", true) })
@@ -158,7 +162,7 @@ func TestEdits(t *testing.T) {
 		func(c *Config) error {
 			return draftEdit(c, "dev", func(d Draft) (Draft, error) { return d.RemoveShare("/home/alice/Work") })
 		},
-		func(c *Config) error { return c.RemoveGuest("lab") },
+		func(c *Config) error { return os.Remove(c.GuestPath("lab")) },
 	}
 	for i, step := range steps {
 		if err := step(c); err != nil {
@@ -374,13 +378,13 @@ proto = "udp"
 	if len(g.Ports) != 3 {
 		t.Fatalf("expected 3 ports, got %d", len(g.Ports))
 	}
-	if !g.Ports[0].TCP() || !g.Ports[0].UDP() || g.Ports[0].ProtoStr() != "tcp,udp" {
+	if !g.Ports[0].TCP() || !g.Ports[0].UDP() || g.Ports[0].ProtoString() != "tcp,udp" {
 		t.Errorf("port 0 should be tcp,udp: %+v", g.Ports[0])
 	}
-	if !g.Ports[1].TCP() || g.Ports[1].UDP() || g.Ports[1].ProtoStr() != "tcp" {
+	if !g.Ports[1].TCP() || g.Ports[1].UDP() || g.Ports[1].ProtoString() != "tcp" {
 		t.Errorf("port 1 should be tcp: %+v", g.Ports[1])
 	}
-	if g.Ports[2].TCP() || !g.Ports[2].UDP() || g.Ports[2].ProtoStr() != "udp" {
+	if g.Ports[2].TCP() || !g.Ports[2].UDP() || g.Ports[2].ProtoString() != "udp" {
 		t.Errorf("port 2 should be udp: %+v", g.Ports[2])
 	}
 

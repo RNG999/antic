@@ -197,11 +197,11 @@ func chcSaga(journaling bool) string {
 	return b.String()
 }
 
-// TestSpacerSagaUnbounded: with a journal, the Horn clauses are satisfiable
+// TestSagaConsistentWithoutBounds: with a journal, the Horn clauses are satisfiable
 // (Spacer found an inductive invariant: P1 holds without bounds); without a
 // journal they are unsatisfiable (a crash breaks P1), which also checks that
 // the encoding can fail.
-func TestSpacerSagaUnbounded(t *testing.T) {
+func TestSagaConsistentWithoutBounds(t *testing.T) {
 	if got := z3(t, chcSaga(true)); len(got) != 1 || got[0] != "sat" {
 		t.Fatalf("with a journal: z3 says %v, want sat (an inductive invariant exists)", got)
 	}

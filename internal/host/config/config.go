@@ -83,7 +83,7 @@ func (p Port) Overlaps(q Port) bool {
 	return p.Host == q.Host && (p.TCP() && q.TCP() || p.UDP() && q.UDP())
 }
 
-func (p Port) ProtoStr() string {
+func (p Port) ProtoString() string {
 	if p.TCP() && p.UDP() {
 		return "tcp,udp"
 	}

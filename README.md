@@ -249,7 +249,7 @@ just test pbt 20000     # property-based tests with more cases
 just nightly            # larger property-based tests, then every E2E test with generated command sequences
 ```
 
-The E2E tests run antic for real (KVM, `systemd --user`) and only touch guests named `e2e-*`; run them from a plain shell, not inside `nix develop`.
+Names follow [`docs/naming.md`](docs/naming.md). The E2E tests run antic for real (KVM, `systemd --user`) and only touch guests named `e2e-*`; run them from a plain shell, not inside `nix develop`.
 
 [cloud-hypervisor]: https://www.cloudhypervisor.org/
 [virtiofsd]: https://gitlab.com/virtio-fs/virtiofsd

@@ -26,6 +26,10 @@
           packages = [
             pkgs.go
             pkgs.golangci-lint
+            # Refactoring: "gopls rename" renames by type information and
+            # goimports fixes the imports of moved code.
+            pkgs.gopls
+            pkgs.gotools
             # Formal verification: Z3 proves the egress rules equal the
             # specification; TLC model-checks the command saga (formal/).
             pkgs.z3

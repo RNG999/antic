@@ -143,7 +143,7 @@ func printStatsTable(w io.Writer, stats []guestStats) {
 	tw.Flush()
 }
 
-func (a *app) guestStats() *cobra.Command {
+func (a *app) guestStatsCmd() *cobra.Command {
 	var watch bool
 	cmd := &cobra.Command{
 		Use:               "stats [NAME]",

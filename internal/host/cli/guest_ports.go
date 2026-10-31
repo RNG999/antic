@@ -11,7 +11,7 @@ import (
 	"github.com/RNG999/antic/internal/host/config"
 )
 
-func (a *app) guestForward() *cobra.Command {
+func (a *app) guestForwardCmd() *cobra.Command {
 	var desc string
 	var proto string
 	cmd := &cobra.Command{
@@ -35,7 +35,7 @@ func (a *app) guestForward() *cobra.Command {
 	return cmd
 }
 
-func (a *app) guestUnforward() *cobra.Command {
+func (a *app) guestUnforwardCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "unforward [NAME] PORT...",
 		Short: "Remove port forwards from a guest",
@@ -47,7 +47,7 @@ func (a *app) guestUnforward() *cobra.Command {
 				if p.Description != "" {
 					d = " (" + p.Description + ")"
 				}
-				ports = append(ports, fmt.Sprintf("%d\t127.0.0.1:%d -> %d/%s%s", p.Host, p.Host, p.Guest, p.ProtoStr(), d))
+				ports = append(ports, fmt.Sprintf("%d\t127.0.0.1:%d -> %d/%s%s", p.Host, p.Host, p.Guest, p.ProtoString(), d))
 			}
 			var out []string
 			for _, p := range ports {

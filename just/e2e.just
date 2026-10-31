@@ -22,7 +22,7 @@ run filter="." *env: build && traces
 
 # Validate the last run's saga traces against formal/saga/Saga.tla
 traces:
-    ANTIC_SAGA_TRACES="{{ traces }}" {{ dev }} go test -count=1 ./internal/spec/refine -run TestShellTracesRefineSagaModel -v | grep -E 'validated|^(--- |ok|FAIL)'
+    ANTIC_E2E_TRACES="{{ traces }}" {{ dev }} go test -count=1 ./internal/spec/refine -run TestSagaShellTracesRefineModel -v | grep -E 'validated|^(--- |ok|FAIL)'
 
 # Generated command sequences (failures are shrunk and pinned in e2e/testdata/regress)
 random count="20" length="8" seed=`date +%Y%m%d`: (run "TestE2ERandomSequences" "ANTIC_E2E_RANDOM=" + count "ANTIC_E2E_LENGTH=" + length "ANTIC_E2E_SEED=" + seed)

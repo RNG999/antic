@@ -2,137 +2,15 @@ package config
 
 import (
 	"bytes"
-	"fmt"
-	"os"
 	"regexp"
-	"slices"
 	"strings"
 
 	"github.com/BurntSushi/toml"
 )
 
-// Edits operate on a single guest's file (~/.config/antic/guests/<name>.toml),
-// preserving user comments and formatting, and validating the result with
-// loadGuest before atomically replacing the file.
-
-// CreateGuest writes a new ~/.config/antic/guests/<name>.toml file.
-func (c *Config) CreateGuest(name string, g Guest, home string) error {
-	d, err := c.NewGuestDraft(name, g, home)
-	if err != nil {
-		return err
-	}
-	return d.Write(false)
-}
-
-// NewGuestDraft drafts a new ~/.config/antic/guests/<name>.toml file (a
-// draft with NewFile set).
-func (c *Config) NewGuestDraft(name string, g Guest, home string) (Draft, error) {
-	if err := os.MkdirAll(c.dir, 0o755); err != nil {
-		return Draft{}, err
-	}
-	path := c.GuestPath(name)
-	if _, err := os.Stat(path); err == nil {
-		return Draft{}, fmt.Errorf("guest config %s already exists", path)
-	}
-	d := Draft{Path: path, Name: name, NewFile: true, home: home}
-	content := []byte(strings.Join(renderGuest(g, home), "\n") + "\n")
-	after, err := d.parse(content)
-	if err != nil {
-		return Draft{}, err
-	}
-	d.New, d.After = content, after
-	return d, nil
-}
-
-// renderGuest renders the config file of a new guest.
-func renderGuest(g Guest, home string) []string {
-	var lines []string
-	if g.Description != "" {
-		lines = append(lines, "description = "+tomlString(g.Description))
-	}
-	if g.Flake != "" {
-		lines = append(lines, "flake = "+tomlString(tildePath(g.Flake, home)))
-	} else {
-		lines = append(lines, "packages = "+tomlArray(g.Packages))
-	}
-	cpus := g.CPUs
-	if cpus == 0 {
-		cpus = 2
-	}
-	mem := g.Memory
-	if mem == "" {
-		mem = "4G"
-	}
-	lines = append(lines, "", "[spec]",
-		fmt.Sprintf("cpus = %d", cpus),
-		"memory = "+tomlString(mem))
-
-	lines = append(lines, "", "[network]")
-	netMode := g.Network.Mode
-	if netMode == "" {
-		netMode = NetworkInternet
-	}
-	lines = append(lines, "mode = "+tomlString(netMode))
-	if len(g.Network.Allow) > 0 {
-		lines = append(lines, "allow = "+tomlArray(g.Network.Allow))
-	}
-	if len(g.Network.Deny) > 0 {
-		lines = append(lines, "deny = "+tomlArray(g.Network.Deny))
-	}
-	for _, p := range g.Ports {
-		lines = append(lines, "", "[[network.ports]]",
-			fmt.Sprintf("host = %d", p.Host),
-			fmt.Sprintf("guest = %d", p.Guest))
-		if p.Proto != "" && p.Proto != "tcp" {
-			lines = append(lines, "proto = "+tomlString(p.Proto))
-		}
-		if p.Description != "" {
-			lines = append(lines, "description = "+tomlString(p.Description))
-		}
-	}
-	for _, s := range g.Shares {
-		sp := s.Source
-		if sp == "" {
-			sp = s.Path
-		}
-		mode := "rw"
-		if s.ReadOnly || s.Mode == "ro" {
-			mode = "ro"
-		}
-		lines = append(lines, "", "[[shares]]",
-			"source = "+tomlString(tildePath(sp, home)),
-			"mode = "+tomlString(mode))
-	}
-	if len(g.Env) > 0 {
-		lines = append(lines, "", "[env]")
-		var keys []string
-		for k := range g.Env {
-			keys = append(keys, k)
-		}
-		slices.Sort(keys)
-		for _, k := range keys {
-			lines = append(lines, fmt.Sprintf("%s = %s", k, tomlString(g.Env[k])))
-		}
-	}
-	return lines
-}
-
-// RemoveGuest deletes ~/.config/antic/guests/<name>.toml.
-func (c *Config) RemoveGuest(name string) error {
-	path := c.GuestPath(name)
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	delete(c.Guests, name)
-	return nil
-}
-
-// ResourceUpdates specifies optional updates to a guest's cpus, memory, and network.
-type ResourceUpdates struct {
-	CPUs    *int
-	Memory  *string
-	Network *string
-}
+// Line-level editing of a guest's TOML file for the Draft edits: they keep
+// the user's comments and formatting, and the Draft loads the result before
+// anything is written.
 
 // setTableKey sets key in [tableName] table. If [tableName] does not exist,
 // it creates it before any array of tables ([[...]]).

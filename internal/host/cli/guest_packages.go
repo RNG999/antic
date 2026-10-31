@@ -10,7 +10,7 @@ import (
 	"github.com/RNG999/antic/internal/host/config"
 )
 
-func (a *app) guestInstall() *cobra.Command {
+func (a *app) guestInstallCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:               "install [NAME] PKG...",
 		Short:             "Install packages in a guest and apply",
@@ -21,12 +21,12 @@ func (a *app) guestInstall() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return a.editPkgs(c, name, pkgs, true)
+			return a.editPackages(c, name, pkgs, true)
 		},
 	}
 }
 
-func (a *app) guestUninstall() *cobra.Command {
+func (a *app) guestUninstallCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "uninstall [NAME] PKG...",
 		Short: "Uninstall packages from a guest and apply",
@@ -39,12 +39,12 @@ func (a *app) guestUninstall() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return a.editPkgs(c, name, pkgs, false)
+			return a.editPackages(c, name, pkgs, false)
 		},
 	}
 }
 
-func (a *app) editPkgs(c *cobra.Command, name string, pkgs []string, add bool) error {
+func (a *app) editPackages(c *cobra.Command, name string, pkgs []string, add bool) error {
 	g, err := a.get(c.Context(), name)
 	if err != nil {
 		return err

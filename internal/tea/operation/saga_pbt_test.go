@@ -184,7 +184,7 @@ func guestName() domain.GuestName {
 	return n
 }
 
-func TestPBTSagaConsistentUnderCrashes(t *testing.T) {
+func TestSagaConsistentUnderRandomFaultsAndCrashes(t *testing.T) {
 	var ops []operation.Op
 	for _, op := range corpus(t) {
 		if _, ok := expected(op); ok {

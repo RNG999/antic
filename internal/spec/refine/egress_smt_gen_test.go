@@ -54,7 +54,7 @@ func inAnyPrefix(d netip.Addr, ps []netip.Prefix) bool {
 	return false
 }
 
-func TestSMTGeneratorAgreesWithGo(t *testing.T) {
+func TestEgressSMTGeneratorAgreesWithGo(t *testing.T) {
 	sh, eh := testHost()
 	shape := spec.Shape(specPolicy(t, "internet", "", false, false), sh)
 	sets := map[string][]netip.Prefix{
