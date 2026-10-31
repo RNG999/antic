@@ -4,4 +4,4 @@ reports/
 research_notes/
 
 # rapid failure files
-testdata/rapid/
+**/testdata/rapid/
