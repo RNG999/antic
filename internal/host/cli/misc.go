@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"debug/elf"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -193,6 +195,9 @@ func (a *app) updateCmd() *cobra.Command {
 					}
 					return err
 				}
+				if err := runsHere(sp); err != nil {
+					return fmt.Errorf("refusing to install %s: %w", name, err)
+				}
 				dp := filepath.Join(a.dirs.Libexec, name)
 				if err := install(sp, dp); err != nil {
 					return err
@@ -206,6 +211,32 @@ func (a *app) updateCmd() *cobra.Command {
 	}
 	c.Flags().StringVar(&source, "source", "github:RNG999/antic", "flake URI or local checkout path to build from")
 	return c
+}
+
+// runsHere checks that the executable at path can run on this host outside
+// Nix: a dynamically linked one needs its program interpreter, which a
+// helper linked against a Nix store does not find where that store is not
+// at /nix (a rootless Nix).
+func runsHere(path string) error {
+	f, err := elf.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	for _, p := range f.Progs {
+		if p.Type != elf.PT_INTERP {
+			continue
+		}
+		b, err := io.ReadAll(p.Open())
+		if err != nil {
+			return err
+		}
+		interp := strings.TrimRight(string(b), "\x00")
+		if _, err := os.Stat(interp); err != nil {
+			return fmt.Errorf("it needs the program interpreter %s, which this host does not have (build it static)", interp)
+		}
+	}
+	return nil
 }
 
 func install(src, dst string) error {

@@ -59,11 +59,14 @@ in
 
   libexec = pkgs.symlinkJoin {
     name = "antic-libexec";
+    # Static, like antic itself: the helpers run outside any Nix environment
+    # (under systemd --user), where /nix/store may not exist (a rootless
+    # Nix keeps its store elsewhere), so they must not need its glibc.
     paths = [
       pkgs.pkgsStatic.cloud-hypervisor
-      pkgs.virtiofsd
-      pkgs.passt
-      pkgs.nftables
+      pkgs.pkgsStatic.virtiofsd
+      pkgs.pkgsStatic.passt
+      pkgs.pkgsStatic.nftables
     ];
     postBuild = ''
       for f in "$out/bin"/*; do
