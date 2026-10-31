@@ -187,13 +187,14 @@ func checkStep(t *testing.T, w spec.World, c spec.Cmd, outs []spec.Outcome) {
 				}
 			}
 		}
-		// A rejection is deterministic and final; environmental failures and
-		// success are the only alternatives to each other.
+		// A rejection is deterministic and final; environmental failures come
+		// before the successes, of which there may be several (a running
+		// guest may switch or restart, newSystem).
 		if o.Kind == spec.OutcomeReject && i != len(outs)-1 {
 			t.Fatalf("%#v: rejection is not the last outcome", c)
 		}
-		if o.Kind == spec.OutcomeOk && i != len(outs)-1 {
-			t.Fatalf("%#v: success is not the last outcome", c)
+		if o.Kind != spec.OutcomeOk && i > 0 && outs[i-1].Kind == spec.OutcomeOk {
+			t.Fatalf("%#v: a failure follows a success", c)
 		}
 		if o.Kind != spec.OutcomeOk && o.Exit() != 125 {
 			t.Fatalf("%#v: failure exits %d, not 125", c, o.Exit())

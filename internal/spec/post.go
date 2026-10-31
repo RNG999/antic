@@ -51,24 +51,48 @@ type step struct {
 	// risky means the element does real work that can fail for
 	// environmental reasons.
 	risky bool
+	// also are further permitted results: a running guest whose new system
+	// changes the kernel restarts instead of switching (the specification
+	// does not model kernels, so either may happen).
+	also []World
 }
 
 // fold applies elements in order and stops at the first rejection (P2).
 // Elements that already succeeded stay applied.
+// An element with alternative results (step.also) branches the fold.
 func fold[E any](w World, elems []E, f func(World, E) step) []Outcome {
 	var out []Outcome
-	cur := w
+	curs := []World{w}
 	for _, e := range elems {
-		s := f(cur, e)
-		if s.err != nil {
-			return append(out, Outcome{World: cur, Kind: OutcomeReject, Reason: s.err.Error()})
+		var next []World
+		for _, cur := range curs {
+			s := f(cur, e)
+			if s.err != nil {
+				out = append(out, Outcome{World: cur, Kind: OutcomeReject, Reason: s.err.Error()})
+				continue
+			}
+			if s.risky {
+				out = append(out, Outcome{World: cur, Kind: OutcomeEnvFail})
+			}
+			next = append(append(next, s.w), s.also...)
 		}
-		if s.risky {
-			out = append(out, Outcome{World: cur, Kind: OutcomeEnvFail})
-		}
-		cur = s.w
+		curs = next
 	}
-	return append(out, Outcome{World: cur, Kind: OutcomeOk})
+	for _, cur := range curs {
+		out = append(out, Outcome{World: cur, Kind: OutcomeOk})
+	}
+	return out
+}
+
+// newSystem is the step that installs g's (changed) config with a new
+// system: a running guest switches to it, or restarts when its kernel
+// changes.
+func newSystem(w World, g Guest) step {
+	s := step{w: w.with(g), risky: true}
+	if g.Phase == PhaseRunning {
+		s.also = []World{w.with(boot(g))}
+	}
+	return s
 }
 
 func reject(err error) step { return step{err: err} }
@@ -240,7 +264,7 @@ func postApply(w World, env Env, c CmdApply) []Outcome {
 		if g.Phase == PhaseUncreated {
 			g.Phase = PhaseOff
 		}
-		return step{w: w.with(g), risky: true}
+		return newSystem(w, g)
 	})
 }
 
@@ -278,7 +302,7 @@ func postPackages(w World, env Env, target string, items []string, add bool) []O
 		if g.Phase == PhaseUncreated {
 			g.Phase = PhaseOff
 		}
-		return step{w: w.with(g), risky: true}
+		return newSystem(w, g)
 	})
 }
 
@@ -625,8 +649,11 @@ func postEdit(w World, env Env, c CmdEdit) []Outcome {
 			return reconfigure(w, env, g, cfg)
 		}
 		g.Config = cfg
-		g.Mounts = ms
-		return step{w: w.with(g), risky: true}
+		switched := g
+		switched.Mounts = ms
+		s := newSystem(w, g)
+		s.w = w.with(switched)
+		return s
 	})
 }
 

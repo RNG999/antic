@@ -260,18 +260,25 @@ func TestCoreRefinesSpec(t *testing.T) {
 					}
 					continue
 				}
-				op := opFor(c, w, last.World)
-				status, touched := runCore(t, op)
-				if status != operation.ReportOk {
-					t.Fatalf("%#v: the specification accepts it, the core rejected %+v", c, op)
-				}
-				if want := footprint(c, w, last.World); !slices.Equal(touched, want) {
-					t.Fatalf("%#v from %v:\n  core changed %v\n  spec changed %v\n  op %+v", c, w, touched, want, op)
-				}
-				checked++
-				if k := fmt.Sprintf("%v", last.World); !seen[k] {
-					seen[k] = true
-					next = append(next, last.World)
+				// Every permitted success (a running guest may switch or,
+				// should the kernel change, restart) is one the core can do.
+				for _, o := range outs {
+					if o.Kind != spec.OutcomeOk {
+						continue
+					}
+					op := opFor(c, w, o.World)
+					status, touched := runCore(t, op)
+					if status != operation.ReportOk {
+						t.Fatalf("%#v: the specification accepts it, the core rejected %+v", c, op)
+					}
+					if want := footprint(c, w, o.World); !slices.Equal(touched, want) {
+						t.Fatalf("%#v from %v:\n  core changed %v\n  spec changed %v\n  op %+v", c, w, touched, want, op)
+					}
+					checked++
+					if k := fmt.Sprintf("%v", o.World); !seen[k] {
+						seen[k] = true
+						next = append(next, o.World)
+					}
 				}
 			}
 		}

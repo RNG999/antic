@@ -343,6 +343,9 @@ func (g *Guest) runEffect(ctx context.Context, tx *txn, jr *journalRecord, eff o
 	case operation.EffectWriteConfig:
 		return tx.draft.Write(e.To == operation.VersionOld)
 	case operation.EffectBuild:
+		if tx.newSystem != "" {
+			return nil // built ahead of the saga (prebuild)
+		}
 		sys, err := g.build(ctx, tx.draft.After)
 		tx.newSystem = sys
 		return err

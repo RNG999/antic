@@ -290,13 +290,16 @@ func TestPBTLiveSharesRefineSpec(t *testing.T) {
 			rt.Skip(err.Error())
 		}
 		outs := spec.Post(w, f.env, spec.CmdEdit{Target: "e2e-a", New: spec.RawConfig{Packages: []string{"git"}, Shares: newShares}})
-		var after spec.Guest
+		// The spec permits a switch and, should the kernel change, a
+		// restart; liveShares decides the former.
+		var afters [][]spec.Mount
 		for _, o := range outs {
 			if o.Kind == spec.OutcomeOk {
-				after, _ = o.World.Guests.Lookup(f.name)
+				g, _ := o.World.Guests.Lookup(f.name)
+				afters = append(afters, g.Mounts.All())
 			}
 		}
-		if after.Name != f.name {
+		if len(afters) == 0 {
 			rt.Fatalf("the spec rejects the edit: %+v", outs)
 		}
 		cg := &config.Guest{}
@@ -324,9 +327,9 @@ func TestPBTLiveSharesRefineSpec(t *testing.T) {
 			}
 		}
 		gotSet := types.BuildSet[spec.Mount, domain.AbsPath, spec.MountByPath](got)
-		if !slices.Equal(gotSet.All(), after.Mounts.All()) {
+		if !slices.ContainsFunc(afters, func(ms []spec.Mount) bool { return slices.Equal(gotSet.All(), ms) }) {
 			rt.Fatalf("mounts %+v, new shares %+v: the shell (live=%v) leaves %+v, the spec %+v",
-				mounts, newShares, live, gotSet.All(), after.Mounts.All())
+				mounts, newShares, live, gotSet.All(), afters)
 		}
 	})
 }

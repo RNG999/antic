@@ -21,17 +21,36 @@ import (
 	"github.com/RNG999/antic/internal/tea/operation"
 )
 
-// kernelSignature returns a deterministic signature of a NixOS system's kernel,
-// initrd, and kernel-params so the pure TEA model can compare kernel identity.
-func (g *Guest) kernelSignature(system string) domain.KernelSig {
+// bootSignature returns a deterministic signature of what a NixOS system
+// boots with: its kernel, initrd and kernel parameters, read through real
+// (the guest's store or the host's). A switch cannot change any of them.
+func bootSignature(real func(string) string, system string) domain.KernelSig {
 	if system == "" {
 		return domain.NewKernelSig("")
 	}
-	s := g.store()
-	kern, _ := os.Readlink(s.Real(system + "/kernel"))
-	initrd, _ := os.Readlink(s.Real(system + "/initrd"))
-	params, _ := os.ReadFile(s.Real(system + "/kernel-params"))
+	kern, _ := os.Readlink(real(system + "/kernel"))
+	initrd, _ := os.Readlink(real(system + "/initrd"))
+	params, _ := os.ReadFile(real(system + "/kernel-params"))
 	return domain.NewKernelSig(kern + "\x00" + initrd + "\x00" + string(params))
+}
+
+// prebuild builds the new system of a change to running guest g ahead of
+// its saga (whose Build step then has nothing to do) and plans a restart
+// instead of a switch when the new system boots differently.
+func (g *Guest) prebuild(ctx context.Context, tx *txn, bt *boot) error {
+	nix, err := g.m.nixBuilder()
+	if err != nil {
+		return err
+	}
+	if tx.newSystem, err = g.build(ctx, tx.draft.After); err != nil {
+		return err
+	}
+	if bootSignature(g.store().Real, bt.System) != bootSignature(nix.Real, tx.newSystem) {
+		g.m.logf("the new system boots another kernel; guest %s restarts to take it", g.Name())
+		tx.op.Change.Restart = operation.Changed
+		tx.op.Change.Added, tx.op.Change.Removed = operation.PathSet{}, operation.PathSet{}
+	}
+	return nil
 }
 
 // Apply builds the guest's system on the host, installs it into the guest's
@@ -60,8 +79,13 @@ func (g *Guest) applyWith(ctx context.Context, edit func(config.Draft) (config.D
 	if draft, err = edit(draft); err != nil {
 		return err
 	}
-	tx, _ := g.planChange(ctx, draft)
+	tx, bt := g.planChange(ctx, draft)
 	tx.op.Change.System = operation.Changed
+	if bt != nil && tx.op.Change.Restart == operation.Unchanged {
+		if err := g.prebuild(ctx, tx, bt); err != nil {
+			return err
+		}
+	}
 	if err := g.runChange(ctx, tx); err != nil {
 		return err
 	}
@@ -121,9 +145,6 @@ func (g *Guest) switchTo(ctx context.Context, system string) error {
 	})
 	if err != nil {
 		return err
-	}
-	if g.kernelSignature(bt.System) != g.kernelSignature(system) {
-		g.m.logf("the kernel changed; restart the guest to boot it (antic guest restart %s)", g.Name())
 	}
 	bt.System = system
 	return g.writeBoot(bt)
@@ -432,6 +453,11 @@ func (g *Guest) Edit(ctx context.Context, old, content []byte) (bool, error) {
 			}
 		} else {
 			tx.op.Change.Restart = operation.Changed
+		}
+	}
+	if bt != nil && tx.op.Change.Restart == operation.Unchanged {
+		if err := g.prebuild(ctx, tx, bt); err != nil {
+			return false, err
 		}
 	}
 	return true, g.runChange(ctx, tx)
