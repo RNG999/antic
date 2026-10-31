@@ -180,6 +180,18 @@ func (d Dirs) RestoreInstance(inst Instance) error {
 	return renameIfExists(filepath.Join(trash, "name"), filepath.Join(d.namesDir(), inst.Name))
 }
 
+// TrashConfig moves guest name's config file at path to the trash; moving
+// a file that is already there does nothing.
+func (d Dirs) TrashConfig(name, path string) error {
+	return renameIfExists(path, filepath.Join(d.TrashDir(name), "config.toml"))
+}
+
+// RestoreConfig moves a trashed config file back to path; restoring a file
+// that is not in the trash does nothing.
+func (d Dirs) RestoreConfig(name, path string) error {
+	return renameIfExists(filepath.Join(d.TrashDir(name), "config.toml"), path)
+}
+
 // EmptyTrash deletes what "guest rm" moved aside for name.
 func (d Dirs) EmptyTrash(name string) error { return removeAll(d.TrashDir(name)) }
 

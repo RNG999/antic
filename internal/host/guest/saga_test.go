@@ -20,7 +20,7 @@ func TestJournalRoundTrip(t *testing.T) {
 		draft: config.Draft{Path: "/home/u/.config/antic/guests/e2e-a.toml", Name: "e2e-a", Old: []byte("old\n"), New: []byte("new\n")},
 		modes: map[string]bool{"/home/u/A": true},
 	}
-	r := newJournal(tx)
+	r := newJournalRecord(tx)
 	r.Intents = []int{2}
 	b, err := json.Marshal(r)
 	if err != nil {

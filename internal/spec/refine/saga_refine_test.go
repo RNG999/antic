@@ -65,9 +65,9 @@ const (
 
 type versions [nRes]int
 
-// proc is one antic process; base and target are the concrete old and new
+// sagaProc is one antic process; base and target are the concrete old and new
 // artifacts its shell holds (versions here), plen its plan's length.
-type proc struct {
+type sagaProc struct {
 	lock       bool // holds the guest's lock and has not reported
 	toPlan     bool // holds the lock, recovered, and has not planned yet
 	recovering bool
@@ -85,21 +85,21 @@ type sagaJournal struct {
 	intents []domain.StepIndex
 }
 
-type host struct {
+type sagaHost struct {
 	val     versions
 	journal sagaJournal
-	procs   [nProcs]proc
+	procs   [nProcs]sagaProc
 	cmds    int
 	crashes int
 	lastOk  versions
 }
 
-func (h host) clone() host {
+func (h sagaHost) clone() sagaHost {
 	h.journal.intents = slices.Clone(h.journal.intents)
 	return h
 }
 
-func (h host) key() string {
+func (h sagaHost) key() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%v %+v %d %d %v", h.val, h.journal, h.cmds, h.crashes, h.lastOk)
 	for _, p := range h.procs {
@@ -122,7 +122,7 @@ const (
 	mutSucceedEarly        // the command counts as succeeded before its journal is cleared
 )
 
-func idle(p proc) bool { return !p.lock && p.pending == nil && !p.toPlan }
+func idle(p sagaProc) bool { return !p.lock && p.pending == nil && !p.toPlan }
 
 func guest() domain.GuestName {
 	n, _ := domain.ParseGuestName("e2e-a")
@@ -131,11 +131,11 @@ func guest() domain.GuestName {
 
 type transition struct {
 	action string // the TLA+ action, or "" for a stutter
-	next   host
+	next   sagaHost
 }
 
 // update feeds msg to process i's saga and checks the core's own predicates.
-func update(t *testing.T, p *proc, msg operation.Msg) {
+func update(t *testing.T, p *sagaProc, msg operation.Msg) {
 	t.Helper()
 	next, effects := operation.Update(p.model, msg)
 	if err := operation.Invariant(next); err != nil {
@@ -212,13 +212,13 @@ func slotAt(m operation.Model, pos int) int { return pos - firstCommitOf(m) }
 // inverse one back to the version the command (or the journal) started
 // from. operation.StepValid has checked that each effect is the planned
 // step or its inverse.
-func execute(t *testing.T, h host, i int, ok bool, mut mutant) transition {
+func execute(t *testing.T, h sagaHost, i int, ok bool, mut mutant) transition {
 	t.Helper()
 	h = h.clone()
 	p := &h.procs[i]
 	stage := p.model.Stage
 	if _, report := p.pending.(operation.EffectReport); report {
-		h.procs[i] = proc{base: p.base, target: p.target}
+		h.procs[i] = sagaProc{base: p.base, target: p.target}
 		return transition{"Release", h}
 	}
 	act := sagaAction(stage, ok)
@@ -268,16 +268,16 @@ func execute(t *testing.T, h host, i int, ok bool, mut mutant) transition {
 	update(t, p, operation.MsgResult{Status: status, Reason: domain.NewText("injected")})
 	if p.recovering && p.model.Stage == operation.StageRecovered {
 		// Recovered: the process now plans its own command.
-		h.procs[i] = proc{lock: true, toPlan: true, base: p.base, target: p.target}
+		h.procs[i] = sagaProc{lock: true, toPlan: true, base: p.base, target: p.target}
 	}
 	return transition{act, h}
 }
 
 // successors enumerates every transition of h.
-func successors(t *testing.T, h host, mut mutant) []transition {
+func successors(t *testing.T, h sagaHost, mut mutant) []transition {
 	t.Helper()
 	var out []transition
-	held := slices.ContainsFunc(h.procs[:], func(p proc) bool { return p.lock })
+	held := slices.ContainsFunc(h.procs[:], func(p sagaProc) bool { return p.lock })
 	for i, p := range h.procs {
 		switch {
 		case idle(p):
@@ -287,7 +287,7 @@ func successors(t *testing.T, h host, mut mutant) []transition {
 			n := h.clone()
 			q := &n.procs[i]
 			n.cmds++
-			*q = proc{lock: true, base: p.base, target: n.cmds}
+			*q = sagaProc{lock: true, base: p.base, target: n.cmds}
 			if n.journal.open {
 				last := types.None[domain.StepIndex]()
 				intents := n.journal.intents
@@ -326,7 +326,7 @@ func successors(t *testing.T, h host, mut mutant) []transition {
 		if !idle(p) && h.crashes < maxCrashes {
 			n := h.clone()
 			n.crashes++
-			n.procs[i] = proc{base: p.base, target: p.target}
+			n.procs[i] = sagaProc{base: p.base, target: p.target}
 			out = append(out, transition{"Crash", n})
 		}
 	}
@@ -402,7 +402,7 @@ func procList() string {
 }
 
 // alpha is the abstraction function from the Go host to a Saga.tla state.
-func alpha(h host) string {
+func alpha(h sagaHost) string {
 	var names, pcs, bases, targets, todos, dones, plens []string
 	lock := "None"
 	for i, p := range h.procs {
@@ -721,14 +721,14 @@ func readTLCGraph(t *testing.T, cfg string) tlcGraph {
 // compare explores the Go host and returns the refinement discrepancies.
 func compare(t *testing.T, g tlcGraph, mut mutant) (problems []string, states, transitions int) {
 	t.Helper()
-	start := host{}
+	start := sagaHost{}
 	if a := alpha(start); a != g.init {
 		return []string{fmt.Sprintf("initial states differ:\n go  %s\n tla %s", a, g.init)}, 0, 0
 	}
 	seen := map[string]bool{start.key(): true}
 	reached := map[string]bool{alpha(start): true}
 	covered := map[[3]string]bool{}
-	queue := []host{start}
+	queue := []sagaHost{start}
 	for len(queue) > 0 && len(problems) < 5 {
 		h := queue[0]
 		queue = queue[1:]

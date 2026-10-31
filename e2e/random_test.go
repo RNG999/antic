@@ -164,7 +164,6 @@ func TestE2ERegressions(t *testing.T) {
 		t.Skip("no pinned sequences in testdata/regress")
 	}
 	h := newHarness(t)
-	h.base = h.model
 	for _, f := range files {
 		t.Run(filepath.Base(f), func(t *testing.T) {
 			h.t = t
@@ -187,7 +186,6 @@ func TestE2ERandomSequences(t *testing.T) {
 		t.Skip("ANTIC_E2E_RANDOM is not set")
 	}
 	h := newHarness(t)
-	h.base = h.model
 	seed := uint64(envInt("ANTIC_E2E_SEED", int(rand.Uint32())))
 	length := envInt("ANTIC_E2E_LENGTH", 8)
 	for i := range n {

@@ -30,7 +30,7 @@ import (
 // and the next to take the lock recovers its journal. The traces are kept
 // for trace validation against the model (internal/spec/refine).
 
-type started struct {
+type concurrentRun struct {
 	cmd    spec.Cmd
 	crash  bool
 	pid    int
@@ -39,15 +39,15 @@ type started struct {
 }
 
 // runConcurrently starts every command at once and waits for all of them.
-func (h *harness) runConcurrently(cmds []spec.Cmd, crashAt int, trace string) ([]started, error) {
-	out := make([]started, len(cmds))
+func (h *harness) runConcurrently(cmds []spec.Cmd, crashAt int, trace string) ([]concurrentRun, error) {
+	out := make([]concurrentRun, len(cmds))
 	var wg sync.WaitGroup
 	var startErr error
 	var mu sync.Mutex
 	for i, c := range cmds {
 		args, env := h.render(c)
 		env = append(env, "ANTIC_SAGA_TRACE="+trace, "ANTIC_LOCK_TIMEOUT=15m")
-		out[i] = started{cmd: c}
+		out[i] = concurrentRun{cmd: c}
 		if i == 0 && crashAt > 0 {
 			env = append(env, fmt.Sprintf("ANTIC_SAGA_CRASH_AFTER=%d", crashAt))
 			out[i].crash = true
@@ -110,8 +110,8 @@ func lockOrder(path, guest string) ([]int, error) {
 
 // linearize applies the commands in lock order to the model and returns the
 // worlds the specification permits after them, or why none is.
-func (h *harness) linearize(runs []started, order []int) ([]spec.World, error) {
-	byPID := map[int]started{}
+func (h *harness) linearize(runs []concurrentRun, order []int) ([]spec.World, error) {
+	byPID := map[int]concurrentRun{}
 	for _, r := range runs {
 		byPID[r.pid] = r
 	}
@@ -149,7 +149,6 @@ func (h *harness) linearize(runs []started, order []int) ([]spec.World, error) {
 
 func TestE2EConcurrentCommands(t *testing.T) {
 	h := newHarness(t)
-	base := h.model
 	traces := os.Getenv("ANTIC_E2E_TRACES")
 	if traces == "" {
 		traces = t.TempDir()
@@ -174,7 +173,7 @@ func TestE2EConcurrentCommands(t *testing.T) {
 		t.Run(fmt.Sprintf("round-%d", round), func(t *testing.T) {
 			h.t = t
 			h.cleanup()
-			h.model = base
+			h.model = h.base
 			defer h.cleanup()
 			if msg := h.step(create(a)); msg != "" {
 				t.Fatal(msg)

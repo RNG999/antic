@@ -51,7 +51,7 @@ type journalRecord struct {
 		Runtime []string             `json:"runtime,omitempty"`
 	} `json:"op"`
 	ConfigPath string          `json:"config_path"`
-	NoConfig   bool            `json:"no_config,omitempty"` // the old config is "no file"
+	NewFile    bool            `json:"new_file,omitempty"` // the command creates the config file
 	InstanceID string          `json:"instance_id,omitempty"`
 	OldConfig  []byte          `json:"old_config"`
 	NewConfig  []byte          `json:"new_config"`
@@ -82,12 +82,12 @@ func pathSet(ps []string) (operation.PathSet, error) {
 	return types.BuildSet[domain.AbsPath, domain.AbsPath, domain.AbsPathOrder](out), nil
 }
 
-func newJournal(tx *txn) journalRecord {
+func newJournalRecord(tx *txn) journalRecord {
 	var r journalRecord
 	r.Op.Kind, r.Op.Phase = tx.op.Kind, tx.op.Phase
 	r.Op.Config, r.Op.System, r.Op.Restart = tx.op.Change.Config, tx.op.Change.System, tx.op.Change.Restart
 	r.Op.Added, r.Op.Removed, r.Op.Runtime = pathStrings(tx.op.Change.Added), pathStrings(tx.op.Change.Removed), pathStrings(tx.op.Runtime)
-	r.ConfigPath, r.OldConfig, r.NewConfig, r.NoConfig = tx.draft.Path, tx.draft.Old, tx.draft.New, tx.draft.Absent
+	r.ConfigPath, r.OldConfig, r.NewConfig, r.NewFile = tx.draft.Path, tx.draft.Old, tx.draft.New, tx.draft.NewFile
 	r.Modes = tx.modes
 	r.NewSystem, r.OldProfile, r.OldBooted = tx.newSystem, tx.oldProfile, tx.oldBooted
 	return r
@@ -217,7 +217,7 @@ func (g *Guest) recoverJournal(ctx context.Context, r journalRecord) error {
 	if r.InstanceID != "" && !g.Created {
 		g.Inst, g.Created = g.m.Dirs.InstanceOf(g.Name(), r.InstanceID), true
 	}
-	tx.draft = config.RestoreDraft(r.ConfigPath, g.Name(), g.m.Dirs.Home, r.NoConfig, r.OldConfig, r.NewConfig)
+	tx.draft = config.RestoreDraft(r.ConfigPath, g.Name(), g.m.Dirs.Home, r.NewFile, r.OldConfig, r.NewConfig)
 	last := types.None[domain.StepIndex]()
 	if n := len(r.Intents); n > 0 {
 		i, err := domain.ParseStepIndex(r.Intents[n-1])
@@ -298,7 +298,7 @@ func (g *Guest) runSaga(ctx context.Context, tx *txn, msg operation.Msg) error {
 		if injectedFailure(effects[0], seen) {
 			err = fmt.Errorf("injected failure (%s)", failEnv)
 		} else {
-			err = g.execute(ctx, tx, &jr, effects[0])
+			err = g.runEffect(ctx, tx, &jr, effects[0])
 		}
 		g.trace(traceEvent{Event: "step", Stage: m.Stage, OK: err == nil})
 		if crashAfter > 0 && executed+1 == crashAfter {
@@ -311,11 +311,11 @@ func (g *Guest) runSaga(ctx context.Context, tx *txn, msg operation.Msg) error {
 	}
 }
 
-// execute runs one effect.
-func (g *Guest) execute(ctx context.Context, tx *txn, jr *journalRecord, eff operation.Effect) error {
+// runEffect runs one effect.
+func (g *Guest) runEffect(ctx context.Context, tx *txn, jr *journalRecord, eff operation.Effect) error {
 	switch e := eff.(type) {
 	case operation.EffectJournalBegin:
-		*jr = newJournal(tx)
+		*jr = newJournalRecord(tx)
 		jr.InstanceID = g.Inst.ID
 		return g.writeJournal(*jr)
 	case operation.EffectJournalIntent:
@@ -357,12 +357,12 @@ func (g *Guest) execute(ctx context.Context, tx *txn, jr *journalRecord, eff ope
 		if e.What == operation.TrashInstance {
 			return g.m.Dirs.TrashInstance(g.Inst)
 		}
-		return renameIfExists(g.m.Config.GuestPath(g.Name()), filepath.Join(g.m.Dirs.TrashDir(g.Name()), "config.toml"))
+		return g.m.Dirs.TrashConfig(g.Name(), g.m.Config.GuestPath(g.Name()))
 	case operation.EffectRestore:
 		if e.What == operation.TrashInstance {
 			return g.m.Dirs.RestoreInstance(g.Inst)
 		}
-		return renameIfExists(filepath.Join(g.m.Dirs.TrashDir(g.Name()), "config.toml"), g.m.Config.GuestPath(g.Name()))
+		return g.m.Dirs.RestoreConfig(g.Name(), g.m.Config.GuestPath(g.Name()))
 	case operation.EffectEmptyTrash:
 		if err := g.m.Dirs.EmptyTrash(g.Name()); err != nil {
 			return err
@@ -471,16 +471,6 @@ func (g *Guest) checkPorts(ctx context.Context, tx *txn) error {
 		}
 	}
 	return nil
-}
-
-func renameIfExists(from, to string) error {
-	if _, err := os.Lstat(from); errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(to), 0o700); err != nil {
-		return err
-	}
-	return os.Rename(from, to)
 }
 
 // RecoverOrphan undoes a command a crashed process left in the journal of

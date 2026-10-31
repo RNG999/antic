@@ -24,8 +24,8 @@ type Draft struct {
 	Name string
 	Old  []byte
 	New  []byte
-	// Absent means Old is "no file" (a guest being created).
-	Absent bool
+	// NewFile means the draft creates the file: Old is "no file".
+	NewFile bool
 	// Before and After are Old and New parsed.
 	Before *Guest
 	After  *Guest
@@ -33,14 +33,14 @@ type Draft struct {
 }
 
 // Changed reports whether the draft rewrites the file.
-func (d Draft) Changed() bool { return d.Absent || !bytes.Equal(d.Old, d.New) }
+func (d Draft) Changed() bool { return d.NewFile || !bytes.Equal(d.Old, d.New) }
 
 // Write atomically writes New, or Old when old is set. Writing either twice
 // is harmless (compensation and recovery may repeat it).
 func (d Draft) Write(old bool) error {
 	content := d.New
 	if old {
-		if d.Absent {
+		if d.NewFile {
 			if err := os.Remove(d.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return err
 			}
@@ -72,9 +72,9 @@ func ReadDraft(g *Guest, home string) (Draft, error) {
 
 // RestoreDraft rebuilds the draft a journal recorded. A content that no
 // longer loads (or an absent file) has no parsed guest.
-func RestoreDraft(path, name, home string, absent bool, old, new []byte) Draft {
-	d := Draft{Path: path, Name: name, Old: old, New: new, Absent: absent, home: home}
-	if !absent {
+func RestoreDraft(path, name, home string, newFile bool, old, new []byte) Draft {
+	d := Draft{Path: path, Name: name, Old: old, New: new, NewFile: newFile, home: home}
+	if !newFile {
 		d.Before, _ = d.parse(old)
 	}
 	d.After, _ = d.parse(new)

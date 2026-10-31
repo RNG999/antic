@@ -62,7 +62,7 @@ func (g *Guest) applyWith(ctx context.Context, edit func(config.Draft) (config.D
 	}
 	tx, _ := g.planChange(ctx, draft)
 	tx.op.Change.System = operation.Changed
-	if err := g.commit(ctx, tx); err != nil {
+	if err := g.runChange(ctx, tx); err != nil {
 		return err
 	}
 	switch tx.op.Phase {
@@ -164,7 +164,7 @@ func (m *Manager) Create(ctx context.Context, name string, spec config.Guest, fl
 		}
 	} else {
 		var err error
-		if draft, err = m.Config.DraftCreate(name, spec, m.Dirs.Home); err != nil {
+		if draft, err = m.Config.NewGuestDraft(name, spec, m.Dirs.Home); err != nil {
 			return nil, err
 		}
 		inst, ok, err := m.Dirs.Lookup(name)
@@ -180,16 +180,16 @@ func (m *Manager) Create(ctx context.Context, name string, spec config.Guest, fl
 	defer unlock()
 	tx, _ := g.planChange(ctx, draft)
 	switch {
-	case draft.Absent && tx.oldProfile == "":
+	case draft.NewFile && tx.oldProfile == "":
 		tx.op.Phase = operation.GuestAbsent
 	case tx.oldProfile == "":
 		tx.op.Phase = operation.GuestUncreated
 	}
 	tx.op.Kind, tx.op.Change = operation.OpCreate, operation.Change{}
-	if err := g.commit(ctx, tx); err != nil {
+	if err := g.runChange(ctx, tx); err != nil {
 		return nil, err
 	}
-	if draft.Absent {
+	if draft.NewFile {
 		m.logf("created %s", draft.Path)
 	}
 	return g, nil
@@ -359,8 +359,8 @@ func (g *Guest) planChange(ctx context.Context, draft config.Draft) (*txn, *boot
 	return tx, bt
 }
 
-// commit runs the saga of tx and adopts the config it leaves.
-func (g *Guest) commit(ctx context.Context, tx *txn) error {
+// runChange runs the saga of tx and adopts the config it leaves.
+func (g *Guest) runChange(ctx context.Context, tx *txn) error {
 	err := g.runSaga(ctx, tx, operation.MsgCommand{Op: tx.op})
 	g.Cfg = tx.draft.After
 	if err != nil {
@@ -390,7 +390,7 @@ func (g *Guest) Reconfigure(ctx context.Context, edit func(config.Draft) (config
 		return false, nil
 	}
 	tx, _ := g.planChange(ctx, draft)
-	return true, g.commit(ctx, tx)
+	return true, g.runChange(ctx, tx)
 }
 
 // Edit replaces the guest's config file with content, provided it still
@@ -434,7 +434,7 @@ func (g *Guest) Edit(ctx context.Context, old, content []byte) (bool, error) {
 			tx.op.Change.Restart = operation.Changed
 		}
 	}
-	return true, g.commit(ctx, tx)
+	return true, g.runChange(ctx, tx)
 }
 
 // liveShares returns the shares a running guest with boot record bt must
@@ -527,7 +527,7 @@ func (g *Guest) AddShare(ctx context.Context, path string, ro bool) (string, boo
 			tx.op.Change.Added, _ = pathSet([]string{real})
 		}
 	}
-	if err := g.commit(ctx, tx); err != nil {
+	if err := g.runChange(ctx, tx); err != nil {
 		return "", false, err
 	}
 	return real, true, nil
@@ -600,7 +600,7 @@ func (g *Guest) RemoveShare(ctx context.Context, path string) (string, bool, err
 			}
 		}
 	}
-	if err := g.commit(ctx, tx); err != nil {
+	if err := g.runChange(ctx, tx); err != nil {
 		return "", false, err
 	}
 	return real, lingers, nil

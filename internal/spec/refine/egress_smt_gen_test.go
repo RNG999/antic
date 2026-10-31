@@ -10,7 +10,7 @@ import (
 	"github.com/RNG999/antic/internal/tea/egress"
 )
 
-// The differential check of the SMT generator of smt_test.go: the Z3 proof
+// The differential check of the SMT generator of egress_smt_test.go: the Z3 proof
 // is only as good as the translation of Go data into SMT-LIB, so on
 // concrete inputs the generated formulas must agree with the Go code they
 // stand for: smtIn with netip.Prefix.Contains (at and around every prefix

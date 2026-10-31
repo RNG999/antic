@@ -51,7 +51,7 @@ type harness struct {
 	edit  string // EDITOR script
 	env   spec.Env
 	model spec.World
-	base  spec.World // the world without e2e guests (runSequence starts from it)
+	base  spec.World // the world without e2e guests, where every test starts
 	// editorArgs runs EDITOR as "sh SCRIPT" (an EDITOR value with arguments, D12).
 	editorArgs bool
 	busy       net.Listener
@@ -78,6 +78,7 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	h.model = spec.World{External: obs.external}
+	h.base = h.model
 	t.Cleanup(h.cleanup)
 	return h
 }
@@ -184,10 +185,15 @@ func (h *harness) fixtureEnv() spec.Env {
 // antic runs the binary under test in the fixture directory without a
 // terminal and returns its stdout and exit status.
 func (h *harness) antic(extraEnv []string, args ...string) (stdout string, code int, stderr string) {
+	return h.anticIn(h.work, extraEnv, args...)
+}
+
+// anticIn runs antic in dir (where it looks for a project antic.toml).
+func (h *harness) anticIn(dir string, extraEnv []string, args ...string) (stdout string, code int, stderr string) {
 	ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, h.bin, args...)
-	cmd.Dir = h.work
+	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), extraEnv...)
 	if dir := os.Getenv("ANTIC_E2E_TRACES"); dir != "" {
 		// Every command's saga events, for trace validation against

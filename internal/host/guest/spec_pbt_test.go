@@ -31,7 +31,7 @@ type fixture struct {
 	name domain.GuestName
 }
 
-func abs(t interface{ Fatal(...any) }, p string) domain.AbsPath {
+func mustAbs(t interface{ Fatal(...any) }, p string) domain.AbsPath {
 	a, err := domain.ParseAbsPath(p)
 	if err != nil {
 		t.Fatal(err)
@@ -55,9 +55,9 @@ func newFixture(t *testing.T) fixture {
 		t.Fatal(err)
 	}
 	env := spec.Env{
-		Home:  abs(t, home),
-		Dirs:  []domain.AbsPath{abs(t, home+"/A"), abs(t, home+"/A/sub"), abs(t, home+"/B")},
-		Links: []spec.Link{{From: abs(t, home+"/LB"), To: abs(t, home+"/B")}},
+		Home:  mustAbs(t, home),
+		Dirs:  []domain.AbsPath{mustAbs(t, home+"/A"), mustAbs(t, home+"/A/sub"), mustAbs(t, home+"/B")},
+		Links: []spec.Link{{From: mustAbs(t, home+"/LB"), To: mustAbs(t, home+"/B")}},
 	}
 	name, _ := domain.ParseGuestName("e2e-a")
 	return fixture{home: home, env: env, name: name}
@@ -267,7 +267,7 @@ func TestPBTLiveSharesRefineSpec(t *testing.T) {
 			mounts = append(mounts, spec.Mount{Path: s.Path, Mode: s.Mode, Origin: origin})
 		}
 		for _, p := range paths {
-			pa := abs(rt, p)
+			pa := mustAbs(rt, p)
 			if base.Shares.Contains(pa) || !rapid.Bool().Draw(rt, "lingering") {
 				continue
 			}
@@ -315,7 +315,7 @@ func TestPBTLiveSharesRefineSpec(t *testing.T) {
 				}
 			}
 			for _, p := range added {
-				s, _ := next.Shares.Lookup(abs(rt, p))
+				s, _ := next.Shares.Lookup(mustAbs(rt, p))
 				got = append(got, spec.Mount{Path: s.Path, Mode: s.Mode, Origin: spec.OriginRuntime})
 			}
 		} else {

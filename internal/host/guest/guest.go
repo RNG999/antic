@@ -171,9 +171,9 @@ func (m *Manager) All() ([]*Guest, error) {
 	return out, nil
 }
 
-// Broken returns guest name whose config file does not load, so that it
-// can still be stopped and removed (D17).
-func (m *Manager) Broken(name string) (*Guest, error) {
+// GetUnloadable returns guest name whose config file does not load, so
+// that it can still be stopped and removed (D17).
+func (m *Manager) GetUnloadable(name string) (*Guest, error) {
 	if m.Config.Errors[name] == nil {
 		return nil, fmt.Errorf("no such guest %q", name)
 	}

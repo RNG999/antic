@@ -290,7 +290,7 @@ func (a *app) guestRm() *cobra.Command {
 				}
 				g, err := a.mgr.Get(n)
 				if err != nil && a.cfg.Errors[n] != nil {
-					g, err = a.mgr.Broken(n)
+					g, err = a.mgr.GetUnloadable(n)
 				}
 				if err != nil {
 					return err

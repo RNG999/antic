@@ -600,7 +600,7 @@ cd e2e && ANTIC_E2E_BIN=~/.cache/antic-e2e/bin/antic ~/.cache/antic-e2e/e2e.test
 | 継ぎ目 | 方法 | 状態 |
 |---|---|---|
 | `spec` ↔ `tea/operation` | 足跡の精緻化（`TestCoreRefinesSpec`） | 既存 |
-| egress データ ↔ `spec.Reach` | Z3（`smt_test.go`） | 既存 |
+| egress データ ↔ `spec.Reach` | Z3（`egress_smt_test.go`） | 既存 |
 | `Saga.tla` ↔ `tea/operation` | TLC 状態グラフの再生（`TestGoCoreRefinesSagaModel`） | **今回** |
 | `Saga.tla` ↔ CHC | 手で書き写したもの（規則は action ごとに対応させた） | 検査は推奨 3 で行う予定 |
 | コア ↔ 殻 | NDJSON トレースと TLC による照合 | 段階 5 で行う |
@@ -651,7 +651,7 @@ cd e2e && ANTIC_E2E_BIN=~/.cache/antic-e2e/bin/antic ~/.cache/antic-e2e/e2e.test
 | C | set / forward / unforward | D5、D7 | `Draft.SetResources` / `AddPorts`（他のゲストとの衝突を拒否） / `RemovePorts`。再起動が要るかは `config.NeedsRestart` で判定する。`CheckPorts` は、自分が既に転送しているポートを除いて調べる |
 | D | start / stop / restart | D8（P2） | `power` が `OpStart` / `OpStop` / `OpRestart` をコアに渡す。`eachGuest` は最初の失敗で中断する |
 | E | edit | D9、D10、D12 | 一時ファイルの写しを `sh -c '$EDITOR "$@"'` で編集させる（`VISUAL` を優先する）。終了後、ロックの下で元の内容と変わっていないことを確かめてから置き換える。Running なら `liveShares` でホットプラグできるかを判定し、できなければ再起動する |
-| F | create / rm | D3、ゴミ箱 | `DraftCreate`（旧版は「ファイルなし」）。rm は Trash（設定とインスタンス）→ EmptyTrash（finalize）。設定がゴミ箱に入ったまま中断したゲストは、`RecoverOrphan` で戻す |
+| F | create / rm | D3、ゴミ箱 | `NewGuestDraft`（`NewFile`：旧版は「ファイルなし」）。rm は Trash（設定とインスタンス）→ EmptyTrash（finalize）。設定がゴミ箱に入ったまま中断したゲストは、`RecoverOrphan` で戻す |
 
 E2E には故障注入のフックを置いた。`ANTIC_SAGA_CRASH_AFTER=k` を付けると、k 番目の effect を実行した直後に exit 137 で終わる。`TestE2ECrashRecovery` は、実機上でクラッシュ → 回復 → 観測が元の状態と一致することを確かめる。
 

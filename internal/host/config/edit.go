@@ -17,16 +17,16 @@ import (
 
 // CreateGuest writes a new ~/.config/antic/guests/<name>.toml file.
 func (c *Config) CreateGuest(name string, g Guest, home string) error {
-	d, err := c.DraftCreate(name, g, home)
+	d, err := c.NewGuestDraft(name, g, home)
 	if err != nil {
 		return err
 	}
 	return d.Write(false)
 }
 
-// DraftCreate drafts a new ~/.config/antic/guests/<name>.toml file (Old is
-// "no file").
-func (c *Config) DraftCreate(name string, g Guest, home string) (Draft, error) {
+// NewGuestDraft drafts a new ~/.config/antic/guests/<name>.toml file (a
+// draft with NewFile set).
+func (c *Config) NewGuestDraft(name string, g Guest, home string) (Draft, error) {
 	if err := os.MkdirAll(c.dir, 0o755); err != nil {
 		return Draft{}, err
 	}
@@ -34,7 +34,7 @@ func (c *Config) DraftCreate(name string, g Guest, home string) (Draft, error) {
 	if _, err := os.Stat(path); err == nil {
 		return Draft{}, fmt.Errorf("guest config %s already exists", path)
 	}
-	d := Draft{Path: path, Name: name, Absent: true, home: home}
+	d := Draft{Path: path, Name: name, NewFile: true, home: home}
 	content := []byte(strings.Join(renderGuest(g, home), "\n") + "\n")
 	after, err := d.parse(content)
 	if err != nil {

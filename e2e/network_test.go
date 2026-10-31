@@ -74,7 +74,6 @@ func (h *harness) probeResolve(name, host string) []netip.Addr {
 
 func TestE2ENetworkReach(t *testing.T) {
 	h := newHarness(t)
-	base := h.model
 	host, lan := hostNet(t)
 	public := netip.MustParseAddr("1.1.1.1")
 	conn, err := net.DialTimeout("tcp", "1.1.1.1:443", 5e9)
@@ -121,7 +120,7 @@ func TestE2ENetworkReach(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			h.t = t
 			h.cleanup()
-			h.model = base
+			h.model = h.base
 			defer h.cleanup()
 			h.fixtureConfig(b, spec.RawConfig{Packages: []string{"git"}, Memory: "1G", Network: c.net})
 			for _, cmd := range []spec.Cmd{spec.CmdApply{Target: b}, spec.CmdStart{Names: []string{b}}} {

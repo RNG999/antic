@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// The check that the hand-written Horn clauses (chc_test.go) cover
+// The check that the hand-written Horn clauses (saga_chc_test.go) cover
 // Saga.tla: every edge of TLC's state graph for SagaJournal.cfg, abstracted
 // to the lock holder as the clauses are, must be an instance of a rule of
 // chcModel(true) between the same phases with the same action. Spacer's

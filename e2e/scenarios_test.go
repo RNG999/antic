@@ -289,12 +289,11 @@ func scenarios() []scenario {
 
 func TestE2E(t *testing.T) {
 	h := newHarness(t)
-	base := h.model
 	for _, sc := range scenarios() {
 		t.Run(sc.name, func(t *testing.T) {
 			h.t = t
 			h.cleanup()
-			h.model, h.editorArgs = base, sc.editorArgs
+			h.model, h.editorArgs = h.base, sc.editorArgs
 			defer h.cleanup()
 			if sc.setup != nil {
 				sc.setup(h)
@@ -326,7 +325,6 @@ func TestE2E(t *testing.T) {
 // observed exactly as before the killed command; the command then works.
 func TestE2ECrashRecovery(t *testing.T) {
 	h := newHarness(t)
-	base := h.model
 	for _, c := range []struct {
 		name   string
 		cmd    func(*harness) spec.Cmd
@@ -345,7 +343,7 @@ func TestE2ECrashRecovery(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			h.t = t
 			h.cleanup()
-			h.model = base
+			h.model = h.base
 			defer h.cleanup()
 			if msg := h.step(create(a)); msg != "" {
 				t.Fatal(msg)
@@ -374,7 +372,6 @@ func TestE2ECrashRecovery(t *testing.T) {
 // the system it runs and the system its profile installs (D1).
 func TestE2EFaultInjection(t *testing.T) {
 	h := newHarness(t)
-	base := h.model
 	for _, c := range []struct {
 		name string
 		cmd  func(*harness) spec.Cmd
@@ -396,7 +393,7 @@ func TestE2EFaultInjection(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			h.t = t
 			h.cleanup()
-			h.model = base
+			h.model = h.base
 			defer h.cleanup()
 			if msg := h.step(create(a)); msg != "" {
 				t.Fatal(msg)
@@ -447,7 +444,6 @@ func TestE2EFaultInjection(t *testing.T) {
 // after which its name can be created again (D17; outside the model).
 func TestE2EBrokenConfig(t *testing.T) {
 	h := newHarness(t)
-	base := h.model
 	defer h.cleanup()
 	if msg := h.step(create(a)); msg != "" {
 		t.Fatal(msg)
@@ -466,7 +462,7 @@ func TestE2EBrokenConfig(t *testing.T) {
 	if out, _, _ := h.antic(nil, "guest", "ls", "-q"); strings.Contains(out, a) {
 		t.Fatalf("guest %s is still listed after rm:\n%s", a, out)
 	}
-	h.model = base
+	h.model = h.base
 	if msg := h.step(create(a)); msg != "" {
 		t.Fatalf("creating the name again: %s", msg)
 	}

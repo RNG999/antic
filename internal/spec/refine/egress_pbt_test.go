@@ -12,7 +12,7 @@ import (
 )
 
 // Property-based checks of the egress rules beyond the fixed universe of
-// egress_test.go and the free-Boolean abstraction of smt_test.go: random
+// egress_test.go and the free-Boolean abstraction of egress_smt_test.go: random
 // hosts, random policies (any CIDR lists the config accepts) and random
 // destinations, biased to the edges of every prefix involved.
 //
