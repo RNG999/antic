@@ -77,6 +77,12 @@ func (p Port) UDP() bool {
 	}
 }
 
+// Overlaps reports whether p and q forward the same host port for a
+// protocol they share.
+func (p Port) Overlaps(q Port) bool {
+	return p.Host == q.Host && (p.TCP() && q.TCP() || p.UDP() && q.UDP())
+}
+
 func (p Port) ProtoStr() string {
 	if p.TCP() && p.UDP() {
 		return "tcp,udp"

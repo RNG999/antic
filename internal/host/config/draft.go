@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -238,10 +239,8 @@ func (d Draft) AddPorts(ports []Port, others []Port) (Draft, error) {
 		if slices.ContainsFunc(have, same) {
 			continue
 		}
-		for _, q := range append(slices.Clone(have), others...) {
-			if q.Host == p.Host && ((p.TCP() && q.TCP()) || (p.UDP() && q.UDP())) {
-				return d, fmt.Errorf("host port %d is already forwarded", p.Host)
-			}
+		if err := PortsConflict([]Port{p}, map[string][]Port{"": have, "another guest": others}); err != nil {
+			return d, err
 		}
 		have, add = append(have, p), append(add, p)
 	}
@@ -262,6 +261,42 @@ func (d Draft) AddPorts(ports []Port, others []Port) (Draft, error) {
 		}
 		return lines, nil
 	})
+}
+
+// PortsConflict reports a forward in ports whose host port (and protocol)
+// a forward in taken uses already; taken maps each owner ("" for the guest
+// itself) to its forwards.
+func PortsConflict(ports []Port, taken map[string][]Port) error {
+	owners := slices.Sorted(maps.Keys(taken))
+	for _, p := range ports {
+		for _, owner := range owners {
+			for _, q := range taken[owner] {
+				if !p.Overlaps(q) {
+					continue
+				}
+				if owner == "" {
+					return fmt.Errorf("host port %d is already forwarded", p.Host)
+				}
+				return fmt.Errorf("host port %d is already forwarded by %s", p.Host, owner)
+			}
+		}
+	}
+	return nil
+}
+
+// NewPorts are the forwards of d's new config that its old config does not
+// have (all of them for a new file).
+func (d Draft) NewPorts() []Port {
+	var out []Port
+	for _, p := range d.After.Ports {
+		had := d.Before != nil && slices.ContainsFunc(d.Before.Ports, func(q Port) bool {
+			return q.Host == p.Host && q.ProtoStr() == p.ProtoStr()
+		})
+		if !had {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // RemovePorts removes the forwards of the given host ports.

@@ -199,6 +199,11 @@ func (m *Manager) Create(ctx context.Context, name string, spec config.Guest, fl
 		return nil, err
 	}
 	defer unlock()
+	release, err := g.claimPorts(draft)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	tx, _ := g.planChange(ctx, draft)
 	switch {
 	case draft.NewFile && tx.oldProfile == "":
@@ -410,6 +415,11 @@ func (g *Guest) Reconfigure(ctx context.Context, edit func(config.Draft) (config
 	if !draft.Changed() {
 		return false, nil
 	}
+	release, err := g.claimPorts(draft)
+	if err != nil {
+		return false, err
+	}
+	defer release()
 	tx, _ := g.planChange(ctx, draft)
 	return true, g.runChange(ctx, tx)
 }
@@ -439,6 +449,11 @@ func (g *Guest) Edit(ctx context.Context, old, content []byte) (bool, error) {
 	if !draft.Changed() {
 		return false, nil
 	}
+	release, err := g.claimPorts(draft)
+	if err != nil {
+		return false, err
+	}
+	defer release()
 	tx, bt := g.planChange(ctx, draft)
 	if tx.op.Phase != operation.GuestUncreated {
 		tx.op.Change.System = operation.Changed
@@ -493,6 +508,40 @@ func liveShares(bt *boot, c *config.Guest) (added, removed []string, live bool) 
 		added = append(added, p)
 	}
 	return added, removed, true
+}
+
+// claimPorts checks the host ports draft gives g that it did not have
+// against every other guest's config as it is on disk now (D25), and holds
+// the host-wide ports lock until the returned release, so that two guests
+// cannot claim the same port at once (D26). It takes the lock only for a
+// change that adds ports, and always after the guest's own lock.
+func (g *Guest) claimPorts(draft config.Draft) (func(), error) {
+	added := draft.NewPorts()
+	if len(added) == 0 {
+		return func() {}, nil
+	}
+	release, err := g.m.Dirs.LockWithReason("ports", "host port allocation")
+	if err != nil {
+		return nil, err
+	}
+	taken := map[string][]config.Port{}
+	for name, c := range g.m.Config.Guests {
+		taken["guest "+name] = c.Ports
+	}
+	now, err := config.Load(g.m.Config.Dir(), g.m.Dirs.Home)
+	if err != nil {
+		release()
+		return nil, err
+	}
+	for name, c := range now.Guests {
+		taken["guest "+name] = c.Ports
+	}
+	delete(taken, "guest "+g.Name())
+	if err := config.PortsConflict(added, taken); err != nil {
+		release()
+		return nil, err
+	}
+	return release, nil
 }
 
 // OtherPorts are the port forwards configured on every other guest.
