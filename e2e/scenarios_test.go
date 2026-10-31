@@ -65,7 +65,7 @@ func kind(o spec.Outcome) string {
 
 // scenario is a command sequence. A scenario with known set reproduces a
 // documented divergence of the current implementation from the
-// specification (docs/design/e2e-spec.md §9) with its last command: it is
+// specification (docs/design/spec.md §9) with its last command: it is
 // skipped while that command still diverges, and fails once the divergence
 // is fixed so the marker gets removed.
 type scenario struct {

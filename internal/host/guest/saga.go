@@ -23,7 +23,7 @@ import (
 
 // The imperative shell of internal/tea/operation: a command plans an
 // operation.Op and a txn of concrete artifacts under the guest's lock, and
-// runSaga executes the core's effects one at a time (docs/design/e2e-spec.md
+// runSaga executes the core's effects one at a time (docs/design/spec.md
 // §11). Inverse effects are idempotent ("ensure Old"), as recovery requires.
 
 // txn holds the concrete old and new artifacts of one command.

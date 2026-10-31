@@ -3,7 +3,7 @@
 // that change nothing, a Commit phase whose every step records its inverse,
 // a Compensate phase that undoes committed steps in reverse when one fails,
 // and a Finalize phase for irreversible clean-up after every commit succeeded
-// (docs/design/e2e-spec.md §11).
+// (docs/design/spec.md §11).
 //
 // The core reasons about the resources a command touches (config file,
 // instance, system profile, running system, power state, hot-plugged

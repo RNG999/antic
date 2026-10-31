@@ -222,7 +222,7 @@ For full NixOS configuration beyond a package list, set `flake = "/path/to/flake
 
 ## Development & Verification
 
-The top-level behavior is a state-transition specification (`internal/spec`, see `docs/design/e2e-spec.md`) that serves as the test oracle; the command saga is model-checked (`formal/`). The tasks are in the `justfile` (`just` lists them). Install `just` on the host: a rootless Nix cannot start `nix develop` from inside another Nix shell, and the E2E tests must run outside it.
+The top-level behavior is a state-transition specification (`internal/spec`, see `docs/design/spec.md`) that serves as the test oracle; the command saga is model-checked (`formal/`). The tasks are in the `justfile` (`just` lists them). Install `just` on the host: a rootless Nix cannot start `nix develop` from inside another Nix shell, and the E2E tests must run outside it.
 
 ```bash
 just quick     # every change: nix flake check (unit tests, property-based tests, Z3, TLC, Spacer) and lint

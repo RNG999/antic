@@ -2,7 +2,7 @@
 
 // Package e2e runs antic for real (this host, this user, real systemd, KVM,
 // Nix and cloud-hypervisor; no mocks) and checks every command against the
-// top-level specification in internal/spec. See docs/design/e2e-spec.md.
+// top-level specification in internal/spec. See docs/design/spec.md.
 //
 // Build static binaries inside the dev shell, then run them from the user's
 // ordinary environment: with a rootless Nix store, "nix develop" runs in a

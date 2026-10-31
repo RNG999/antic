@@ -2,7 +2,7 @@
 // machine over the user-visible World of guests, written independently of
 // the implementation (internal/tea, internal/host) so that it can serve as the
 // test oracle of the E2E suite and of refinement checks. See
-// docs/design/e2e-spec.md.
+// docs/design/spec.md.
 //
 // Under the desired semantics (atomic commands that take effect immediately),
 // a created guest's installed and booted systems, resources, and port forwards
