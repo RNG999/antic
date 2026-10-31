@@ -763,7 +763,7 @@ arch テストの型検査は、標準ライブラリを `importer.Default()`（
 
 - **仕様**：仕様はカーネルをモデル化しないので、`newSystem` は稼働中のゲストについて 2 つの成功を許す。switch した結果と、再起動した結果（マウントは設定の boot マウント）である。`step.also` を加え、`fold` は世界の集合を分岐させるようにした。L0 の形の検査は「成功は末尾に連続して並ぶ」に改めた。コアの精緻化検査は、すべての成功についてコアの足跡を確かめる（再起動の経路も含む）。
 - **殻**：稼働中のゲストのシステムが変わる場合、saga の前にロックの下でビルドする（`prebuild`）。そのうえで、ゲストストアにある現行システムと、ホストストアにある新システムの起動署名（`bootSignature`：kernel、initrd、kernel-params）を比べ、異なれば `Change.Restart` を立てる。saga の Build ステップは、ビルド済みなら何もしない。
-- **検査**：`TestBootSignature`（3 要素のどれが違っても検出する）、L0、コアの精緻化、殻と仕様の差分 PBT（ライブ反映はどちらかの成功に一致すればよい）。実機でカーネルを変える E2E は、組み込みゲストでは再現できないため置いていない。
+- **検査**：`TestBootSignature`（3 要素のどれが違っても検出する）、L0、コアの精緻化、殻と仕様の差分 PBT（ライブ反映はどちらかの成功に一致すればよい）。実機の E2E は `TestE2EFlakeKernelChange`（flake ゲストを使う）で行う。この E2E は、組み込みゲストに加えて flake ゲストの検査も兼ねる。
 
 ### セッション（ps / kill）
 
@@ -775,4 +775,14 @@ arch テストの型検査は、標準ライブラリを `importer.Default()`（
 - 観測（α_obs）：Running のゲストについて `guest ps --json` を読む。ハーネスの `spawn` は `antic run NAME -T -- CMD` を背景で起動し、`ps` に現れるまで待つ。`kill` は `ps` からユニット名を引いて渡し、セッションが消えるまで待つ。
 
 E2E の `sessions` シナリオは、2 つの spawn、kill、存在しないセッションへの kill（拒否）、ライブ mount（セッションは残る）、set による再起動（終わる）、stop（終わる）、停止中への spawn（起動する）、restart（終わる）を、実機で確かめる。D20 と D21 は、このシナリオを動かして見つかった。
+
+#### flake ゲストとカーネル変更の E2E（`e2e/flake_test.go`）
+
+`~/e2e-work/F` に、antic のゲストモジュールを使う最小の flake を置く。`boot.kernelParams` は引数で変えられるようにしてある。モジュールの入力には、push 済みのブランチ（`ANTIC_E2E_FLAKE_REF`、既定は `github:RNG999/antic/feat/e2e-spec`）を使う。ローカルのパスを入力にすると、別のゲスト（formal）が共有しているディレクトリの中の入力になるため、antic がビルドを拒否する。
+
+1. `guest create` を実行し、`/proc/cmdline` に flake のパラメータが入っていることを確かめる。次に A を mount し、`sleep` のセッションを残す。
+2. 起動内容が同じ `apply`：再起動しない。セッションと共有は残る（switch）。
+3. `kernelParams` を変えた `apply`：再起動のメッセージが出る。`/proc/cmdline` が新しいパラメータになり、セッションは終わり、A は引き続きマウントされている。
+
+結果は PASS（約 45 秒）。以前の振る舞い（ユーザーランドだけ switch してメッセージを出す）では、手順 3 の `/proc/cmdline` の検査で失敗する。
 
