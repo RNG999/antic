@@ -3,7 +3,7 @@
 
 name = "formal"
 description = "antic formal verification environment"
-flake = "nix/formal#formal"
+flake = "~/.config/antic/flakes/formal#formal"
 
 [spec]
 cpus = 4
