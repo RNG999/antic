@@ -111,8 +111,8 @@ func (r journalRecord) txnOf(name string) (*txn, error) {
 		newSystem: r.NewSystem, oldProfile: r.OldProfile, oldBooted: r.OldBooted}, nil
 }
 
-func (g *Guest) journalPath() string {
-	return domain.JoinAbsPath(g.m.Dirs.StateRoot, "journals", g.Name()+".json").Get()
+func (g *Guest) journalPath() domain.AbsPath {
+	return domain.JoinAbsPath(g.m.Dirs.StateRoot, "journals", g.Name()+".json")
 }
 
 func (g *Guest) writeJournal(r journalRecord) error {
@@ -121,10 +121,10 @@ func (g *Guest) writeJournal(r journalRecord) error {
 		return err
 	}
 	path := g.journalPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path.Get()), 0o700); err != nil {
 		return err
 	}
-	tmp := path + ".new"
+	tmp := path.Get() + ".new"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
@@ -133,12 +133,12 @@ func (g *Guest) writeJournal(r journalRecord) error {
 	if err := errors.Join(werr, f.Sync(), f.Close()); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	return os.Rename(tmp, path.Get())
 }
 
 func (g *Guest) readJournal() (journalRecord, bool, error) {
 	var r journalRecord
-	b, err := os.ReadFile(g.journalPath())
+	b, err := os.ReadFile(g.journalPath().Get())
 	if errors.Is(err, os.ErrNotExist) {
 		return r, false, nil
 	}
@@ -146,7 +146,7 @@ func (g *Guest) readJournal() (journalRecord, bool, error) {
 		return r, false, err
 	}
 	if err := json.Unmarshal(b, &r); err != nil {
-		return r, false, fmt.Errorf("%s: %w", g.journalPath(), err)
+		return r, false, fmt.Errorf("%s: %w", g.journalPath().Get(), err)
 	}
 	return r, true, nil
 }
@@ -326,7 +326,7 @@ func (g *Guest) runEffect(ctx context.Context, tx *txn, jr *journalRecord, eff o
 		jr.Intents = append(jr.Intents, e.Pos.Get())
 		return g.writeJournal(*jr)
 	case operation.EffectJournalClear:
-		if err := os.Remove(g.journalPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := os.Remove(g.journalPath().Get()); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		return nil

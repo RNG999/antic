@@ -22,13 +22,15 @@
 ### フェーズ 2 以降
 
 - `ps` / `kill`
+- `shell`
+- `guest ls` / `guest show` / `guest stats` / `guest logs` / `doctor` / `cache ls`（`CmdInspect`）
 - flake ゲスト（カーネル変更を伴うもの）
 - 並行実行
 - 故障注入
 
 ### 対象外
 
-`doctor`、`update`、`completion`、`skill`、`cache`、`logs`、`shell`
+`update`、`cache rm`、`completion`、`skill`（`update` と `cache rm` は利用者のホスト環境自体を書き換えるためモデル外。§13 参照）
 
 ## 1. 仕様全体を貫く原則
 
@@ -284,47 +286,44 @@ P1 により、失敗時の結果は常に「`World` 不変かつ `Fail`」で�
 
 ## 7. 生成と網羅
 
-- 生成には rapid の状態機械を使う。約 20% は Reject 条件を満たす入力を意図的に生成する。
+- 純粋なコードに対する性質ベースのテスト（L1）には `pgregory.net/rapid` を使う。実機 E2E（L2）の系列生成には、再実行時間の制約から `e2e/random_test.go` の種固定ランダムウォークと貪欲な縮小器を使う（§13 段階 6 参照）。約 20% は Reject 条件を満たす入力を意図的に生成する。
 - 宇宙は小さく固定する。
   - ゲスト名：`e2e-a`、`e2e-b`
   - パッケージ集合：`{git}` と `{git, jq}`
   - ディレクトリ：`$HOME/e2e-work/` の下に、`A`（`.git/` と `CLAUDE.md` を置く）、`B`、`A/sub`、`B` を指す symlink を用意する。deny の対象として `~/.ssh` も使う
   - ポート：ほかと衝突しにくい高位番号を 2 つ
 - 網羅の目安として、`(Phase × Cmd)` の遷移ペアを記録する。
-- 失敗した系列は rapid で縮小し、txtar（testscript）形式で回帰テストとして固定する。
+- 失敗した系列は縮小し、txtar 形式（`e2e/testdata/regress/seed-N.txtar`）で回帰テストとして固定する。
 - **L1**：`spec` の性質テストと、§8 の refinement 検査。KVM なしで動く。
 - **L2**：実機で動かす。1 系列の長さは 10〜20 とする。
 
 ## 8. 実装モデルとの関係（L1a）
 
-§11 のコマンド単位コア `tea/operation` を作った後は、α_model の定義域は `operation.Model` になる。`operation.Model` は `Config` と lifecycle を内包するので、`World` 全体に写せる。以下は、`lifecycle` 部分の射影である。
+§11 のコマンド単位コア `internal/tea/operation` とトップレベル仕様 `internal/spec` の関係は、`internal/spec/refine` で検査する（§13 段階 3・段階 5 参照）：
 
-α_model は `lifecycle.Model` を `Inst` に射影する。`Installed` は `Installed` に、`Boot` は Running / Off に写す（`Candidate` は無視する）。`Shares[].Mount` は `Mounts` に写す。
+1. **足跡の精緻化（`TestCoreRefinesSpec`）**：仕様の遷移ごとに、コアの計画（`operation.Plan`）が触る資源（足跡）と、仕様が変化させる状態成分が一致すること、およびフェーズで決まる拒否が一致することを検査する。
+2. **形式モデルとの双模倣（`TestGoCoreRefinesSagaModel`）**：`formal/saga/Saga.tla` の TLC 状態グラフと `operation.Update` の全遷移が stutter を除いて等価であることを検査する（旧 `internal/tea/lifecycle` は廃止・削除済み）。
 
-この射影のもとで、次を検査する。
+## 9. 望ましい仕様と初期実装の差分（すべて修正済み）
 
-`α_model(next) == α_model(prev) ∨ α_model(next) ∈ Post(α_model(prev), cmd)`
-
-## 9. 望ましい仕様と現状の差分（実装側の課題）
-
-| # | 現状 | 望ましい仕様 | 根拠 |
+| # | 初期実装の挙動 | 望ましい仕様 | 解決箇所 |
 |---|---|---|---|
-| D1 | switch に失敗してロールバックした後も、システムプロファイルは新しい構成のまま残る | P1：`Installed` も元に戻す | `ops.go:204`、`nixbuild.go:121` |
-| D2 | **（E2E で訂正）** コードを読んだ段階では「何も変わらず exit 0」と予想していた。実機では exit 125 で拒否され、設定も変わらず、観測上は仕様どおりだった。ただし拒否の理由は「同じパスの共有が重なる」で、本来の理由（mode の不一致）とは違う。設定ファイル上の `~/` 表記とフルパスを比べているため、既存の共有を同一パスと判定できていない（D16 を参照） | Reject する（P3）。理由のメッセージも正しくする | `edit.go:118` の `AddShare` |
-| D3 | 設定が既にある状態で `create` にフラグを渡すと、フラグを黙って無視する | Reject する（P3） | `ops.go` の `Manager.Create` |
-| D4 | lifecycle の Model から、boot 時にマウントした共有が消える | lifecycle 側で `Config` と `Mounts` を分ける | `MsgUnmountShare` |
-| D5 | `install`、`set`、`forward` が失敗しても、設定ファイルの変更は残る | P1：設定ファイルを書き戻す。再起動に失敗したら、旧設定で再起動し直す（例外なし）。2 相（prepare → commit）の構造に改める | `pkg.go`、`port.go`、`guestcmd.go` の `set` |
-| D6 | 未作成ゲストへの `stop` は成功する | 望ましい仕様と同じ（P4） | — |
-| D7 | 他のゲストと host port が衝突しても、`forward` の時点では検出しない | Reject する（Invariant 3） | `edit.go` の `AddPort`。`start` の時点で検出しているかは要確認 |
-| D8 | `start` / `stop` / `restart` は全ゲストを処理してからエラーを返し、`mount` / `rm` は最初の失敗で中断する | P2：すべて最初の失敗で中断する | `guestcmd.go` の `eachGuest` |
-| D9 | `guest edit` は、Running 中でも再起動しない。新しい設定は次回の start まで反映されず、`Config` と `Running` が食い違ったままになる | `set` と同じく、即時に反映する（Invariant 4 を守る） | `misc.go:19` |
-| D10 | `guest edit` で不正な設定を保存すると、ファイルは不正なまま残り、exit 125 になる | P1：元の内容に書き戻す | `misc.go:19` |
-| D12 | `EDITOR` に引数付きの値（例: `omarchy-launch-editor --inline`）が入っていると、値全体を 1 つの実行ファイル名として扱い、起動に失敗する | git などと同じ慣習に合わせ、`sh -c '$EDITOR "$@"' sh <path>` の形で起動する（`VISUAL` も考慮する） | `misc.go:38` の `exec.Command(editor, g.Path)` |
-| D11 | **（段階 4 で修正済み）** `allow` が 1 件でもあると、許可リスト方式になる（2 つの意味が重なっている） | 案 B：`default` を明示させる。省略して `allow` を書いた設定は、移行エラーにする | `network.go` の `nftRules` |
+| D1 | **（修正済み）** switch に失敗してロールバックした後も、システムプロファイルは新しい構成のまま残る | P1：`Installed` も元に戻す | `internal/host/guest/saga.go`、`internal/host/nixbuild/nixbuild.go` |
+| D2 | **（修正済み・E2E で訂正）** コードを読んだ段階では「何も変わらず exit 0」と予想していた。実機では exit 125 で拒否され、設定も変わらず、観測上は仕様どおりだった。ただし拒否の理由は「同じパスの共有が重なる」で、本来の理由（mode の不一致）とは違う。設定ファイル上の `~/` 表記とフルパスを比べているため、既存の共有を同一パスと判定できていない（D16 を参照） | Reject する（P3）。理由のメッセージも正しくする | `internal/host/config/draft.go` の `AddShare` |
+| D3 | **（修正済み）** 設定が既にある状態で `create` にフラグを渡すと、フラグを黙って無視する | Reject する（P3） | `internal/host/guest/ops.go` の `Manager.Create` |
+| D4 | **（修正済み）** lifecycle の Model から、boot 時にマウントした共有が消える | `Shares` と `Inspect` を設定と boot 記録から直接求める（`tea/lifecycle` は削除） | `internal/host/guest/ops.go` |
+| D5 | **（修正済み）** `install`、`set`、`forward` が失敗しても、設定ファイルの変更は残る | P1：設定ファイルを書き戻す。再起動に失敗したら、旧設定で再起動し直す（例外なし）。2 相（prepare → commit）の構造に改める | `internal/host/config/draft.go`、`internal/host/guest/saga.go` |
+| D6 | **（修正済み）** 未作成ゲストへの `stop` は成功する | 望ましい仕様と同じ（P4） | — |
+| D7 | **（修正済み）** 他のゲストと host port が衝突しても、`forward` の時点では検出しない | Reject する（Invariant 3） | `internal/host/config/draft.go` の `AddPorts` |
+| D8 | **（修正済み）** `start` / `stop` / `restart` は全ゲストを処理してからエラーを返し、`mount` / `rm` は最初の失敗で中断する | P2：すべて最初の失敗で中断する | `internal/host/cli/guestcmd.go` の `eachGuest` |
+| D9 | **（修正済み）** `guest edit` は、Running 中でも再起動しない。新しい設定は次回の start まで反映されず、`Config` と `Running` が食い違ったままになる | `set` と同じく、即時に反映する（Invariant 4 を守る） | `internal/host/cli/misc.go`、`internal/host/guest/ops.go` の `Edit` |
+| D10 | **（修正済み）** `guest edit` で不正な設定を保存すると、ファイルは不正なまま残り、exit 125 になる | P1：元の内容に書き戻す | `internal/host/cli/misc.go`、`internal/host/guest/ops.go` の `Edit` |
+| D12 | **（修正済み）** `EDITOR` に引数付きの値（例: `omarchy-launch-editor --inline`）が入っていると、値全体を 1 つの実行ファイル名として扱い、起動に失敗する | git などと同じ慣習に合わせ、`sh -c '$EDITOR "$@"' sh <path>` の形で起動する（`VISUAL` も考慮する） | `internal/host/cli/misc.go` の `runEditor` |
+| D11 | **（段階 4 で修正済み）** `allow` が 1 件でもあると、許可リスト方式になる（2 つの意味が重なっている） | 案 B：`default` を明示させる。省略して `allow` を書いた設定は、移行エラーにする | `internal/host/guest/network.go` の `nftRules` |
 | D13 | **（修正済み）** `start` / `restart` / `create` が成功を返した直後の数秒間、`antic run` が `vsock port 22: EOF`（exit 125）で失敗する。エージェントの Hello が返す `Ready`（`antic-ready.target`）が、セッションソケットの待ち受け開始より先に成立していた | `start` が成功したら、`run` は直ちに使える | `nix/module.nix` の `antic-ready.target` を `antic-session.socket` の後に並べ、`Wants` にも加えた。E2E の最初の実行で検出 |
 | D14 | **（修正済み）** 現在の HEAD では、標準構成のゲストをビルドできない。`4616b9b` でエージェントが `internal/domain`、`internal/tea`、`internal/types` を import するようになったが、`embed.go` の `//go:embed` が更新されていなかった | ビルドできる | `embed.go` に追記した。エージェントが import する全パッケージが埋め込まれているかを検査する `TestGuestFSHasAgentImports` を追加した |
 | D15 | **（修正済み）** `/nix` のないホストで rootless Nix を使っていると、ゲストを起動できない。共有ユニットとネットワークユニットが `Failed to set up mount namespacing: /nix: Permission denied` で失敗する（`b2012a0` 以降） | 起動できる | `Manager.confine` は、ホストに `/nix` がある場合にだけ Nix ルートを `/nix` に bind するよう改めた。`/nix` がなく、`/nix/store` にリンクされた libexec ヘルパーを使う構成も、後に直した。`antic update` が入れる libexec のヘルパー（virtiofsd、passt/pasta、nft）を、cloud-hypervisor と同じく静的ビルド（`pkgsStatic`）にした。さらに `antic update` は、このホストにないプログラムインタプリタを要するヘルパーを入れずに止まる（`runsHere`）。rootless Nix のホストで `antic update` を実行した後、`guest start` が `/nix: Permission denied` で失敗したことで見つかった |
-| D16 | 同じ mode で同じディレクトリを再度 `mount` すると、冪等にならず exit 125 になる。原因は D2 と同じで、パス表記の比較が誤っている | P4：何もせずに exit 0 | `edit.go:118` の `AddShare` |
+| D16 | **（修正済み）** 同じ mode で同じディレクトリを再度 `mount` すると、冪等にならず exit 125 になる。原因は D2 と同じで、パス表記の比較が誤っている | P4：何もせずに exit 0 | `internal/host/config/draft.go` の `AddShare` |
 | D17 | **（修正済み）** 設定ファイルが読み込めないゲストは `guest rm` で削除できない。インスタンスの状態ディレクトリが残り、同じ名前で `create` すると「already exists」になる。さらに、壊れた設定ファイルが 1 つでもあると、`guest ls` が全体として失敗する | モデルの外の状態（手で壊した設定）だが、`rm` と `ls` は壊れた設定にも耐えるべき | `Manager.Get`、`guest ls`。E2E の片付けでは、最小限の有効な設定で上書きしてから `rm` することで回避している |
 | D18 | **（修正済み）** PTY なしの `antic run` が、ゲストの起動直後などに exit 0 のまま出力を失うことがある（E2E の障害注入テストで、CPU 数プローブが空文字列を返して検出） | コマンドの出力は欠けない（P3） | ゲスト側の `internal/guest/session` が、出力のパイプを読み切る前に `cmd.Wait` を呼んでいた。`os/exec` の規約では、Wait はパイプを閉じるので未読の出力を失う。PTY なしの場合は、読み切ってから Wait するように改めた |
 | D19 | **（修正済み）** `guest set --cpus 0` が成功を返し、ゲストは 2 CPU になる。設定ファイルの `cpus = 0` は「既定値」を意味するため。殻と仕様の差分 PBT で検出した | Reject する（P3） | `Draft.SetResources` は、指定された値を `domain.ParseCPUCount` で検査するようにした |

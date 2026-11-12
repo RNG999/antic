@@ -150,11 +150,13 @@ func (g *Guest) switchTo(ctx context.Context, system string) error {
 	return g.writeBoot(bt)
 }
 
-func (m *Manager) allSharePaths() []string {
-	var out []string
+func (m *Manager) allSharePaths() []domain.AbsPath {
+	var out []domain.AbsPath
 	for _, c := range m.Config.Guests {
 		for _, s := range c.Shares {
-			out = append(out, s.Path)
+			if abs, err := domain.ParseAbsPath(config.RealPath(s.Path)); err == nil {
+				out = append(out, abs)
+			}
 		}
 	}
 	return out
@@ -246,10 +248,10 @@ func (g *Guest) Remove(ctx context.Context) error {
 
 // Dir returns the current directory, which must lie in one of the guest's
 // shares (the guest sees them at the same path).
-func (g *Guest) Dir(ctx context.Context) (string, error) {
+func (g *Guest) Dir(ctx context.Context) (domain.AbsPath, error) {
 	wd, err := os.Getwd()
 	if err != nil {
-		return "", err
+		return domain.AbsPath{}, err
 	}
 	wd = config.RealPath(wd)
 	var shares []string
@@ -266,10 +268,10 @@ func (g *Guest) Dir(ctx context.Context) (string, error) {
 	}
 	for _, s := range shares {
 		if wd == s || strings.HasPrefix(wd, s+"/") {
-			return wd, nil
+			return domain.ParseAbsPath(wd)
 		}
 	}
-	return "", fmt.Errorf("%s is not inside a directory shared with guest %s (%s); see \"antic share add\"",
+	return domain.AbsPath{}, fmt.Errorf("%s is not inside a directory shared with guest %s (%s); see \"antic guest mount\"",
 		wd, g.Name(), strings.Join(shares, ", "))
 }
 
@@ -715,4 +717,4 @@ func (g *Guest) Journal(ctx context.Context, units []string, lines int, line fun
 }
 
 // Console is the guest's console log.
-func (g *Guest) Console() string { return g.Inst.Console().Get() }
+func (g *Guest) Console() domain.AbsPath { return g.Inst.Console() }

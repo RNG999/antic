@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/RNG999/antic/internal/domain"
+	"github.com/RNG999/antic/internal/types"
 	"golang.org/x/sys/unix"
 )
 
@@ -337,10 +338,9 @@ func (d Dirs) lockNamed(ctx context.Context, lockKey, description string, _ time
 		return nil, err
 	}
 
-	holder := readLockPID(lockFile)
 	holderMsg := "another process"
-	if holder != "" {
-		holderMsg = holder
+	if pid, ok := readLockPID(lockFile).Get(); ok {
+		holderMsg = fmt.Sprintf("PID %d", pid.Get())
 	}
 	fmt.Fprintf(os.Stderr, "antic: waiting for lock on %s (held by %s)...\n", description, holderMsg)
 
@@ -353,8 +353,8 @@ func (d Dirs) lockNamed(ctx context.Context, lockKey, description string, _ time
 		case <-ctx.Done():
 			f.Close()
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				if h := readLockPID(lockFile); h != "" {
-					holderMsg = h
+				if pid, ok := readLockPID(lockFile).Get(); ok {
+					holderMsg = fmt.Sprintf("PID %d", pid.Get())
 				}
 				elapsed := time.Since(start).Round(time.Millisecond)
 				if elapsed >= time.Second {
@@ -391,18 +391,18 @@ func lockCleanup(f *os.File) func() {
 	}
 }
 
-func readLockPID(lockFile domain.AbsPath) string {
+func readLockPID(lockFile domain.AbsPath) types.Option[domain.ProcessID] {
 	b, err := os.ReadFile(lockFile.Get())
 	if err != nil {
-		return ""
+		return types.None[domain.ProcessID]()
 	}
-	s := strings.TrimSpace(string(b))
-	if s == "" {
-		return ""
+	rawPID, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return types.None[domain.ProcessID]()
 	}
-	pid, err := strconv.Atoi(s)
-	if err == nil && pid > 0 {
-		return fmt.Sprintf("PID %d", pid)
+	pid, err := domain.ParseProcessID(rawPID)
+	if err != nil {
+		return types.None[domain.ProcessID]()
 	}
-	return s
+	return types.Some(pid)
 }

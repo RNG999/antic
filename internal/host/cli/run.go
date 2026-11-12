@@ -106,7 +106,7 @@ func (a *app) execIn(ctx context.Context, g *guest.Guest, workdir string, argv [
 	dir := workdir
 	if dir == "" {
 		if d, err := g.Dir(ctx); err == nil {
-			dir = d
+			dir = d.Get()
 		} else {
 			dir = "~"
 		}

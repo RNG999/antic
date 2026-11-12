@@ -152,11 +152,11 @@ func hostNetworks() []*net.IPNet {
 // it.
 func (g *Guest) startNet(ctx context.Context) (string, error) {
 	dir := g.sockDir("net")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(dir.Get(), 0o700); err != nil {
 		return "", err
 	}
-	sock := filepath.Join(dir, "passt.sock")
-	rules := filepath.Join(dir, "egress.nft")
+	sock := filepath.Join(dir.Get(), "passt.sock")
+	rules := filepath.Join(dir.Get(), "egress.nft")
 	ports := g.Cfg.Ports
 	if err := os.WriteFile(rules, []byte(nftRules(g.Cfg, hostNetworks())), 0o600); err != nil {
 		return "", err
@@ -165,14 +165,14 @@ func (g *Guest) startNet(ctx context.Context) (string, error) {
 	helper := []string{g.m.Bins.Self, egress.HelperCmd, "--nft", g.m.Bins.NFT, "--rules", rules}
 	if hasFilter(g.Cfg) {
 		if len(g.Cfg.AllowDomains) > 0 {
-			domains := filepath.Join(dir, "allow-domains")
+			domains := filepath.Join(dir.Get(), "allow-domains")
 			if err := os.WriteFile(domains, []byte(strings.Join(g.Cfg.AllowDomains, "\n")+"\n"), 0o600); err != nil {
 				return "", err
 			}
 			helper = append(helper, "--allow-domains", domains)
 		}
 		if len(g.Cfg.DenyDomains) > 0 {
-			denyFile := filepath.Join(dir, "deny-domains")
+			denyFile := filepath.Join(dir.Get(), "deny-domains")
 			if err := os.WriteFile(denyFile, []byte(strings.Join(g.Cfg.DenyDomains, "\n")+"\n"), 0o600); err != nil {
 				return "", err
 			}
@@ -230,6 +230,6 @@ func (g *Guest) startNet(ctx context.Context) (string, error) {
 	// No NoNewPrivileges: it stops passt from setting up its own user
 	// namespace inside pasta's. passt and pasta drop privileges and apply
 	// seccomp themselves.
-	props := g.m.confine([]string{dir}, []string{g.m.Bins.Pasta, g.m.Bins.Passt, g.m.Bins.NFT, g.m.Bins.Self})
+	props := g.m.confine([]string{dir.Get()}, []string{g.m.Bins.Pasta, g.m.Bins.Passt, g.m.Bins.NFT, g.m.Bins.Self})
 	return sock, g.helper(ctx, g.netUnit(), "antic network for "+g.Name(), props, sock, argv...)
 }

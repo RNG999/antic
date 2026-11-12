@@ -10,7 +10,7 @@ description: >-
 
 `antic` runs CLI commands inside lightweight, isolated NixOS virtual machines ("guests") backed by `cloud-hypervisor` and KVM. Host directories shared with a guest appear at the **exact same absolute path** inside the guest.
 
-Every guest-targeted command requires the explicit guest `<name>` (omitting it is a syntax error). Run `antic guest ls` to see available guests.
+When only **one** guest is defined, the `[<name>]` argument is optional across commands (except `guest create` and `guest rm`, which always require an explicit guest `<name>`). When multiple guests exist, specify `<name>` explicitly. Run `antic guest ls` to see available guests.
 
 ## 1. Running Commands
 

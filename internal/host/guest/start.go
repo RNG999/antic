@@ -183,11 +183,11 @@ func (g *Guest) helper(ctx context.Context, name, desc string, props []systemd.P
 // change them. Returns the vhost-user socket.
 func (g *Guest) startShare(ctx context.Context, tag string, path domain.AbsPath, ro bool, guestID int) (string, error) {
 	dir := g.sockDir(tag)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(dir.Get(), 0o700); err != nil {
 		return "", err
 	}
-	sock := filepath.Join(dir, "fs.sock")
-	rw, roPaths := []string{dir}, []string{}
+	sock := filepath.Join(dir.Get(), "fs.sock")
+	rw, roPaths := []string{dir.Get()}, []string{}
 	if ro {
 		roPaths = append(roPaths, path.Get())
 	} else {

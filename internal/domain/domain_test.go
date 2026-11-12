@@ -188,4 +188,14 @@ func TestResultMonadicCombinators(t *testing.T) {
 	if zeroJoined := domain.JoinAbsPath(domain.AbsPath{}, "sub"); zeroJoined.Valid() {
 		t.Fatalf("expected zero base to return invalid AbsPath, got %q", zeroJoined.Get())
 	}
+
+	pidRes := domain.TryParseProcessID(1234)
+	if !pidRes.IsOk() || pidRes.ValueOr(domain.ProcessID{}).Get() != 1234 {
+		t.Fatalf("expected valid ProcessID 1234, got %v", pidRes)
+	}
+	for _, badPID := range []int{0, -1, -999} {
+		if domain.TryParseProcessID(badPID).IsOk() {
+			t.Fatalf("expected bad PID %d to fail TryParseProcessID", badPID)
+		}
+	}
 }

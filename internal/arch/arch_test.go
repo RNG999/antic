@@ -1493,14 +1493,14 @@ func (imp *repoImporter) Import(path string) (*types.Package, error) {
 	if pkg, ok := imp.cache[path]; ok {
 		return pkg, nil
 	}
-	if strings.HasPrefix(path, modulePrefix+"/") {
-		rel := strings.TrimPrefix(path, modulePrefix+"/")
+	if path == modulePrefix || strings.HasPrefix(path, modulePrefix+"/") {
+		rel := strings.TrimPrefix(strings.TrimPrefix(path, modulePrefix), "/")
 		fset := token.NewFileSet()
 		files := parseNonTestFiles(imp.t, fset, filepath.Join(imp.root, rel))
-		conf := types.Config{Importer: imp}
-		pkg, err := conf.Check(path, fset, files, nil)
-		if err != nil {
-			return nil, err
+		conf := types.Config{Importer: imp, Error: func(error) {}}
+		pkg, _ := conf.Check(path, fset, files, nil)
+		if pkg == nil {
+			return nil, fmt.Errorf("failed to check %s", path)
 		}
 		imp.cache[path] = pkg
 		return pkg, nil
@@ -1709,8 +1709,9 @@ func TestHostPrimitiveObsessionSafety(t *testing.T) {
 			fset := token.NewFileSet()
 			files := parseNonTestFiles(t, fset, filepath.Join(root, relPkg))
 			info := &types.Info{
-				Defs: make(map[*ast.Ident]types.Object),
-				Uses: make(map[*ast.Ident]types.Object),
+				Types: make(map[ast.Expr]types.TypeAndValue),
+				Defs:  make(map[*ast.Ident]types.Object),
+				Uses:  make(map[*ast.Ident]types.Object),
 			}
 			conf := types.Config{Importer: imp, Error: func(error) {}}
 			pkg, err := conf.Check(modulePrefix+"/"+relPkg, fset, files, info)
@@ -1721,9 +1722,28 @@ func TestHostPrimitiveObsessionSafety(t *testing.T) {
 		})
 	}
 
+	t.Run("internal/host/guest", func(t *testing.T) {
+		relPkg := "internal/host/guest"
+		fset := token.NewFileSet()
+		files := parseNonTestFiles(t, fset, filepath.Join(root, relPkg))
+		info := &types.Info{
+			Types: make(map[ast.Expr]types.TypeAndValue),
+			Defs:  make(map[*ast.Ident]types.Object),
+			Uses:  make(map[*ast.Ident]types.Object),
+		}
+		conf := types.Config{Importer: imp, Error: func(error) {}}
+		if _, err := conf.Check(modulePrefix+"/"+relPkg, fset, files, info); err != nil {
+			t.Fatal(err)
+		}
+		checkSemanticFuncResultsAndEarlyUnboxing(t, fset, relPkg, files, info)
+	})
+
 	t.Run("ViolationsDetected", func(t *testing.T) {
-		// Use arbitrary, non-hardcoded struct/function/method names to prove dynamic detection.
+		// Use arbitrary, non-hardcoded struct/function/method names to prove dynamic detection,
+		// including return type inference from function names (e.g. readLockPID, journalPath)
+		// and early unboxing (return refined.Get()).
 		const snippet = `package bad
+import "github.com/RNG999/antic/internal/domain"
 type ArbitraryRecord struct {
 	GuestLabel string
 	TargetDir  string
@@ -1733,6 +1753,8 @@ func MountCustomShare(path string, count int) string { return "" }
 func (ArbitraryRecord) LookupByGuest(name string) (string, error) { return "", nil }
 func (ArbitraryRecord) Resolve(path string) (string, error) { return "", nil }
 func internalHelper(targetDir string, guestName string, instanceID string, shareTag string) {}
+func readLockPID() string { return "" }
+func journalPath(base domain.AbsPath) string { return base.Get() }
 `
 		testFset := token.NewFileSet()
 		f, err := parser.ParseFile(testFset, "bad.go", snippet, 0)
@@ -1740,8 +1762,9 @@ func internalHelper(targetDir string, guestName string, instanceID string, share
 			t.Fatal(err)
 		}
 		info := &types.Info{
-			Defs: make(map[*ast.Ident]types.Object),
-			Uses: make(map[*ast.Ident]types.Object),
+			Types: make(map[ast.Expr]types.TypeAndValue),
+			Defs:  make(map[*ast.Ident]types.Object),
+			Uses:  make(map[*ast.Ident]types.Object),
 		}
 		conf := types.Config{Importer: imp, Error: func(error) {}}
 		pkg, err := conf.Check("bad", testFset, []*ast.File{f}, info)
@@ -1752,8 +1775,8 @@ func internalHelper(targetDir string, guestName string, instanceID string, share
 		mockT := &recordingT{errs: &errs}
 		checkDynamicPrimitiveObsession(mockT, testFset, "bad", []*ast.File{f}, info, pkg.Scope())
 
-		if len(errs) < 10 {
-			t.Fatalf("expected at least 10 dynamic primitive obsession errors, got %d: %v", len(errs), errs)
+		if len(errs) < 13 {
+			t.Fatalf("expected at least 13 dynamic primitive obsession errors, got %d: %v", len(errs), errs)
 		}
 	})
 }
@@ -1849,6 +1872,114 @@ func checkDynamicPrimitiveObsession(t errorReporter, fset *token.FileSet, relPkg
 			}
 		}
 	}
+
+	// 3. Semantic Function Return Type Inference & Late-Unboxing Check
+	checkSemanticFuncResultsAndEarlyUnboxing(t, fset, relPkg, files, info)
+}
+
+func checkSemanticFuncResultsAndEarlyUnboxing(t errorReporter, fset *token.FileSet, relPkg string, files []*ast.File, info *types.Info) {
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			d, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			fnName := d.Name.Name
+			if fnObj, ok := info.Defs[d.Name].(*types.Func); ok {
+				if sig, ok := fnObj.Type().(*types.Signature); ok {
+					checkSemanticFuncResult(t, fset, relPkg, fnName, sig, d.Name.Pos())
+				}
+			}
+			if d.Body != nil {
+				ast.Inspect(d.Body, func(n ast.Node) bool {
+					if _, isFuncLit := n.(*ast.FuncLit); isFuncLit {
+						return false
+					}
+					ret, ok := n.(*ast.ReturnStmt)
+					if !ok {
+						return true
+					}
+					for _, resExpr := range ret.Results {
+						call, ok := resExpr.(*ast.CallExpr)
+						if !ok {
+							continue
+						}
+						sel, ok := call.Fun.(*ast.SelectorExpr)
+						if !ok || sel.Sel.Name != "Get" {
+							continue
+						}
+						if tv, ok := info.Types[sel.X]; ok && isAnyRefinedType(tv.Type) {
+							t.Errorf("%s (%s): func %s performs early unboxing via 'return ...Get()' on refinement type %s; return the Refined type directly and unbox only at the OS syscall boundary",
+								posStr(fset, ret.Pos()), relPkg, fnName, tv.Type.String())
+						}
+					}
+					return true
+				})
+			}
+		}
+	}
+}
+
+func checkSemanticFuncResult(t errorReporter, fset *token.FileSet, relPkg, fnName string, sig *types.Signature, pos token.Pos) {
+	if sig.Results().Len() == 0 {
+		return
+	}
+	r0 := sig.Results().At(0).Type()
+	// Action functions that only return error (e.g. TrashConfig(name, path) error) are commands, not getters.
+	if sig.Results().Len() == 1 && r0.String() == "error" {
+		return
+	}
+	expectedPred := semanticPredicateForFuncResultName(fnName)
+	if expectedPred == "" {
+		return
+	}
+	if !matchesRefinedOrWrapped(r0, expectedPred) {
+		t.Errorf("%s (%s): func %s name implies returning %s, but result 0 has type %s",
+			posStr(fset, pos), relPkg, fnName, expectedPred, r0.String())
+	}
+}
+
+func semanticPredicateForFuncResultName(fnName string) string {
+	tokens := splitCamelCaseTokens(fnName)
+	if len(tokens) == 0 {
+		return ""
+	}
+	// Action/predicate verbs whose primary return value is a status/result/boolean rather than the object named in the suffix
+	switch tokens[0] {
+	case "add", "remove", "trash", "restore", "write", "ensure", "start", "stop", "lock", "recover", "check", "within", "bare", "in", "has", "is":
+		return ""
+	}
+	last := tokens[len(tokens)-1]
+	switch last {
+	case "path", "paths", "dir", "dirs", "home", "root", "roots", "file", "console", "libexec":
+		return "AbsPathPred"
+	case "pid", "pids":
+		return "ProcessIDPred"
+	case "id", "ids":
+		return "InstanceIDPred"
+	case "tag", "tags":
+		return "ShareTagPred"
+	}
+	if len(tokens) >= 2 && tokens[len(tokens)-2] == "guest" && last == "name" {
+		return "GuestNamePred"
+	}
+	return ""
+}
+
+func matchesRefinedOrWrapped(typ types.Type, expectedPred string) bool {
+	if isRefinedTypeWithPredicate(typ, expectedPred) || isSliceOfRefinedType(typ, expectedPred) {
+		return true
+	}
+	named, ok := types.Unalias(typ).(*types.Named)
+	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil {
+		return false
+	}
+	if named.Obj().Pkg().Path() == modulePrefix+"/internal/types" && (named.Obj().Name() == "Option" || named.Obj().Name() == "Result") {
+		if named.TypeArgs() != nil && named.TypeArgs().Len() >= 1 {
+			return isRefinedTypeWithPredicate(named.TypeArgs().At(0), expectedPred)
+		}
+	}
+	return false
 }
 
 func isBoundaryParserName(name string) bool {
@@ -1898,6 +2029,8 @@ func semanticPredicateForIdentifier(ident string) string {
 	switch last {
 	case "path", "paths", "dir", "dirs", "home", "root", "roots", "file", "console", "libexec", "src", "dst":
 		return "AbsPathPred"
+	case "pid", "pids":
+		return "ProcessIDPred"
 	case "name", "names":
 		return "GuestNamePred"
 	case "id", "ids":
@@ -2007,4 +2140,107 @@ func isSliceOfRefinedType(typ types.Type, expectedPredName string) bool {
 		return false
 	}
 	return isRefinedTypeWithPredicate(slice.Elem(), expectedPredName)
+}
+
+var (
+	mdLinkRE     = regexp.MustCompile(`\]\(([^)#\s]+)\)`)
+	inlinePathRE = regexp.MustCompile("`((?:cmd|internal|formal|examples|nix|e2e|just|skills|docs)/[A-Za-z0-9_./-]+)`")
+)
+
+// TestDocsCodeConsistency verifies that documentation files stay synchronized with the codebase:
+//  1. Every relative file/directory link and inline repository path in README.md, formal/README.md,
+//     docs/design/spec.md, and skills/antic/SKILL.md resolves to an existing path in the repository.
+//  2. skills/antic/SKILL.md and internal/host/cli/skill/SKILL.md are identical and accurately
+//     reflect optional [<name>] resolution when a single guest is defined.
+//  3. No Go file or doc references obsolete subcommands ("antic share add", "antic pkg ", "antic port ").
+func TestDocsCodeConsistency(t *testing.T) {
+	root := repoRoot(t)
+	docFiles := []string{
+		"README.md",
+		"formal/README.md",
+		"docs/design/spec.md",
+		"skills/antic/SKILL.md",
+		"internal/host/cli/skill/SKILL.md",
+	}
+
+	for _, relDoc := range docFiles {
+		absDoc := filepath.Join(root, relDoc)
+		contentBytes, err := os.ReadFile(absDoc)
+		if err != nil {
+			t.Fatalf("missing documentation file %s: %v", relDoc, err)
+		}
+		content := string(contentBytes)
+		docDir := filepath.Dir(absDoc)
+
+		for _, m := range mdLinkRE.FindAllStringSubmatch(content, -1) {
+			link := m[1]
+			if strings.HasPrefix(link, "http://") || strings.HasPrefix(link, "https://") || strings.HasPrefix(link, "mailto:") {
+				continue
+			}
+			target := filepath.Clean(filepath.Join(docDir, link))
+			if _, err := os.Stat(target); err != nil {
+				t.Errorf("%s: broken markdown link %q (resolved to %s)", relDoc, link, target)
+			}
+		}
+
+		for lineNum, line := range strings.Split(content, "\n") {
+			if strings.Contains(line, "削除") || strings.Contains(line, "廃止") {
+				continue
+			}
+			for _, m := range inlinePathRE.FindAllStringSubmatch(line, -1) {
+				relPath := strings.TrimSuffix(m[1], "/")
+				if strings.Contains(relPath, "seed-N.txtar") || strings.Contains(relPath, "*") {
+					continue
+				}
+				// Allow package.Symbol references like internal/tea/egress.Rules by stripping a trailing .Ident
+				target := filepath.Join(root, relPath)
+				if _, err := os.Stat(target); err != nil {
+					if idx := strings.LastIndex(relPath, "."); idx > 0 {
+						pkgCandidate := filepath.Join(root, relPath[:idx])
+						if fi, statErr := os.Stat(pkgCandidate); statErr == nil && fi.IsDir() {
+							continue
+						}
+					}
+					t.Errorf("%s:%d: referenced repository path %q does not exist", relDoc, lineNum+1, relPath)
+				}
+			}
+		}
+	}
+
+	skillA, errA := os.ReadFile(filepath.Join(root, "skills/antic/SKILL.md"))
+	skillB, errB := os.ReadFile(filepath.Join(root, "internal/host/cli/skill/SKILL.md"))
+	if errA != nil || errB != nil {
+		t.Fatalf("reading SKILL.md files: %v / %v", errA, errB)
+	}
+	if string(skillA) != string(skillB) {
+		t.Errorf("skills/antic/SKILL.md and internal/host/cli/skill/SKILL.md are out of sync")
+	}
+	if strings.Contains(string(skillA), "Every guest-targeted command requires the explicit guest <name>") {
+		t.Errorf("SKILL.md contradicts resolveTargetGuest in internal/host/cli/cli.go (single-guest [<name>] is optional)")
+	}
+
+	obsoleteCmds := []string{"antic share add", "antic share rm", "antic pkg ", "antic port "}
+	allPkgs := append(discoverPackages(t, root, "cmd"), discoverPackages(t, root, "internal")...)
+	for _, relPkg := range allPkgs {
+		if relPkg == "internal/arch" {
+			continue
+		}
+		pkgDir := filepath.Join(root, relPkg)
+		entries, _ := os.ReadDir(pkgDir)
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
+				continue
+			}
+			b, err := os.ReadFile(filepath.Join(pkgDir, e.Name()))
+			if err != nil {
+				continue
+			}
+			text := string(b)
+			for _, obs := range obsoleteCmds {
+				if strings.Contains(text, obs) {
+					t.Errorf("%s/%s: references obsolete CLI command %q", relPkg, e.Name(), obs)
+				}
+			}
+		}
+	}
 }

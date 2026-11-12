@@ -318,6 +318,30 @@ func ParseMountFD(fd int) (MountFD, error) {
 	return types.Parse[int, MountFDPred](fd)
 }
 
+// ProcessIDPred refines int to positive POSIX process IDs: pid > 0.
+type ProcessIDPred struct{}
+
+// Check validates a process ID.
+func (ProcessIDPred) Check(pid int) error {
+	if pid <= 0 {
+		return fmt.Errorf("invalid non-positive process ID %d", pid)
+	}
+	return nil
+}
+
+// ProcessID is the refinement type { pid : int | pid > 0 }.
+type ProcessID = types.Refined[int, ProcessIDPred]
+
+// ParseProcessID validates and constructs a ProcessID.
+func ParseProcessID(pid int) (ProcessID, error) {
+	return types.Parse[int, ProcessIDPred](pid)
+}
+
+// TryParseProcessID validates and constructs a ProcessID as a monadic Result.
+func TryParseProcessID(pid int) types.Result[ProcessID] {
+	return types.TryParse[int, ProcessIDPred](pid)
+}
+
 // UsableAddrPred refines netip.Addr to routable unicast addresses (excluding
 // unspecified, loopback, link-local, multicast, and IPv4-mapped IPv6 addresses,
 // preventing DNS rebinding against local/metadata services).

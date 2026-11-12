@@ -507,7 +507,7 @@ func (a *app) guestLogs() *cobra.Command {
 				w := &sanitizer{w: os.Stdout}
 				return g.Journal(c.Context(), units, lines, func(l string) { w.Write([]byte(l + "\n")) })
 			}
-			f, err := os.Open(g.Console())
+			f, err := os.Open(g.Console().Get())
 			if err != nil {
 				return err
 			}

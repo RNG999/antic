@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/RNG999/antic/internal/domain"
 )
 
 // Guest flakes often pin antic (or other inputs) to a local checkout. The
@@ -66,7 +68,7 @@ func localInputs(flake string) ([]localInput, error) {
 // CheckLocks refuses local inputs inside one of avoid (e.g. shared
 // directories, which a guest can write), and automatically updates the
 // flake's lock if it pins an older state of a local input.
-func CheckLocks(flake string, avoid []string) error {
+func CheckLocks(flake string, avoid []domain.AbsPath) error {
 	inputs, err := localInputs(flake)
 	if err != nil {
 		return err
@@ -74,8 +76,8 @@ func CheckLocks(flake string, avoid []string) error {
 	var stale []string
 	for _, in := range inputs {
 		for _, a := range avoid {
-			if in.path == a || strings.HasPrefix(in.path, a+"/") {
-				return fmt.Errorf("input %q is %s, inside %s, which a guest can write; move it out", in.name, in.path, a)
+			if in.path == a.Get() || strings.HasPrefix(in.path, a.Get()+"/") {
+				return fmt.Errorf("input %q is %s, inside %s, which a guest can write; move it out", in.name, in.path, a.Get())
 			}
 		}
 		cur, err := flakeMetadata(in.ref)

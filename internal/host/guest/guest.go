@@ -209,16 +209,19 @@ func (g *Guest) shareUnitString(tag string) string {
 	return "antic-share@" + g.Inst.ID.Get() + ":" + tag + ".service"
 }
 func (g *Guest) slice() string { return "antic-" + g.Inst.ID.Get() + ".slice" }
-func (g *Guest) CgroupDir() string {
+func (g *Guest) CgroupDir() domain.AbsPath {
 	uid := os.Getuid()
-	return filepath.Join("/sys/fs/cgroup/user.slice", fmt.Sprintf("user-%d.slice", uid), fmt.Sprintf("user@%d.service", uid), "antic.slice", g.slice())
+	base, _ := domain.ParseAbsPath("/sys/fs/cgroup/user.slice")
+	return domain.JoinAbsPath(base, fmt.Sprintf("user-%d.slice", uid), fmt.Sprintf("user@%d.service", uid), "antic.slice", g.slice())
 }
 func (g *Guest) store() nixbuild.GuestStore { return nixbuild.GuestStore(g.Inst.StoreDir().Get()) }
 func (g *Guest) api() *chv.Client           { return chv.New(filepath.Join(g.Inst.VMDir().Get(), "api.sock")) }
 func (g *Guest) vsock() transport.Vsock {
 	return transport.Vsock{Socket: filepath.Join(g.Inst.VMDir().Get(), "vsock.sock")}
 }
-func (g *Guest) sockDir(helper string) string { return filepath.Join(g.Inst.SockDir().Get(), helper) }
+func (g *Guest) sockDir(helper string) domain.AbsPath {
+	return domain.JoinAbsPath(g.Inst.SockDir(), helper)
+}
 
 // requireCreated fails for a guest without a build.
 func (g *Guest) requireCreated() error {

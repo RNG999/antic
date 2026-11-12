@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -17,6 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/RNG999/antic/internal/domain"
 	"github.com/RNG999/antic/internal/host/guest"
 )
 
@@ -62,7 +62,7 @@ func readGuestSample(ctx context.Context, g *guest.Guest) sample {
 
 	cg := g.CgroupDir()
 	// Read CPU usage in microseconds from cgroup v2
-	if b, err := os.ReadFile(filepath.Join(cg, "cpu.stat")); err == nil {
+	if b, err := os.ReadFile(domain.JoinAbsPath(cg, "cpu.stat").Get()); err == nil {
 		sc := bufio.NewScanner(strings.NewReader(string(b)))
 		for sc.Scan() {
 			fields := strings.Fields(sc.Text())
@@ -73,7 +73,7 @@ func readGuestSample(ctx context.Context, g *guest.Guest) sample {
 		}
 	}
 	// Read current memory usage in bytes from cgroup v2
-	if b, err := os.ReadFile(filepath.Join(cg, "memory.current")); err == nil {
+	if b, err := os.ReadFile(domain.JoinAbsPath(cg, "memory.current").Get()); err == nil {
 		s.memBytes, _ = strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
 	}
 	// Read running command sessions count
