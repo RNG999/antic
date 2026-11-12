@@ -193,7 +193,7 @@ func TestTEAPurityAndFormalConstraints(t *testing.T) {
 		checkDomainPackage(t, root)
 	})
 	t.Run("internal/spec", func(t *testing.T) {
-		checkPureFiles(t, root, "internal/spec")
+		checkSpecPackage(t, root)
 	})
 
 	for _, relPkg := range teaPkgs {
@@ -530,6 +530,22 @@ func checkTypesPackage(t *testing.T, root string) {
 	}
 }
 
+// checkSpecPackage verifies that internal/spec enforces strict value semantics
+// (no raw primitive types in World, Guest, Config, or Resources: only types.Refined,
+// types.SortedSet, closed enums, etc.).
+func checkSpecPackage(t *testing.T, root string) {
+	_, _, typedPkg, _ := checkPureFiles(t, root, "internal/spec")
+	scope := typedPkg.Scope()
+	stats := &typeUsageStats{}
+	for _, typeName := range []string{"World", "Guest", "Config", "Resources"} {
+		obj := scope.Lookup(typeName)
+		if obj == nil {
+			t.Fatalf("internal/spec: missing required core type %q", typeName)
+		}
+		checkValueSemantics(t, "internal/spec", typeName, obj.Type(), map[types.Type]bool{}, stats)
+	}
+}
+
 // checkDomainPackage verifies that internal/domain strictly partitions domain
 // vocabulary declarations across tags.go, predicates.go, and proofs.go.
 func checkDomainPackage(t *testing.T, root string) {
@@ -830,6 +846,12 @@ func checkValueSemantics(t *testing.T, relPkg, rootName string, typ types.Type, 
 	t.Helper()
 	unaliased := types.Unalias(typ)
 	if named, ok := unaliased.(*types.Named); ok {
+		if pkg := named.Obj().Pkg(); pkg != nil && pkg.Path() == "net/netip" {
+			switch named.Obj().Name() {
+			case "Addr", "Prefix":
+				return
+			}
+		}
 		if pkg := named.Obj().Pkg(); pkg != nil && pkg.Path() == modulePrefix+"/internal/types" {
 			switch named.Obj().Name() {
 			case "Refined":

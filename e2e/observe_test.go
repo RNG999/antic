@@ -52,7 +52,7 @@ func view(w spec.World) map[string]guestView {
 			v.CPUs = g.Config.Res.CPUs.Get()
 		}
 		for _, s := range g.Sessions.All() {
-			v.Sessions = append(v.Sessions, s.Command)
+			v.Sessions = append(v.Sessions, s.Command.Get())
 		}
 		out[g.Name.Get()] = v
 	}

@@ -143,20 +143,20 @@ type MountSet = types.SortedSet[Mount, domain.AbsPath, MountByPath]
 // Session is a command running in a guest ("antic run" that has not
 // returned), as "guest ps" lists it, identified by its command line.
 type Session struct {
-	Command string
+	Command domain.CommandText
 }
 
 // SessionByCommand orders sessions by command line.
 type SessionByCommand struct{}
 
 // Key returns the session's command line.
-func (SessionByCommand) Key(s Session) string { return s.Command }
+func (SessionByCommand) Key(s Session) domain.CommandText { return s.Command }
 
 // Less orders command lines lexicographically.
-func (SessionByCommand) Less(a, b string) bool { return a < b }
+func (SessionByCommand) Less(a, b domain.CommandText) bool { return a.Get() < b.Get() }
 
 // SessionSet is a canonical set of sessions keyed by command line.
-type SessionSet = types.SortedSet[Session, string, SessionByCommand]
+type SessionSet = types.SortedSet[Session, domain.CommandText, SessionByCommand]
 
 // Port forwards 127.0.0.1:Host on the host to Guest in the guest.
 type Port struct {

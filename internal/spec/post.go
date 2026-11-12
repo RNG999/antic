@@ -149,7 +149,7 @@ func (w World) external(ts ...string) bool {
 func boot(g Guest) Guest {
 	g.Phase = PhaseRunning
 	g.Mounts = bootMounts(g.Config)
-	g.Sessions = types.EmptySet[Session, string, SessionByCommand]()
+	g.Sessions = types.EmptySet[Session, domain.CommandText, SessionByCommand]()
 	return g
 }
 
@@ -460,7 +460,7 @@ func stopGuest(w World, _ Env, g Guest) step {
 	}
 	g.Phase = PhaseOff
 	g.Mounts = types.EmptySet[Mount, domain.AbsPath, MountByPath]()
-	g.Sessions = types.EmptySet[Session, string, SessionByCommand]()
+	g.Sessions = types.EmptySet[Session, domain.CommandText, SessionByCommand]()
 	return step{w: w.with(g), risky: true}
 }
 
@@ -699,7 +699,8 @@ func postSpawn(w World, env Env, c CmdSpawn) []Outcome {
 		if err != nil {
 			return reject(err)
 		}
-		if g.Sessions.Contains(c.Command) {
+		cmdText := domain.NewCommandText(c.Command)
+		if g.Sessions.Contains(cmdText) {
 			return reject(fmt.Errorf("%q is already running (the model keeps one session per command)", c.Command))
 		}
 		s := startGuest(w, env, g)
@@ -707,7 +708,7 @@ func postSpawn(w World, env Env, c CmdSpawn) []Outcome {
 			return s
 		}
 		g, _ = s.w.Guests.Lookup(g.Name)
-		g.Sessions = g.Sessions.Upsert(Session{Command: c.Command})
+		g.Sessions = g.Sessions.Upsert(Session{Command: cmdText})
 		return step{w: s.w.with(g), risky: true}
 	})
 }
@@ -726,10 +727,11 @@ func postKill(w World, c CmdKill) []Outcome {
 	}
 	return fold(w, c.Commands, func(w World, cmd string) step {
 		g, _ := w.lookup(c.Target)
-		if !g.Sessions.Contains(cmd) {
+		cmdText := domain.NewCommandText(cmd)
+		if !g.Sessions.Contains(cmdText) {
 			return reject(fmt.Errorf("no session %q in %s", cmd, g.Name.Get()))
 		}
-		g.Sessions = g.Sessions.Remove(cmd)
+		g.Sessions = g.Sessions.Remove(cmdText)
 		return step{w: w.with(g), risky: true}
 	})
 }

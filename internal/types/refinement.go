@@ -17,14 +17,19 @@ type Refined[T comparable, P Predicate[T]] struct {
 	valid bool
 }
 
-// Parse validates raw against predicate P and returns a Refined[T, P].
-func Parse[T comparable, P Predicate[T]](raw T) (Refined[T, P], error) {
+// TryParse validates raw against predicate P and returns a Result[Refined[T, P]],
+// enabling monadic composition and eliminating invalid (nil, nil) product states.
+func TryParse[T comparable, P Predicate[T]](raw T) Result[Refined[T, P]] {
 	var pred P
 	if err := pred.Check(raw); err != nil {
-		var zero Refined[T, P]
-		return zero, err
+		return Err[Refined[T, P]](err)
 	}
-	return Refined[T, P]{value: raw, valid: true}, nil
+	return Ok(Refined[T, P]{value: raw, valid: true})
+}
+
+// Parse validates raw against predicate P and returns a Refined[T, P] tuple.
+func Parse[T comparable, P Predicate[T]](raw T) (Refined[T, P], error) {
+	return TryParse[T, P](raw).Unwrap()
 }
 
 // Get returns the underlying validated value.

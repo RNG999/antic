@@ -44,6 +44,15 @@ type UnixSec = types.Phantom[int64, UnixSecTag]
 // NewUnixSec wraps a Unix timestamp in seconds.
 func NewUnixSec(sec int64) UnixSec { return types.NewPhantom[int64, UnixSecTag](sec) }
 
+// CommandTag tags a command-line string of an active session.
+type CommandTag struct{}
+
+// CommandText is a phantom-typed command-line string.
+type CommandText = types.Phantom[string, CommandTag]
+
+// NewCommandText wraps a raw command-line string.
+func NewCommandText(cmd string) CommandText { return types.NewPhantom[string, CommandTag](cmd) }
+
 // Typestate tags for NixOS StorePath roles in the guest lifecycle:
 //   - InstalledState: installed in the guest's /nix/store
 //   - CandidateState: pending live activation via switch-to-configuration
