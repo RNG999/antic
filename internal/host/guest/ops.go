@@ -188,7 +188,11 @@ func (m *Manager) Create(ctx context.Context, name string, spec config.Guest, fl
 		if draft, err = m.Config.NewGuestDraft(name, spec, m.Dirs.Home); err != nil {
 			return nil, err
 		}
-		inst, ok, err := m.Dirs.Lookup(name)
+		guestName, err := domain.ParseGuestName(name)
+		if err != nil {
+			return nil, err
+		}
+		inst, ok, err := m.Dirs.Lookup(guestName)
 		if err != nil {
 			return nil, err
 		}
@@ -511,14 +515,11 @@ func (g *Guest) OtherPorts() []config.Port {
 // whether anything changed (sharing a directory again with the same mode
 // changes nothing).
 func (g *Guest) AddShare(ctx context.Context, path string, ro bool) (string, bool, error) {
-	real, err := g.m.policy().Resolve(path)
+	absPath, err := g.m.policy().Resolve(path)
 	if err != nil {
 		return "", false, err
 	}
-	absPath, err := domain.ParseAbsPath(real)
-	if err != nil {
-		return "", false, err
-	}
+	real := absPath.Get()
 	unlock, err := g.lockAndRecover(ctx)
 	if err != nil {
 		return "", false, err
@@ -568,7 +569,7 @@ func modeName(ro bool) string {
 
 func (g *Guest) hotplug(ctx context.Context, bt *boot, path string, ro bool) (err error) {
 	tag := share.Tag(path)
-	sock, err := g.startShare(ctx, tag, path, ro, guestUserID)
+	sock, err := g.startShare(ctx, tag.Get(), path, ro, guestUserID)
 	if err != nil {
 		return err
 	}
@@ -580,19 +581,19 @@ func (g *Guest) hotplug(ctx context.Context, bt *boot, path string, ro bool) (er
 			}
 		}
 	}()
-	if err = g.api().AddFS(ctx, chv.FS{ID: "fs-" + tag, Tag: tag, Socket: sock, NumQueues: 1, QueueSize: 1024}); err != nil {
+	if err = g.api().AddFS(ctx, chv.FS{ID: "fs-" + tag.Get(), Tag: tag.Get(), Socket: sock, NumQueues: 1, QueueSize: 1024}); err != nil {
 		return err
 	}
 	// Removing the device must finish before virtiofsd goes away, or
 	// cloud-hypervisor treats the broken vhost-user socket as fatal.
 	undo = append(undo, func() {
-		g.api().RemoveDevice(context.WithoutCancel(ctx), "fs-"+tag)
+		g.api().RemoveDevice(context.WithoutCancel(ctx), "fs-"+tag.Get())
 		time.Sleep(2 * time.Second)
 	})
-	if err = g.vsock().Agent(ctx, proto.Request{Op: proto.OpMount, Tag: tag, Path: path, ReadOnly: ro}, nil); err != nil {
+	if err = g.vsock().Agent(ctx, proto.Request{Op: proto.OpMount, Tag: tag.Get(), Path: path, ReadOnly: ro}, nil); err != nil {
 		return err
 	}
-	bt.Shares = append(bt.Shares, bootShare{Share: config.Share{Path: path, ReadOnly: ro}, Tag: tag, Runtime: true})
+	bt.Shares = append(bt.Shares, bootShare{Share: config.Share{Path: path, ReadOnly: ro}, Tag: tag.Get(), Runtime: true})
 	return g.writeBoot(bt)
 }
 
@@ -665,7 +666,7 @@ type Info struct {
 // Inspect returns the guest's state.
 func (g *Guest) Inspect(ctx context.Context) (Info, error) {
 	i := Info{
-		Name: g.Name(), ID: g.Inst.ID,
+		Name: g.Name(), ID: g.Inst.ID.Get(),
 		Description: g.Cfg.Description, State: "-",
 		OS: g.osDesc(), Packages: g.Cfg.Packages,
 		CPUs: g.Cfg.CPUs, Memory: g.Cfg.Memory, Network: g.Cfg.Network.Mode, Ports: g.Cfg.Ports,
@@ -689,7 +690,7 @@ func (g *Guest) Inspect(ctx context.Context) (Info, error) {
 		if g.Cfg.Network.Mode != config.NetworkNone {
 			i.Units = append(i.Units, g.netUnit())
 		}
-		i.Units = append(i.Units, g.shareUnit("store"))
+		i.Units = append(i.Units, g.shareUnitString("store"))
 		for _, s := range i.Shares {
 			if s.Mounted {
 				i.Units = append(i.Units, g.shareUnit(share.Tag(s.Path)))

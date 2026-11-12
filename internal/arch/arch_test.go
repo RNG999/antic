@@ -1699,3 +1699,227 @@ func isResultType(typ types.Type) bool {
 	}
 	return obj.Pkg().Path() == "github.com/RNG999/antic/internal/types" && obj.Name() == "Result"
 }
+
+func TestHostPrimitiveObsessionSafety(t *testing.T) {
+	root := repoRoot(t)
+	imp := newRepoImporter(t, root)
+
+	t.Run("InstancePackage", func(t *testing.T) {
+		fset := token.NewFileSet()
+		files := parseNonTestFiles(t, fset, filepath.Join(root, "internal/host/instance"))
+		info := &types.Info{
+			Defs: make(map[*ast.Ident]types.Object),
+			Uses: make(map[*ast.Ident]types.Object),
+		}
+		conf := types.Config{Importer: imp, Error: func(error) {}}
+		pkg, err := conf.Check(modulePrefix+"/internal/host/instance", fset, files, info)
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkInstancePackageSafety(t, pkg.Scope())
+	})
+
+	t.Run("SharePackage", func(t *testing.T) {
+		fset := token.NewFileSet()
+		files := parseNonTestFiles(t, fset, filepath.Join(root, "internal/host/share"))
+		info := &types.Info{
+			Defs: make(map[*ast.Ident]types.Object),
+			Uses: make(map[*ast.Ident]types.Object),
+		}
+		conf := types.Config{Importer: imp, Error: func(error) {}}
+		pkg, err := conf.Check(modulePrefix+"/internal/host/share", fset, files, info)
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkSharePackageSafety(t, pkg.Scope())
+	})
+
+	t.Run("ViolationsDetected", func(t *testing.T) {
+		const snippet = `package bad
+type Instance struct {
+	Name string
+	ID   string
+}
+type Dirs struct{}
+func (Dirs) Lookup(name string) {}
+func (Dirs) Assign(name string) {}
+type Policy struct {
+	Home  string
+	Deny  []string
+	Roots []string
+}
+func Tag(path string) string { return "" }
+func (Policy) Resolve(path string) (string, error) { return "", nil }
+`
+		testFset := token.NewFileSet()
+		f, err := parser.ParseFile(testFset, "bad.go", snippet, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info := &types.Info{
+			Defs: make(map[*ast.Ident]types.Object),
+			Uses: make(map[*ast.Ident]types.Object),
+		}
+		conf := types.Config{Importer: imp, Error: func(error) {}}
+		pkg, err := conf.Check("bad", testFset, []*ast.File{f}, info)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var errs []string
+		mockT := &recordingT{errs: &errs}
+		checkInstancePackageSafety(mockT, pkg.Scope())
+		checkSharePackageSafety(mockT, pkg.Scope())
+
+		if len(errs) < 8 {
+			t.Fatalf("expected at least 8 primitive obsession errors, got %d: %v", len(errs), errs)
+		}
+	})
+}
+
+func checkInstancePackageSafety(t errorReporter, scope *types.Scope) {
+	instObj := scope.Lookup("Instance")
+	if instObj == nil {
+		t.Errorf("missing Instance struct")
+		return
+	}
+	instNamed, ok := types.Unalias(instObj.Type()).(*types.Named)
+	if !ok {
+		t.Errorf("expected Named type for Instance, got %T", instObj.Type())
+		return
+	}
+	instStruct, ok := instNamed.Underlying().(*types.Struct)
+	if !ok {
+		t.Errorf("expected Struct underlying type for Instance, got %T", instNamed.Underlying())
+		return
+	}
+	for i := 0; i < instStruct.NumFields(); i++ {
+		field := instStruct.Field(i)
+		switch field.Name() {
+		case "Name":
+			if !isRefinedTypeWithPredicate(field.Type(), "GuestNamePred") {
+				t.Errorf("Instance.Name has type %s; must be domain.GuestName refinement type (GuestNamePred)", field.Type().String())
+			}
+		case "ID":
+			if !isRefinedTypeWithPredicate(field.Type(), "InstanceIDPred") {
+				t.Errorf("Instance.ID has type %s; must be domain.InstanceID refinement type (InstanceIDPred)", field.Type().String())
+			}
+		}
+	}
+
+	dirsObj := scope.Lookup("Dirs")
+	if dirsObj == nil {
+		t.Errorf("missing Dirs struct")
+		return
+	}
+	dirsNamed, ok := types.Unalias(dirsObj.Type()).(*types.Named)
+	if !ok {
+		t.Errorf("expected Named type for Dirs, got %T", dirsObj.Type())
+		return
+	}
+	for i := 0; i < dirsNamed.NumMethods(); i++ {
+		m := dirsNamed.Method(i)
+		sig, ok := m.Type().(*types.Signature)
+		if !ok {
+			continue
+		}
+		switch m.Name() {
+		case "Lookup", "Assign":
+			if sig.Params().Len() < 1 {
+				t.Errorf("Dirs.%s has no parameters", m.Name())
+				continue
+			}
+			p0 := sig.Params().At(0)
+			if !isRefinedTypeWithPredicate(p0.Type(), "GuestNamePred") {
+				t.Errorf("Dirs.%s parameter 0 has type %s; must accept domain.GuestName refinement type (GuestNamePred)", m.Name(), p0.Type().String())
+			}
+		}
+	}
+}
+
+func checkSharePackageSafety(t errorReporter, scope *types.Scope) {
+	polObj := scope.Lookup("Policy")
+	if polObj == nil {
+		t.Errorf("missing Policy struct")
+		return
+	}
+	polNamed, ok := types.Unalias(polObj.Type()).(*types.Named)
+	if !ok {
+		t.Errorf("expected Named type for Policy, got %T", polObj.Type())
+		return
+	}
+	polStruct, ok := polNamed.Underlying().(*types.Struct)
+	if !ok {
+		t.Errorf("expected Struct underlying type for Policy, got %T", polNamed.Underlying())
+		return
+	}
+	for i := 0; i < polStruct.NumFields(); i++ {
+		field := polStruct.Field(i)
+		switch field.Name() {
+		case "Home":
+			if !isRefinedTypeWithPredicate(field.Type(), "AbsPathPred") {
+				t.Errorf("Policy.Home has type %s; must be domain.AbsPath refinement type (AbsPathPred)", field.Type().String())
+			}
+		case "Deny", "Roots":
+			if !isSliceOfRefinedType(field.Type(), "AbsPathPred") {
+				t.Errorf("Policy.%s has type %s; must be []domain.AbsPath refinement type (AbsPathPred)", field.Name(), field.Type().String())
+			}
+		}
+	}
+
+	tagObj := scope.Lookup("Tag")
+	if tagObj == nil {
+		t.Errorf("missing Tag function")
+	} else if tagSig, ok := tagObj.Type().(*types.Signature); ok {
+		if tagSig.Results().Len() < 1 || !isRefinedTypeWithPredicate(tagSig.Results().At(0).Type(), "ShareTagPred") {
+			t.Errorf("Tag return 0 has type %s; must return domain.ShareTag refinement type (ShareTagPred)", tagObj.Type().String())
+		}
+	}
+
+	for i := 0; i < polNamed.NumMethods(); i++ {
+		m := polNamed.Method(i)
+		if m.Name() == "Resolve" {
+			sig, ok := m.Type().(*types.Signature)
+			if ok && (sig.Results().Len() < 1 || !isRefinedTypeWithPredicate(sig.Results().At(0).Type(), "AbsPathPred")) {
+				t.Errorf("Policy.Resolve return 0 has type %s; must return domain.AbsPath refinement type (AbsPathPred)", sig.Results().At(0).Type().String())
+			}
+		}
+	}
+}
+
+func isRefinedTypeWithPredicate(typ types.Type, expectedPredName string) bool {
+	if typ == nil {
+		return false
+	}
+	unaliased := types.Unalias(typ)
+	named, ok := unaliased.(*types.Named)
+	if !ok {
+		return false
+	}
+	obj := named.Obj()
+	if obj == nil || obj.Pkg() == nil {
+		return false
+	}
+	if obj.Pkg().Path() != modulePrefix+"/internal/types" || obj.Name() != "Refined" {
+		return false
+	}
+	if named.TypeArgs() == nil || named.TypeArgs().Len() < 2 {
+		return false
+	}
+	predType := types.Unalias(named.TypeArgs().At(1))
+	predNamed, ok := predType.(*types.Named)
+	if !ok {
+		return false
+	}
+	return predNamed.Obj().Name() == expectedPredName
+}
+
+func isSliceOfRefinedType(typ types.Type, expectedPredName string) bool {
+	if typ == nil {
+		return false
+	}
+	slice, ok := types.Unalias(typ).(*types.Slice)
+	if !ok {
+		return false
+	}
+	return isRefinedTypeWithPredicate(slice.Elem(), expectedPredName)
+}

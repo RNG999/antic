@@ -149,4 +149,28 @@ func TestResultMonadicCombinators(t *testing.T) {
 	if !resFailure.IsErr() {
 		t.Fatal("expected failure to short-circuit")
 	}
+
+	// InstanceID & TryParse
+	instRes := domain.TryParseInstanceID("0123456789ab")
+	if !instRes.IsOk() || instRes.ValueOr(domain.InstanceID{}).Get() != "0123456789ab" {
+		t.Fatalf("expected valid InstanceID, got %v", instRes)
+	}
+	for _, badID := range []string{"", "short", "0123456789abc", "0123456789aG", "../bad/path"} {
+		if domain.TryParseInstanceID(badID).IsOk() {
+			t.Fatalf("expected bad instance ID %q to fail TryParseInstanceID", badID)
+		}
+	}
+
+	gnRes := domain.TryParseGuestName("dev-guest")
+	if !gnRes.IsOk() || gnRes.ValueOr(domain.GuestName{}).Get() != "dev-guest" {
+		t.Fatalf("expected valid GuestName, got %v", gnRes)
+	}
+	tagRes := domain.TryParseShareTag("s-0123456789ab")
+	if !tagRes.IsOk() || tagRes.ValueOr(domain.ShareTag{}).Get() != "s-0123456789ab" {
+		t.Fatalf("expected valid ShareTag, got %v", tagRes)
+	}
+	absRes := domain.TryParseAbsPath("/canonical/abs/path")
+	if !absRes.IsOk() || absRes.ValueOr(domain.AbsPath{}).Get() != "/canonical/abs/path" {
+		t.Fatalf("expected valid AbsPath, got %v", absRes)
+	}
 }

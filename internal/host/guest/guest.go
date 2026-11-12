@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/RNG999/antic/internal/domain"
 	"github.com/RNG999/antic/internal/host/chv"
 	"github.com/RNG999/antic/internal/host/config"
 	"github.com/RNG999/antic/internal/host/instance"
@@ -138,7 +139,11 @@ func (m *Manager) Get(name string) (*Guest, error) {
 	if err != nil {
 		return nil, err
 	}
-	inst, ok, err := m.Dirs.Lookup(c.Name)
+	guestName, err := domain.ParseGuestName(c.Name)
+	if err != nil {
+		return nil, err
+	}
+	inst, ok, err := m.Dirs.Lookup(guestName)
 	if err != nil {
 		return nil, err
 	}
@@ -177,22 +182,34 @@ func (m *Manager) GetUnloadable(name string) (*Guest, error) {
 	if m.Config.Errors[name] == nil {
 		return nil, fmt.Errorf("no such guest %q", name)
 	}
-	inst, ok, err := m.Dirs.Lookup(name)
+	guestName, err := domain.ParseGuestName(name)
+	if err != nil {
+		return nil, err
+	}
+	inst, ok, err := m.Dirs.Lookup(guestName)
 	if err != nil {
 		return nil, err
 	}
 	return &Guest{m: m, Cfg: &config.Guest{Name: name, Path: m.Config.GuestPath(name)}, Inst: inst, Created: ok}, nil
 }
 
+func (g *Guest) GuestName() domain.GuestName {
+	gn, _ := domain.ParseGuestName(g.Cfg.Name)
+	return gn
+}
+
 func (g *Guest) Name() string { return g.Cfg.Name }
 
 // Units and slice, keyed by ID.
-func (g *Guest) vmUnit() string  { return "antic-vm@" + g.Inst.ID + ".service" }
-func (g *Guest) netUnit() string { return "antic-net@" + g.Inst.ID + ".service" }
-func (g *Guest) shareUnit(tag string) string {
-	return "antic-share@" + g.Inst.ID + ":" + tag + ".service"
+func (g *Guest) vmUnit() string  { return "antic-vm@" + g.Inst.ID.Get() + ".service" }
+func (g *Guest) netUnit() string { return "antic-net@" + g.Inst.ID.Get() + ".service" }
+func (g *Guest) shareUnit(tag domain.ShareTag) string {
+	return "antic-share@" + g.Inst.ID.Get() + ":" + tag.Get() + ".service"
 }
-func (g *Guest) slice() string { return "antic-" + g.Inst.ID + ".slice" }
+func (g *Guest) shareUnitString(tag string) string {
+	return "antic-share@" + g.Inst.ID.Get() + ":" + tag + ".service"
+}
+func (g *Guest) slice() string { return "antic-" + g.Inst.ID.Get() + ".slice" }
 func (g *Guest) CgroupDir() string {
 	uid := os.Getuid()
 	return filepath.Join("/sys/fs/cgroup/user.slice", fmt.Sprintf("user-%d.slice", uid), fmt.Sprintf("user@%d.service", uid), "antic.slice", g.slice())
@@ -225,7 +242,7 @@ func (g *Guest) Running(ctx context.Context) (bool, error) {
 }
 
 // lock takes the guest's lifecycle lock.
-func (g *Guest) lock() (func(), error) { return g.m.Dirs.Lock(g.Name()) }
+func (g *Guest) lock() (func(), error) { return g.m.Dirs.Lock(g.GuestName()) }
 
 // boot records what the running VM was started with. It is only trusted
 // while the VM unit's InvocationID matches.

@@ -38,6 +38,11 @@ func ParseGuestName(s string) (GuestName, error) {
 	return types.Parse[string, GuestNamePred](s)
 }
 
+// TryParseGuestName validates and constructs a GuestName as a monadic Result.
+func TryParseGuestName(s string) types.Result[GuestName] {
+	return types.TryParse[string, GuestNamePred](s)
+}
+
 // StorePathPred refines string to top-level Nix store paths: ^/nix/store/[0-9a-z]{32}-[^/]+$.
 type StorePathPred struct{}
 
@@ -95,6 +100,40 @@ func ParseShareTag(s string) (ShareTag, error) {
 	return types.Parse[string, ShareTagPred](s)
 }
 
+// TryParseShareTag validates and constructs a ShareTag as a monadic Result.
+func TryParseShareTag(s string) types.Result[ShareTag] {
+	return types.TryParse[string, ShareTagPred](s)
+}
+
+// InstanceIDPred refines string to guest instance IDs: ^[0-9a-f]{12}$.
+type InstanceIDPred struct{}
+
+// Check validates a guest instance ID.
+func (InstanceIDPred) Check(s string) error {
+	if len(s) != 12 {
+		return fmt.Errorf("invalid instance ID %q (expected 12 hex digits)", s)
+	}
+	for _, c := range s {
+		if !isLowerHex(c) {
+			return fmt.Errorf("invalid instance ID %q (expected 12 hex digits)", s)
+		}
+	}
+	return nil
+}
+
+// InstanceID is the refinement type { s : string | InstanceIDPred(s) }.
+type InstanceID = types.Refined[string, InstanceIDPred]
+
+// ParseInstanceID validates and constructs an InstanceID.
+func ParseInstanceID(s string) (InstanceID, error) {
+	return types.Parse[string, InstanceIDPred](s)
+}
+
+// TryParseInstanceID validates and constructs an InstanceID as a monadic Result.
+func TryParseInstanceID(s string) types.Result[InstanceID] {
+	return types.TryParse[string, InstanceIDPred](s)
+}
+
 // AbsPathPred refines string to canonical absolute paths strictly below root ("/").
 type AbsPathPred struct{}
 
@@ -112,6 +151,11 @@ type AbsPath = types.Refined[string, AbsPathPred]
 // ParseAbsPath validates and constructs an AbsPath.
 func ParseAbsPath(s string) (AbsPath, error) {
 	return types.Parse[string, AbsPathPred](s)
+}
+
+// TryParseAbsPath validates and constructs an AbsPath as a monadic Result.
+func TryParseAbsPath(s string) types.Result[AbsPath] {
+	return types.TryParse[string, AbsPathPred](s)
 }
 
 // WithinSubtree reports whether child lies strictly beneath parent.

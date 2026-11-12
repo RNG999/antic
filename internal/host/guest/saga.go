@@ -215,7 +215,11 @@ func (g *Guest) recoverJournal(ctx context.Context, r journalRecord) error {
 		return fmt.Errorf("guest %s: unreadable journal %s: %w", g.Name(), g.journalPath(), err)
 	}
 	if r.InstanceID != "" && !g.Created {
-		g.Inst, g.Created = g.m.Dirs.InstanceOf(g.Name(), r.InstanceID), true
+		instID, err := domain.ParseInstanceID(r.InstanceID)
+		if err != nil {
+			return fmt.Errorf("guest %s: invalid instance ID %q in journal: %w", g.Name(), r.InstanceID, err)
+		}
+		g.Inst, g.Created = g.m.Dirs.InstanceOf(g.GuestName(), instID), true
 	}
 	tx.draft = config.RestoreDraft(r.ConfigPath, g.Name(), g.m.Dirs.Home, r.NewFile, r.OldConfig, r.NewConfig)
 	last := types.None[domain.StepIndex]()
@@ -316,7 +320,7 @@ func (g *Guest) runEffect(ctx context.Context, tx *txn, jr *journalRecord, eff o
 	switch e := eff.(type) {
 	case operation.EffectJournalBegin:
 		*jr = newJournalRecord(tx)
-		jr.InstanceID = g.Inst.ID
+		jr.InstanceID = g.Inst.ID.Get()
 		return g.writeJournal(*jr)
 	case operation.EffectJournalIntent:
 		jr.Intents = append(jr.Intents, e.Pos.Get())
@@ -354,20 +358,20 @@ func (g *Guest) runEffect(ctx context.Context, tx *txn, jr *journalRecord, eff o
 			return err
 		}
 		// Recovery must find the instance to remove it.
-		jr.InstanceID = g.Inst.ID
+		jr.InstanceID = g.Inst.ID.Get()
 		return g.writeJournal(*jr)
 	case operation.EffectTrash:
 		if e.What == operation.TrashInstance {
 			return g.m.Dirs.TrashInstance(g.Inst)
 		}
-		return g.m.Dirs.TrashConfig(g.Name(), g.m.Config.GuestPath(g.Name()))
+		return g.m.Dirs.TrashConfig(g.GuestName(), g.m.Config.GuestPath(g.Name()))
 	case operation.EffectRestore:
 		if e.What == operation.TrashInstance {
 			return g.m.Dirs.RestoreInstance(g.Inst)
 		}
-		return g.m.Dirs.RestoreConfig(g.Name(), g.m.Config.GuestPath(g.Name()))
+		return g.m.Dirs.RestoreConfig(g.GuestName(), g.m.Config.GuestPath(g.Name()))
 	case operation.EffectEmptyTrash:
-		if err := g.m.Dirs.EmptyTrash(g.Name()); err != nil {
+		if err := g.m.Dirs.EmptyTrash(g.GuestName()); err != nil {
 			return err
 		}
 		if orphans, err := g.m.Dirs.Orphans(); err == nil {
@@ -486,7 +490,15 @@ func (m *Manager) RecoverOrphan(ctx context.Context, name string) error {
 		return err
 	}
 	if r.InstanceID != "" {
-		g.Inst, g.Created = m.Dirs.InstanceOf(name, r.InstanceID), true
+		instID, err := domain.ParseInstanceID(r.InstanceID)
+		if err != nil {
+			return err
+		}
+		gName, err := domain.ParseGuestName(name)
+		if err != nil {
+			return err
+		}
+		g.Inst, g.Created = m.Dirs.InstanceOf(gName, instID), true
 	}
 	unlock, err := g.lockAndRecover(ctx)
 	if err != nil {
@@ -504,12 +516,12 @@ func (m *Manager) RecoverOrphan(ctx context.Context, name string) error {
 // ensureInstance allocates the guest's instance unless it has one.
 func (g *Guest) ensureInstance() error {
 	if !g.Created {
-		inst, err := g.m.Dirs.Assign(g.Name())
+		inst, err := g.m.Dirs.Assign(g.GuestName())
 		if err != nil {
 			return err
 		}
 		g.Inst, g.Created = inst, true
-		g.m.logf("guest %s has ID %s", g.Name(), inst.ID)
+		g.m.logf("guest %s has ID %s", g.Name(), inst.ID.Get())
 	}
 	return os.WriteFile(g.Inst.OriginFile(), []byte(g.Cfg.Path+"\n"), 0o600)
 }
@@ -552,7 +564,7 @@ func (g *Guest) ensureUnmounted(ctx context.Context, path string) error {
 	if err := g.writeBoot(bt); err != nil {
 		return err
 	}
-	if err := g.m.Units.Stop(ctx, g.shareUnit(s.Tag)); err != nil {
+	if err := g.m.Units.Stop(ctx, g.shareUnitString(s.Tag)); err != nil {
 		g.m.logf("warning: %s is unmounted, but stopping its virtiofsd failed: %v", path, err)
 	}
 	return nil

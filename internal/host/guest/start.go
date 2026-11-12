@@ -211,7 +211,7 @@ func (g *Guest) startShare(ctx context.Context, tag, path string, ro bool, guest
 	}
 	props := append(g.m.confine(rw, append(roPaths, g.m.Bins.Virtiofsd)),
 		systemd.Prop("NoNewPrivileges", true), systemd.UnixOnly(), systemd.Prop("PrivateNetwork", true))
-	return sock, g.helper(ctx, g.shareUnit(tag), "antic share "+path+" ("+g.Name()+")", props, sock, args...)
+	return sock, g.helper(ctx, g.shareUnitString(tag), "antic share "+path+" ("+g.Name()+")", props, sock, args...)
 }
 
 // Guest IDs our UID/GID appear as: the guest user in shares, root in the
@@ -260,17 +260,18 @@ func (g *Guest) vmConfig(ctx context.Context, system string, bt *boot) (chv.VMCo
 	policy := g.m.policy()
 	var fstab strings.Builder
 	for _, s := range g.Cfg.Shares {
-		path, err := policy.Resolve(s.Path)
+		absPath, err := policy.Resolve(s.Path)
 		if err != nil {
 			return chv.VMConfig{}, fmt.Errorf("guests.%s share: %w", g.Name(), err)
 		}
+		path := absPath.Get()
 		tag := share.Tag(path)
-		sock, err := g.startShare(ctx, tag, path, s.ReadOnly, guestUserID)
+		sock, err := g.startShare(ctx, tag.Get(), path, s.ReadOnly, guestUserID)
 		if err != nil {
 			return chv.VMConfig{}, fmt.Errorf("share %s: %w", path, err)
 		}
-		cfg.FS = append(cfg.FS, chv.FS{ID: "fs-" + tag, Tag: tag, Socket: sock, NumQueues: 1, QueueSize: 1024})
-		bt.Shares = append(bt.Shares, bootShare{Share: config.Share{Path: path, ReadOnly: s.ReadOnly, Source: s.Source, Mode: s.Mode, Target: s.Target}, Tag: tag})
+		cfg.FS = append(cfg.FS, chv.FS{ID: "fs-" + tag.Get(), Tag: tag.Get(), Socket: sock, NumQueues: 1, QueueSize: 1024})
+		bt.Shares = append(bt.Shares, bootShare{Share: config.Share{Path: path, ReadOnly: s.ReadOnly, Source: s.Source, Mode: s.Mode, Target: s.Target}, Tag: tag.Get()})
 		// Sessions require antic-ready.target, which requires every share.
 		mode := "rw"
 		if s.ReadOnly {

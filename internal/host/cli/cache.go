@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/RNG999/antic/internal/domain"
 	"github.com/RNG999/antic/internal/host/instance"
 	"github.com/RNG999/antic/internal/host/nixbuild"
 )
@@ -56,9 +57,11 @@ func (a *app) cacheEntries() ([]nixbuild.CacheEntry, error) {
 					}
 				}
 			}
-			if inst, ok, err := a.dirs.Lookup(name); err == nil && ok {
-				if cur, err := nixbuild.GuestStore(inst.StoreDir()).Current(); err == nil && cur != "" {
-					bySystem[cur] = append(bySystem[cur], name)
+			if gName, parseErr := domain.ParseGuestName(name); parseErr == nil {
+				if inst, ok, err := a.dirs.Lookup(gName); err == nil && ok {
+					if cur, err := nixbuild.GuestStore(inst.StoreDir()).Current(); err == nil && cur != "" {
+						bySystem[cur] = append(bySystem[cur], name)
+					}
 				}
 			}
 		}

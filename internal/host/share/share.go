@@ -12,19 +12,25 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/RNG999/antic/internal/domain"
 )
 
 // Tag derives a share's virtiofs tag from its host path.
-func Tag(path string) string {
+func Tag(path string) domain.ShareTag {
 	sum := sha256.Sum256([]byte(path))
-	return "s-" + hex.EncodeToString(sum[:6])
+	tag, err := domain.ParseShareTag("s-" + hex.EncodeToString(sum[:6]))
+	if err != nil {
+		panic("share.Tag: invalid generated tag: " + err.Error())
+	}
+	return tag
 }
 
 // Policy decides which directories may be shared.
 type Policy struct {
-	Home  string
-	Deny  []string // never shared, nor any directory containing them
-	Roots []string // runtime shares outside these need confirmation
+	Home  domain.AbsPath
+	Deny  []domain.AbsPath // never shared, nor any directory containing them
+	Roots []domain.AbsPath // runtime shares outside these need confirmation
 }
 
 // NewPolicy builds the policy. Denied: every hidden entry at the top of
@@ -33,11 +39,24 @@ type Policy struct {
 // directories, guest flakes, policy.deny). A guest that could write any of
 // these would get code run on the host.
 func NewPolicy(home string, extra, roots []string) Policy {
-	p := Policy{Home: home, Roots: roots}
+	var p Policy
+	if h, err := domain.ParseAbsPath(filepath.Clean(home)); err == nil {
+		p.Home = h
+	}
+	for _, r := range roots {
+		if abs, err := domain.ParseAbsPath(filepath.Clean(r)); err == nil {
+			p.Roots = append(p.Roots, abs)
+		}
+	}
 	add := func(path string) {
-		p.Deny = append(p.Deny, filepath.Clean(path))
-		if real, err := filepath.EvalSymlinks(path); err == nil {
-			p.Deny = append(p.Deny, real)
+		clean := filepath.Clean(path)
+		if abs, err := domain.ParseAbsPath(clean); err == nil {
+			p.Deny = append(p.Deny, abs)
+		}
+		if real, err := filepath.EvalSymlinks(clean); err == nil {
+			if abs, err := domain.ParseAbsPath(real); err == nil {
+				p.Deny = append(p.Deny, abs)
+			}
 		}
 	}
 	entries, _ := os.ReadDir(home)
@@ -57,56 +76,72 @@ func NewPolicy(home string, extra, roots []string) Policy {
 		}
 	}
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
-		if within(dir, home) {
-			add(dir)
+		if cleanDir, err := domain.ParseAbsPath(filepath.Clean(dir)); err == nil && p.Home.Valid() {
+			if cleanDir == p.Home || domain.WithinSubtree(p.Home, cleanDir) {
+				add(dir)
+			}
 		}
 	}
 	for _, d := range extra {
 		add(d)
 	}
-	slices.Sort(p.Deny)
+	slices.SortFunc(p.Deny, func(a, b domain.AbsPath) int {
+		return strings.Compare(a.Get(), b.Get())
+	})
 	p.Deny = slices.Compact(p.Deny)
 	return p
 }
 
 // Resolve validates a share path and returns its real absolute path.
-func (p Policy) Resolve(path string) (string, error) {
+func (p Policy) Resolve(path string) (domain.AbsPath, error) {
 	real, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return "", err
+		return domain.AbsPath{}, err
 	}
-	if fi, err := os.Stat(real); err != nil || !fi.IsDir() {
-		return "", fmt.Errorf("%s is not a directory", real)
+	fi, err := os.Stat(real)
+	if err != nil || !fi.IsDir() {
+		return domain.AbsPath{}, fmt.Errorf("%s is not a directory", real)
 	}
-	if !within(real, p.Home) || real == p.Home {
-		return "", fmt.Errorf("%s: only directories below %s can be shared", real, p.Home)
+	abs, err := domain.ParseAbsPath(real)
+	if err != nil {
+		return domain.AbsPath{}, fmt.Errorf("%s: %w", real, err)
+	}
+	if !p.Home.Valid() || !domain.WithinSubtree(p.Home, abs) {
+		return domain.AbsPath{}, fmt.Errorf("%s: only directories below %s can be shared", real, p.Home.Get())
 	}
 	if strings.ContainsFunc(real, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
-		return "", fmt.Errorf("%q: control characters in share paths are not supported", real)
+		return domain.AbsPath{}, fmt.Errorf("%q: control characters in share paths are not supported", real)
 	}
 	for _, d := range p.Deny {
-		if within(real, d) || within(d, real) {
-			return "", fmt.Errorf("%s: refusing to share (overlaps %s)", real, d)
+		if domain.PathsOverlap(abs, d) {
+			return domain.AbsPath{}, fmt.Errorf("%s: refusing to share (overlaps %s)", real, d.Get())
 		}
 	}
-	return real, nil
+	return abs, nil
 }
 
 // InRoots reports whether path lies in one of the policy's share roots (or
 // there are none).
-func (p Policy) InRoots(path string) bool {
+func (p Policy) InRoots(path domain.AbsPath) bool {
 	if len(p.Roots) == 0 {
 		return true
 	}
 	for _, r := range p.Roots {
-		if within(path, r) {
+		if path == r || domain.WithinSubtree(r, path) {
 			return true
 		}
 	}
 	return false
 }
 
-func within(path, dir string) bool { return path == dir || strings.HasPrefix(path, dir+"/") }
+// InRootsString is a convenience helper for string paths.
+func (p Policy) InRootsString(path string) bool {
+	abs, err := domain.ParseAbsPath(filepath.Clean(path))
+	if err != nil {
+		return false
+	}
+	return p.InRoots(abs)
+}
 
 // maxDepth limits how deep Protected looks for protected names.
 const maxDepth = 8

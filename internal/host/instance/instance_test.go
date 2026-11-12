@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/RNG999/antic/internal/domain"
 )
 
 func testDirs(t *testing.T) Dirs {
@@ -14,12 +16,22 @@ func testDirs(t *testing.T) Dirs {
 	return Dirs{Home: d, StateRoot: filepath.Join(d, "state"), RunRoot: filepath.Join(d, "run")}
 }
 
+func mustGuestName(t *testing.T, s string) domain.GuestName {
+	t.Helper()
+	gn, err := domain.ParseGuestName(s)
+	if err != nil {
+		t.Fatalf("mustGuestName(%q): %v", s, err)
+	}
+	return gn
+}
+
 func TestAssignLookupRemove(t *testing.T) {
 	d := testDirs(t)
-	if _, ok, err := d.Lookup("dev"); ok || err != nil {
+	devName := mustGuestName(t, "dev")
+	if _, ok, err := d.Lookup(devName); ok || err != nil {
 		t.Fatalf("Lookup before Assign: %v %v", ok, err)
 	}
-	inst, err := d.Assign("dev")
+	inst, err := d.Assign(devName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,7 +39,7 @@ func TestAssignLookupRemove(t *testing.T) {
 	os.MkdirAll(ro, 0o755)
 	os.WriteFile(filepath.Join(ro, "f"), nil, 0o444)
 	os.Chmod(ro, 0o555)
-	got, ok, err := d.Lookup("dev")
+	got, ok, err := d.Lookup(devName)
 	if !ok || err != nil || got.ID != inst.ID {
 		t.Fatalf("Lookup = %+v %v %v", got, ok, err)
 	}
@@ -42,31 +54,34 @@ func TestAssignLookupRemove(t *testing.T) {
 func TestLookupRejectsBadLinks(t *testing.T) {
 	d := testDirs(t)
 	os.MkdirAll(d.namesDir(), 0o700)
+	badName := mustGuestName(t, "bad")
 	for _, dst := range []string{"..", "/", "../guests/../..", "../guests/xyz"} {
 		os.Remove(filepath.Join(d.namesDir(), "bad"))
 		os.Symlink(dst, filepath.Join(d.namesDir(), "bad"))
-		if _, _, err := d.Lookup("bad"); err == nil {
+		if _, _, err := d.Lookup(badName); err == nil {
 			t.Errorf("Lookup accepted link to %q", dst)
 		}
 	}
-	if err := d.Remove(Instance{Name: "x", ID: "..", d: d}); err == nil {
-		t.Error("Remove accepted ID \"..\"")
+	if err := d.Remove(Instance{Name: mustGuestName(t, "x"), ID: domain.InstanceID{}, d: d}); err == nil {
+		t.Error("Remove accepted uninitialized invalid ID")
 	}
 }
 
 func TestOrphans(t *testing.T) {
 	d := testDirs(t)
-	a, _ := d.Assign("a")
-	b, _ := d.Assign("a") // reassigning leaves the first ID orphaned
+	aName := mustGuestName(t, "a")
+	a, _ := d.Assign(aName)
+	b, _ := d.Assign(aName) // reassigning leaves the first ID orphaned
 	o, err := d.Orphans()
-	if err != nil || len(o) != 1 || filepath.Base(o[0]) != a.ID || a.ID == b.ID {
+	if err != nil || len(o) != 1 || filepath.Base(o[0]) != a.ID.Get() || a.ID == b.ID {
 		t.Fatalf("Orphans = %v, %v", o, err)
 	}
 }
 
 func TestLockContention(t *testing.T) {
 	d := testDirs(t)
-	unlock1, err := d.Lock("dev")
+	devName := mustGuestName(t, "dev")
+	unlock1, err := d.Lock(devName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +139,8 @@ func TestLockNixBuild(t *testing.T) {
 
 func TestLockTimeout(t *testing.T) {
 	d := testDirs(t)
-	unlock1, err := d.Lock("dev")
+	devName := mustGuestName(t, "dev")
+	unlock1, err := d.Lock(devName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +157,8 @@ func TestLockTimeout(t *testing.T) {
 
 func TestLockContextCancel(t *testing.T) {
 	d := testDirs(t)
-	unlock1, err := d.Lock("dev")
+	devName := mustGuestName(t, "dev")
+	unlock1, err := d.Lock(devName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +180,8 @@ func TestLockContextCancel(t *testing.T) {
 // repeating either does nothing (recovery may repeat them).
 func TestTrashRestore(t *testing.T) {
 	d := testDirs(t)
-	inst, err := d.Assign("dev")
+	devName := mustGuestName(t, "dev")
+	inst, err := d.Assign(devName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +194,7 @@ func TestTrashRestore(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, ok, _ := d.Lookup("dev"); ok {
+	if _, ok, _ := d.Lookup(devName); ok {
 		t.Fatal("a trashed instance is still named")
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
@@ -187,7 +205,7 @@ func TestTrashRestore(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got, ok, _ := d.Lookup("dev"); !ok || got.ID != inst.ID {
+	if got, ok, _ := d.Lookup(devName); !ok || got.ID != inst.ID {
 		t.Fatal("a restored instance is not named")
 	}
 	if _, err := os.Stat(marker); err != nil {
@@ -196,13 +214,13 @@ func TestTrashRestore(t *testing.T) {
 	if err := d.TrashInstance(inst); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.EmptyTrash("dev"); err != nil {
+	if err := d.EmptyTrash(devName); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.RestoreInstance(inst); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, _ := d.Lookup("dev"); ok {
+	if _, ok, _ := d.Lookup(devName); ok {
 		t.Fatal("an emptied trash was restored")
 	}
 }

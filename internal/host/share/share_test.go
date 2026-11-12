@@ -52,10 +52,15 @@ func TestPolicy(t *testing.T) {
 		}
 	}
 	mk(t, home+"/Projects/")
-	if got, err := p.Resolve(home + "/Projects"); err != nil || got != home+"/Projects" {
+	if got, err := p.Resolve(home + "/Projects"); err != nil || got.Get() != home+"/Projects" {
 		t.Errorf("Resolve(Projects) = %q, %v", got, err)
 	}
-	if p.InRoots(home+"/Projects") || !p.InRoots(home+"/Work/x") {
+	if p.InRootsString(home+"/Projects") || !p.InRootsString(home+"/Work/x") {
 		t.Error("InRoots wrong")
+	}
+
+	tag := Tag(home + "/Projects")
+	if !tag.Valid() {
+		t.Errorf("Tag(%s) produced invalid ShareTag %q", home+"/Projects", tag.Get())
 	}
 }
