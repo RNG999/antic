@@ -1,6 +1,6 @@
 // Package types provides pure, domain-independent type combinators for antic:
 //
-//  1. adt.go:        Algebraic Data Types (Option[T], NonEmpty[T])
+//  1. adt.go:        Algebraic Data Types (Option[T], NonEmpty[T], Result[T])
 //  2. quotient.go:   Quotient Containers (SortedSet[T, K, Ord], KeyExtractor[T, K])
 //  3. phantom.go:    Phantom / Branded Types & Typestate Witnesses (Phantom[T, Tag], Indexed[T, State])
 //  4. refinement.go: Refinement Types / 篩型 (Predicate[T], Refined[T, P])
@@ -12,6 +12,72 @@
 package types
 
 import "slices"
+
+// Result represents the algebraic sum type T + Error (Ok(T) | Err(error)).
+// It guarantees that either a valid value T exists OR an error exists,
+// making invalid product-type combinations (nil, nil) or (val, err) unrepresentable.
+type Result[T any] struct {
+	val T
+	err error
+}
+
+// Ok constructs a successful Result containing v.
+func Ok[T any](v T) Result[T] {
+	return Result[T]{val: v}
+}
+
+// Err constructs a failed Result containing err.
+func Err[T any](err error) Result[T] {
+	return Result[T]{err: err}
+}
+
+// From lifts a standard Go (T, error) tuple into an algebraic Result[T].
+func From[T any](v T, err error) Result[T] {
+	if err != nil {
+		return Result[T]{err: err}
+	}
+	return Result[T]{val: v}
+}
+
+// IsOk reports whether the Result contains a value.
+func (r Result[T]) IsOk() bool { return r.err == nil }
+
+// IsErr reports whether the Result contains an error.
+func (r Result[T]) IsErr() bool { return r.err != nil }
+
+// Value returns the inner value if Ok, or the zero value of T if Err.
+func (r Result[T]) Value() T { return r.val }
+
+// ValueOr returns the inner value if Ok, or fallback if Err.
+func (r Result[T]) ValueOr(fallback T) T {
+	if r.err != nil {
+		return fallback
+	}
+	return r.val
+}
+
+// Err returns the inner error if Err, or nil if Ok.
+func (r Result[T]) Err() error { return r.err }
+
+// Unwrap returns the value and error tuple (T, error) for standard Go interop.
+func (r Result[T]) Unwrap() (T, error) { return r.val, r.err }
+
+// Map transforms the inner value with fn if Ok, preserving Err.
+func Map[T, U any](r Result[T], fn func(T) U) Result[U] {
+	if r.err != nil {
+		return Result[U]{err: r.err}
+	}
+	return Result[U]{val: fn(r.val)}
+}
+
+// AndThen (Monadic Bind / FlatMap) chains a computation that may fail,
+// short-circuiting on the first error.
+func AndThen[T, U any](r Result[T], fn func(T) Result[U]) Result[U] {
+	if r.err != nil {
+		return Result[U]{err: r.err}
+	}
+	return fn(r.val)
+}
 
 // Option represents the algebraic sum type 1 + T (None | Some(T)) using value
 // semantics (no pointers), preserving structural equality in TEA models.

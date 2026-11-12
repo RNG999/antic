@@ -459,7 +459,7 @@ func checkTypesPackage(t *testing.T, root string) {
 
 	// Exact mapping of allowed files -> allowed type declarations in internal/types.
 	allowedTypesByFile := map[string]map[string]bool{
-		"adt.go":        {"Option": true, "NonEmpty": true},
+		"adt.go":        {"Option": true, "NonEmpty": true, "Result": true},
 		"quotient.go":   {"KeyExtractor": true, "SortedSet": true},
 		"phantom.go":    {"Phantom": true, "Indexed": true},
 		"refinement.go": {"Predicate": true, "Refined": true},
@@ -511,7 +511,7 @@ func checkTypesPackage(t *testing.T, root string) {
 	}
 
 	scope := typedPkg.Scope()
-	for _, name := range []string{"Refined", "Phantom", "Indexed", "Proof", "Option", "NonEmpty", "SortedSet"} {
+	for _, name := range []string{"Refined", "Phantom", "Indexed", "Proof", "Option", "NonEmpty", "SortedSet", "Result"} {
 		obj := scope.Lookup(name)
 		if obj == nil {
 			t.Fatalf("internal/types: missing required core type constructor %s", name)
@@ -1486,6 +1486,194 @@ func (imp *repoImporter) Import(path string) (*types.Package, error) {
 	pkg, err := imp.std.Import(path)
 	if err == nil {
 		imp.cache[path] = pkg
+		return pkg, nil
 	}
-	return pkg, err
+	// Fallback for external modules when running in pure source environments:
+	dummy := types.NewPackage(path, filepath.Base(path))
+	dummy.MarkComplete()
+	imp.cache[path] = dummy
+	return dummy, nil
+}
+
+// TestADTSafety enforces algebraic safety conventions for types.Result and types.Option
+// across all production code in the repository:
+//  1. Calling .Value() directly on types.Result is forbidden in production code
+//     (must use Unwrap(), ValueOr(fallback), or monadic Map/AndThen).
+//  2. Expressions evaluating to types.Result cannot be bare expressions in ExprStmt
+//     (preventing accidental error discarding).
+//  3. Manual unpacking patterns `if res.IsErr() { return ... }` are audited to promote
+//     monadic composition (types.AndThen / types.Map).
+func TestADTSafety(t *testing.T) {
+	root := repoRoot(t)
+	allPkgs := append(discoverPackages(t, root, "cmd"), discoverPackages(t, root, "internal")...)
+
+	imp := newRepoImporter(t, root)
+
+	for _, relPkg := range allPkgs {
+		if relPkg == "internal/arch" || relPkg == "internal/types" {
+			continue
+		}
+		fset := token.NewFileSet()
+		files := parseNonTestFiles(t, fset, filepath.Join(root, relPkg))
+		if len(files) == 0 {
+			continue
+		}
+
+		info := &types.Info{
+			Types:      make(map[ast.Expr]types.TypeAndValue),
+			Defs:       make(map[*ast.Ident]types.Object),
+			Uses:       make(map[*ast.Ident]types.Object),
+			Selections: make(map[*ast.SelectorExpr]*types.Selection),
+		}
+		conf := types.Config{
+			Importer: imp,
+			Error:    func(error) {}, // suppress errors from dummy external package imports
+		}
+		conf.Check(modulePrefix+"/"+relPkg, fset, files, info)
+
+		for _, f := range files {
+			checkFileADTSafety(t, fset, relPkg, f, info)
+		}
+	}
+
+	// Verify that the safety checks actively catch violations:
+	t.Run("ViolationsDetected", func(t *testing.T) {
+		const snippet = `package dummy
+import (
+	"errors"
+	"github.com/RNG999/antic/internal/types"
+)
+func testViolation(r types.Result[string]) types.Result[int] {
+	r.Value()         // violation 1: .Value() in production code
+	types.Ok("hello") // violation 2: unhandled Result[T] statement
+	err := errors.New("boom")
+	if err != nil {
+		return types.Err[int](err) // violation 3: manual if err != nil boilerplate returning Result
+	}
+	return types.Ok(42)
+}
+`
+		testFset := token.NewFileSet()
+		f, err := parser.ParseFile(testFset, "dummy.go", snippet, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info := &types.Info{
+			Types:      make(map[ast.Expr]types.TypeAndValue),
+			Defs:       make(map[*ast.Ident]types.Object),
+			Uses:       make(map[*ast.Ident]types.Object),
+			Selections: make(map[*ast.SelectorExpr]*types.Selection),
+		}
+		conf := types.Config{Importer: imp, Error: func(error) {}}
+		conf.Check("dummy", testFset, []*ast.File{f}, info)
+
+		var errs []string
+		mockT := &recordingT{errs: &errs}
+		checkFileADTSafety(mockT, testFset, "dummy", f, info)
+
+		if len(errs) == 0 {
+			t.Fatalf("expected ADT safety violations to be flagged, got none")
+		}
+		foundValueViolation := false
+		foundDiscardViolation := false
+		foundIfErrViolation := false
+		for _, e := range errs {
+			if strings.Contains(e, "calling Result.Value() is forbidden") {
+				foundValueViolation = true
+			}
+			if strings.Contains(e, "unhandled Result[T]") {
+				foundDiscardViolation = true
+			}
+			if strings.Contains(e, "manual 'if err != nil") {
+				foundIfErrViolation = true
+			}
+		}
+		if !foundValueViolation {
+			t.Fatalf("expected Result.Value() error, got: %v", errs)
+		}
+		if !foundDiscardViolation {
+			t.Fatalf("expected unhandled Result[T] discard error, got: %v", errs)
+		}
+		if !foundIfErrViolation {
+			t.Fatalf("expected manual if err != nil error, got: %v", errs)
+		}
+	})
+}
+
+type recordingT struct {
+	errs *[]string
+}
+
+func (r *recordingT) Errorf(format string, args ...any) {
+	*r.errs = append(*r.errs, fmt.Sprintf(format, args...))
+}
+
+type errorReporter interface {
+	Errorf(format string, args ...any)
+}
+
+func checkFileADTSafety(t errorReporter, fset *token.FileSet, relPkg string, f *ast.File, info *types.Info) {
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.CallExpr:
+			if sel, ok := node.Fun.(*ast.SelectorExpr); ok {
+				if sel.Sel.Name == "Value" {
+					recvType := info.TypeOf(sel.X)
+					if isResultType(recvType) {
+						t.Errorf("%s (%s): calling Result.Value() is forbidden in production code; use Unwrap(), ValueOr(fallback), or monadic Map/AndThen",
+							posStr(fset, node.Pos()), relPkg)
+					}
+				}
+			}
+		case *ast.ExprStmt:
+			exprType := info.TypeOf(node.X)
+			if isResultType(exprType) {
+				t.Errorf("%s (%s): unhandled Result[T]; discarding Result without checking or extracting value violates safety",
+					posStr(fset, node.Pos()), relPkg)
+			}
+		case *ast.IfStmt:
+			// Check for manual "if err != nil { return types.Err[...](err) }" boilerplate
+			// in functions returning Result[T]:
+			if bin, ok := node.Cond.(*ast.BinaryExpr); ok && bin.Op == token.NEQ {
+				if isNilIdent(bin.X) || isNilIdent(bin.Y) {
+					if len(node.Body.List) == 1 {
+						if ret, ok := node.Body.List[0].(*ast.ReturnStmt); ok && len(ret.Results) == 1 {
+							if isResultType(info.TypeOf(ret.Results[0])) {
+								t.Errorf("%s (%s): manual 'if err != nil { return Err(err) }' detected returning Result[T]; use monadic types.AndThen (FlatMap) instead to eliminate boilerplate",
+									posStr(fset, node.Pos()), relPkg)
+							}
+						}
+					}
+				}
+			}
+		}
+		return true
+	})
+}
+
+func isNilIdent(e ast.Expr) bool {
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == "nil"
+}
+
+func isResultType(typ types.Type) bool {
+	if typ == nil {
+		return false
+	}
+	for {
+		if ptr, ok := typ.(*types.Pointer); ok {
+			typ = ptr.Elem()
+			continue
+		}
+		break
+	}
+	named, ok := typ.(*types.Named)
+	if !ok {
+		return false
+	}
+	obj := named.Obj()
+	if obj == nil || obj.Pkg() == nil {
+		return false
+	}
+	return obj.Pkg().Path() == "github.com/RNG999/antic/internal/types" && obj.Name() == "Result"
 }

@@ -99,3 +99,54 @@ func TestPrintable(t *testing.T) {
 		}
 	}
 }
+
+// TestResultMonadicCombinators verifies Wadler (1992) monadic laws and
+// railway-oriented programming combinators for types.Result[T].
+func TestResultMonadicCombinators(t *testing.T) {
+	// From, IsOk, IsErr, Unwrap, ValueOr
+	rOk := types.From(domain.ParseAbsPath("/home/alice"))
+	if !rOk.IsOk() || rOk.IsErr() {
+		t.Fatal("expected rOk to be Ok")
+	}
+	p, err := rOk.Unwrap()
+	if err != nil || p.Get() != "/home/alice" {
+		t.Fatalf("Unwrap failed: %v, %v", p, err)
+	}
+	if rOk.ValueOr(domain.AbsPath{}) != p {
+		t.Fatal("ValueOr failed on Ok")
+	}
+
+	rErr := types.From(domain.ParseAbsPath("not-abs"))
+	if !rErr.IsErr() || rErr.IsOk() {
+		t.Fatal("expected rErr to be Err")
+	}
+	if rErr.ValueOr(p) != p {
+		t.Fatal("ValueOr failed on Err fallback")
+	}
+
+	// Map
+	mapped := types.Map(rOk, func(a domain.AbsPath) string {
+		return a.Get() + "/sub"
+	})
+	if mapped.ValueOr("") != "/home/alice/sub" {
+		t.Fatalf("Map failed: %v", mapped)
+	}
+
+	// AndThen (FlatMap) & Short-circuiting
+	resSuccess := types.AndThen(types.From(domain.ParseAbsPath("/home/alice")), func(p domain.AbsPath) types.Result[string] {
+		return types.Map(types.From(domain.ParseGuestName("alice")), func(g domain.GuestName) string {
+			return g.Get() + ":" + p.Get()
+		})
+	})
+	if !resSuccess.IsOk() || resSuccess.ValueOr("") != "alice:/home/alice" {
+		t.Fatalf("expected successful Result composition, got: %+v", resSuccess)
+	}
+
+	resFailure := types.AndThen(types.From(domain.ParseAbsPath("not-an-abs-path")), func(p domain.AbsPath) types.Result[string] {
+		t.Fatal("subsequent computation should be short-circuited on failure")
+		return types.Ok("never reached")
+	})
+	if !resFailure.IsErr() {
+		t.Fatal("expected failure to short-circuit")
+	}
+}

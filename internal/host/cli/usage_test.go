@@ -129,8 +129,16 @@ func TestRunsHere(t *testing.T) {
 	for _, p := range f.Progs {
 		if p.Type == elf.PT_INTERP {
 			// Point the interpreter somewhere that does not exist.
-			missing := []byte("/nonexistent/ld-linux-x86-64.so.2")
-			copy(b[p.Off:p.Off+p.Filesz], append(missing, make([]byte, int(p.Filesz)-len(missing))...))
+			missing := []byte("/no/such/ld.so")
+			if len(missing) > int(p.Filesz) {
+				missing = []byte("/x")
+			}
+			pad := int(p.Filesz) - len(missing)
+			if pad < 0 {
+				pad = 0
+				missing = missing[:int(p.Filesz)]
+			}
+			copy(b[p.Off:p.Off+p.Filesz], append(missing, make([]byte, pad)...))
 			path := filepath.Join(t.TempDir(), "helper")
 			if err := os.WriteFile(path, b, 0o755); err != nil {
 				t.Fatal(err)
