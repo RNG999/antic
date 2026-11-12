@@ -90,7 +90,7 @@ func (f fixture) shellCmd(c spec.Cmd) error {
 	switch c := c.(type) {
 	case spec.CmdMount:
 		for _, dir := range c.Dirs {
-			real, err := share.NewPolicy(f.home, nil, nil).Resolve(dir)
+			real, err := share.NewPolicy(f.env.Home, nil, nil).Resolve(dir)
 			if err != nil {
 				return err
 			}

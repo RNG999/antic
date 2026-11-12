@@ -22,7 +22,7 @@ func (a *app) skillCmd() *cobra.Command {
 			}
 			return filepath.Join(wd, ".claude/skills/antic"), nil
 		}
-		return filepath.Join(a.dirs.Home, ".claude/skills/antic"), nil
+		return filepath.Join(a.dirs.Home.Get(), ".claude/skills/antic"), nil
 	}
 
 	c := &cobra.Command{

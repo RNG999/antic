@@ -23,7 +23,6 @@ import (
 	"github.com/RNG999/antic/internal/host/share"
 	"github.com/RNG999/antic/internal/host/systemd"
 	"github.com/RNG999/antic/internal/host/transport"
-	"github.com/RNG999/antic/internal/proto"
 )
 
 // Binaries are the host programs antic runs. Self is antic itself (it runs
@@ -36,8 +35,8 @@ type Binaries struct {
 // ("antic update") take precedence, falling back to the system.
 func FindBinaries(d instance.Dirs) Binaries {
 	find := func(name string, extra ...string) string {
-		if d.Libexec != "" {
-			cand := filepath.Join(d.Libexec, name)
+		if d.Libexec.Valid() {
+			cand := filepath.Join(d.Libexec.Get(), name)
 			if _, err := os.Stat(cand); err == nil {
 				return cand
 			}
@@ -58,7 +57,7 @@ func FindBinaries(d instance.Dirs) Binaries {
 	}
 	self = config.RealPath(self)
 	return Binaries{
-		CloudHypervisor: filepath.Join(d.Libexec, "cloud-hypervisor"),
+		CloudHypervisor: filepath.Join(d.Libexec.Get(), "cloud-hypervisor"),
 		Virtiofsd:       find("virtiofsd", "/usr/lib/virtiofsd", "/usr/libexec/virtiofsd"),
 		Passt:           find("passt"),
 		Pasta:           find("pasta"),
@@ -99,8 +98,8 @@ func NewManager(ctx context.Context, d instance.Dirs, cfg *config.Config, log io
 	if err != nil {
 		return nil, err
 	}
-	if d.Home != "/home/"+u.Username {
-		return nil, fmt.Errorf("home directory %s is not /home/%s (shares appear at the same path in the guest)", d.Home, u.Username)
+	if d.Home.Get() != "/home/"+u.Username {
+		return nil, fmt.Errorf("home directory %s is not /home/%s (shares appear at the same path in the guest)", d.Home.Get(), u.Username)
 	}
 	units, err := systemd.Connect(ctx)
 	if err != nil {
@@ -149,7 +148,7 @@ func (m *Manager) Get(name string) (*Guest, error) {
 	}
 	if ok {
 		// Check ownership if an origin file exists
-		if origBytes, err := os.ReadFile(inst.OriginFile()); err == nil {
+		if origBytes, err := os.ReadFile(inst.OriginFile().Get()); err == nil {
 			orig := strings.TrimSpace(string(origBytes))
 			if orig != "" && orig != c.Path {
 				return nil, fmt.Errorf("guest %q already exists and is owned by %s (cannot use from %s)", c.Name, orig, c.Path)
@@ -214,12 +213,12 @@ func (g *Guest) CgroupDir() string {
 	uid := os.Getuid()
 	return filepath.Join("/sys/fs/cgroup/user.slice", fmt.Sprintf("user-%d.slice", uid), fmt.Sprintf("user@%d.service", uid), "antic.slice", g.slice())
 }
-func (g *Guest) store() nixbuild.GuestStore { return nixbuild.GuestStore(g.Inst.StoreDir()) }
-func (g *Guest) api() *chv.Client           { return chv.New(filepath.Join(g.Inst.VMDir(), "api.sock")) }
+func (g *Guest) store() nixbuild.GuestStore { return nixbuild.GuestStore(g.Inst.StoreDir().Get()) }
+func (g *Guest) api() *chv.Client           { return chv.New(filepath.Join(g.Inst.VMDir().Get(), "api.sock")) }
 func (g *Guest) vsock() transport.Vsock {
-	return transport.Vsock{Socket: filepath.Join(g.Inst.VMDir(), "vsock.sock")}
+	return transport.Vsock{Socket: filepath.Join(g.Inst.VMDir().Get(), "vsock.sock")}
 }
-func (g *Guest) sockDir(helper string) string { return filepath.Join(g.Inst.SockDir(), helper) }
+func (g *Guest) sockDir(helper string) string { return filepath.Join(g.Inst.SockDir().Get(), helper) }
 
 // requireCreated fails for a guest without a build.
 func (g *Guest) requireCreated() error {
@@ -267,7 +266,7 @@ func (g *Guest) readBoot(ctx context.Context) (*boot, error) {
 	if !st.Running() {
 		return nil, fmt.Errorf("guest %s is not running", g.Name())
 	}
-	b, err := os.ReadFile(g.Inst.BootFile())
+	b, err := os.ReadFile(g.Inst.BootFile().Get())
 	if err != nil {
 		return nil, fmt.Errorf("guest %s: no boot record: %w", g.Name(), err)
 	}
@@ -286,29 +285,33 @@ func (g *Guest) writeBoot(bt *boot) error {
 	if err != nil {
 		return err
 	}
-	tmp := g.Inst.BootFile() + ".new"
+	tmp := g.Inst.BootFile().Get() + ".new"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, g.Inst.BootFile())
+	return os.Rename(tmp, g.Inst.BootFile().Get())
 }
 
 // policy is the share policy, protecting antic's own directories and every
 // guest's flake.
 func (m *Manager) policy() share.Policy {
-	extra := []string{m.Dirs.ConfigDir, m.Dirs.StateRoot, m.Dirs.Libexec}
+	var extra []domain.AbsPath
+	for _, p := range []domain.AbsPath{m.Dirs.ConfigDir, m.Dirs.StateRoot, m.Dirs.Libexec} {
+		if p.Valid() {
+			extra = append(extra, p)
+		}
+	}
 	if real := config.RealPath(m.Config.Dir()); real != m.Config.Dir() {
-		extra = append(extra, real)
+		if abs, err := domain.ParseAbsPath(filepath.Clean(real)); err == nil {
+			extra = append(extra, abs)
+		}
 	}
 	for _, c := range m.Config.Guests {
 		if c.FlakePath != "" {
-			extra = append(extra, c.FlakePath)
+			if abs, err := domain.ParseAbsPath(filepath.Clean(c.FlakePath)); err == nil {
+				extra = append(extra, abs)
+			}
 		}
 	}
 	return share.NewPolicy(m.Dirs.Home, extra, nil)
-}
-
-// protectedNames are the names exported read-only inside shares.
-func (m *Manager) protectedNames() []string {
-	return append([]string{}, proto.ProtectedNames...)
 }

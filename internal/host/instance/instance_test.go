@@ -12,8 +12,19 @@ import (
 )
 
 func testDirs(t *testing.T) Dirs {
-	d := t.TempDir()
-	return Dirs{Home: d, StateRoot: filepath.Join(d, "state"), RunRoot: filepath.Join(d, "run")}
+	t.Helper()
+	home, err := domain.ParseAbsPath(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Dirs{
+		Home:      home,
+		ConfigDir: domain.JoinAbsPath(home, "config"),
+		StateRoot: domain.JoinAbsPath(home, "state"),
+		RunRoot:   domain.JoinAbsPath(home, "run"),
+		BinDir:    domain.JoinAbsPath(home, "bin"),
+		Libexec:   domain.JoinAbsPath(home, "libexec"),
+	}
 }
 
 func mustGuestName(t *testing.T, s string) domain.GuestName {
@@ -35,7 +46,7 @@ func TestAssignLookupRemove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ro := filepath.Join(inst.StateDir(), "store/nix/store/x")
+	ro := filepath.Join(inst.StateDir().Get(), "store/nix/store/x")
 	os.MkdirAll(ro, 0o755)
 	os.WriteFile(filepath.Join(ro, "f"), nil, 0o444)
 	os.Chmod(ro, 0o555)
@@ -46,18 +57,18 @@ func TestAssignLookupRemove(t *testing.T) {
 	if err := d.Remove(got); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(inst.StateDir()); !os.IsNotExist(err) {
+	if _, err := os.Stat(inst.StateDir().Get()); !os.IsNotExist(err) {
 		t.Fatalf("state dir still there: %v", err)
 	}
 }
 
 func TestLookupRejectsBadLinks(t *testing.T) {
 	d := testDirs(t)
-	os.MkdirAll(d.namesDir(), 0o700)
+	os.MkdirAll(d.namesDir().Get(), 0o700)
 	badName := mustGuestName(t, "bad")
 	for _, dst := range []string{"..", "/", "../guests/../..", "../guests/xyz"} {
-		os.Remove(filepath.Join(d.namesDir(), "bad"))
-		os.Symlink(dst, filepath.Join(d.namesDir(), "bad"))
+		os.Remove(filepath.Join(d.namesDir().Get(), "bad"))
+		os.Symlink(dst, filepath.Join(d.namesDir().Get(), "bad"))
 		if _, _, err := d.Lookup(badName); err == nil {
 			t.Errorf("Lookup accepted link to %q", dst)
 		}
@@ -73,7 +84,7 @@ func TestOrphans(t *testing.T) {
 	a, _ := d.Assign(aName)
 	b, _ := d.Assign(aName) // reassigning leaves the first ID orphaned
 	o, err := d.Orphans()
-	if err != nil || len(o) != 1 || filepath.Base(o[0]) != a.ID.Get() || a.ID == b.ID {
+	if err != nil || len(o) != 1 || filepath.Base(o[0].Get()) != a.ID.Get() || a.ID == b.ID {
 		t.Fatalf("Orphans = %v, %v", o, err)
 	}
 }
@@ -89,7 +100,7 @@ func TestLockContention(t *testing.T) {
 
 	acquired := make(chan struct{})
 	go func() {
-		unlock2, err := d.LockWithReason("dev", "test dev")
+		unlock2, err := d.Lock(devName)
 		if err != nil {
 			t.Errorf("second lock: %v", err)
 			return
@@ -146,7 +157,7 @@ func TestLockTimeout(t *testing.T) {
 	}
 	defer unlock1()
 
-	_, err = d.LockWithTimeout("dev", "test dev", 120*time.Millisecond)
+	_, err = d.LockWithTimeout(devName, 120*time.Millisecond)
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
 	}
@@ -167,7 +178,7 @@ func TestLockContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(100*time.Millisecond, cancel)
 
-	_, err = d.LockWithContext(ctx, "dev", "test dev", 10*time.Second)
+	_, err = d.LockWithContext(ctx, devName, 10*time.Second)
 	if err == nil {
 		t.Fatal("expected context canceled error, got nil")
 	}
@@ -185,7 +196,7 @@ func TestTrashRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	marker := filepath.Join(inst.StateDir(), "marker")
+	marker := filepath.Join(inst.StateDir().Get(), "marker")
 	if err := os.WriteFile(marker, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}

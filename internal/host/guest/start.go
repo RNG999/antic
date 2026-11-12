@@ -43,7 +43,7 @@ func (g *Guest) power(ctx context.Context, kind operation.OpKind) error {
 		return err
 	}
 	defer unlock()
-	draft, err := config.ReadDraft(g.Cfg, g.m.Dirs.Home)
+	draft, err := config.ReadDraft(g.Cfg, g.m.Dirs.Home.Get())
 	if err != nil {
 		return err
 	}
@@ -132,13 +132,13 @@ func (g *Guest) showAgentLog(ctx context.Context) {
 
 // prepareDirs recreates the runtime directories and rotates the logs.
 func (g *Guest) prepareDirs() error {
-	os.RemoveAll(g.Inst.RunDir())
-	for _, d := range []string{g.Inst.VMDir(), g.Inst.SockDir(), g.Inst.LogDir()} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
+	os.RemoveAll(g.Inst.RunDir().Get())
+	for _, d := range []domain.AbsPath{g.Inst.VMDir(), g.Inst.SockDir(), g.Inst.LogDir()} {
+		if err := os.MkdirAll(d.Get(), 0o700); err != nil {
 			return err
 		}
 	}
-	os.Rename(g.Inst.Console(), g.Inst.Console()+".1")
+	os.Rename(g.Inst.Console().Get(), g.Inst.Console().Get()+".1")
 	return nil
 }
 
@@ -146,10 +146,10 @@ func (g *Guest) prepareDirs() error {
 // created and booted through the API afterwards. Helpers bind to this unit,
 // so they stop when cloud-hypervisor exits, however it exits.
 func (g *Guest) startVM(ctx context.Context) error {
-	api := filepath.Join(g.Inst.VMDir(), "api.sock")
+	api := filepath.Join(g.Inst.VMDir().Get(), "api.sock")
 	props := append(systemd.Confine(
-		[]string{g.Inst.VMDir(), g.Inst.LogDir()},
-		[]string{g.Inst.StoreDir(), g.Inst.SockDir(), g.m.Bins.CloudHypervisor},
+		[]string{g.Inst.VMDir().Get(), g.Inst.LogDir().Get()},
+		[]string{g.Inst.StoreDir().Get(), g.Inst.SockDir().Get(), g.m.Bins.CloudHypervisor},
 	), systemd.ProtectProcFS()...)
 	props = append(props,
 		systemd.Prop("NoNewPrivileges", true),
@@ -181,7 +181,7 @@ func (g *Guest) helper(ctx context.Context, name, desc string, props []systemd.P
 // startShare starts virtiofsd for path. Protected paths inside it are bound
 // read-only in virtiofsd's view, so the guest (even guest root) cannot
 // change them. Returns the vhost-user socket.
-func (g *Guest) startShare(ctx context.Context, tag, path string, ro bool, guestID int) (string, error) {
+func (g *Guest) startShare(ctx context.Context, tag string, path domain.AbsPath, ro bool, guestID int) (string, error) {
 	dir := g.sockDir(tag)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
@@ -189,18 +189,20 @@ func (g *Guest) startShare(ctx context.Context, tag, path string, ro bool, guest
 	sock := filepath.Join(dir, "fs.sock")
 	rw, roPaths := []string{dir}, []string{}
 	if ro {
-		roPaths = append(roPaths, path)
+		roPaths = append(roPaths, path.Get())
 	} else {
-		rw = append(rw, path)
-		protected, err := share.Protected(path, g.m.protectedNames())
+		rw = append(rw, path.Get())
+		protected, err := share.Protected(path)
 		if err != nil {
 			return "", err
 		}
-		roPaths = append(roPaths, protected...)
+		for _, p := range protected {
+			roPaths = append(roPaths, p.Get())
+		}
 	}
 	args := []string{g.m.Bins.Virtiofsd,
 		"--socket-path=" + sock,
-		"--shared-dir=" + path,
+		"--shared-dir=" + path.Get(),
 		"--sandbox=namespace",
 		// Only our own UID/GID is mapped, to guestID in the guest.
 		fmt.Sprintf("--uid-map=:%d:%d:1:", guestID, os.Getuid()),
@@ -211,7 +213,7 @@ func (g *Guest) startShare(ctx context.Context, tag, path string, ro bool, guest
 	}
 	props := append(g.m.confine(rw, append(roPaths, g.m.Bins.Virtiofsd)),
 		systemd.Prop("NoNewPrivileges", true), systemd.UnixOnly(), systemd.Prop("PrivateNetwork", true))
-	return sock, g.helper(ctx, g.shareUnitString(tag), "antic share "+path+" ("+g.Name()+")", props, sock, args...)
+	return sock, g.helper(ctx, g.shareUnitString(tag), "antic share "+path.Get()+" ("+g.Name()+")", props, sock, args...)
 }
 
 // Guest IDs our UID/GID appear as: the guest user in shares, root in the
@@ -238,7 +240,7 @@ func (g *Guest) vmConfig(ctx context.Context, system string, bt *boot) (chv.VMCo
 		return chv.VMConfig{}, err
 	}
 
-	storeSock, err := g.startShare(ctx, "store", g.Inst.StoreDir()+"/nix", true, guestRootID)
+	storeSock, err := g.startShare(ctx, "store", domain.JoinAbsPath(g.Inst.StoreDir(), "nix"), true, guestRootID)
 	if err != nil {
 		return chv.VMConfig{}, fmt.Errorf("guest store: %w", err)
 	}
@@ -251,9 +253,9 @@ func (g *Guest) vmConfig(ctx context.Context, system string, bt *boot) (chv.VMCo
 		CPUs:    chv.CPUs{Boot: g.Cfg.CPUs, Max: g.Cfg.CPUs},
 		Memory:  chv.Memory{Size: g.Cfg.MemoryBytes, Shared: true},
 		FS:      []chv.FS{{ID: "fs-store", Tag: proto.StoreTag, Socket: storeSock, NumQueues: 1, QueueSize: 1024}},
-		Vsock:   &chv.Vsock{ID: "vsock", CID: 3, Socket: filepath.Join(g.Inst.VMDir(), "vsock.sock")},
+		Vsock:   &chv.Vsock{ID: "vsock", CID: 3, Socket: filepath.Join(g.Inst.VMDir().Get(), "vsock.sock")},
 		Serial:  chv.Console{Mode: "Off"},
-		Console: chv.Console{Mode: "File", File: g.Inst.Console()},
+		Console: chv.Console{Mode: "File", File: g.Inst.Console().Get()},
 		RNG:     &chv.RNG{Src: "/dev/urandom"},
 	}
 
@@ -265,8 +267,8 @@ func (g *Guest) vmConfig(ctx context.Context, system string, bt *boot) (chv.VMCo
 			return chv.VMConfig{}, fmt.Errorf("guests.%s share: %w", g.Name(), err)
 		}
 		path := absPath.Get()
-		tag := share.Tag(path)
-		sock, err := g.startShare(ctx, tag.Get(), path, s.ReadOnly, guestUserID)
+		tag := share.Tag(absPath)
+		sock, err := g.startShare(ctx, tag.Get(), absPath, s.ReadOnly, guestUserID)
 		if err != nil {
 			return chv.VMConfig{}, fmt.Errorf("share %s: %w", path, err)
 		}

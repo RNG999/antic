@@ -173,4 +173,19 @@ func TestResultMonadicCombinators(t *testing.T) {
 	if !absRes.IsOk() || absRes.ValueOr(domain.AbsPath{}).Get() != "/canonical/abs/path" {
 		t.Fatalf("expected valid AbsPath, got %v", absRes)
 	}
+
+	homePath, err := domain.ParseAbsPath("/home/alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := domain.JoinAbsPath(homePath, ".config/antic", "guests")
+	if !joined.Valid() || joined.Get() != "/home/alice/.config/antic/guests" {
+		t.Fatalf("expected joined AbsPath /home/alice/.config/antic/guests, got %q", joined.Get())
+	}
+	if escaped := domain.JoinAbsPath(homePath, "../bob"); escaped.Valid() {
+		t.Fatalf("expected path escape ../bob to fail JoinAbsPath, got %q", escaped.Get())
+	}
+	if zeroJoined := domain.JoinAbsPath(domain.AbsPath{}, "sub"); zeroJoined.Valid() {
+		t.Fatalf("expected zero base to return invalid AbsPath, got %q", zeroJoined.Get())
+	}
 }

@@ -4,8 +4,20 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+
+	"github.com/RNG999/antic/internal/domain"
 )
+
+func mustAbs(t *testing.T, raw string) domain.AbsPath {
+	t.Helper()
+	abs, err := domain.ParseAbsPath(raw)
+	if err != nil {
+		t.Fatalf("mustAbs(%q): %v", raw, err)
+	}
+	return abs
+}
 
 func mk(t *testing.T, paths ...string) {
 	for _, p := range paths {
@@ -23,12 +35,19 @@ func TestProtected(t *testing.T) {
 	mk(t, r+"/a/.git/hooks/", r+"/a/src/x.go", r+"/b/CLAUDE.md", r+"/b/.claude/settings.json",
 		r+"/bare/HEAD", r+"/bare/objects/", r+"/bare/refs/", r+"/node_modules/x/.git/", r+"/deep/1/2/3/4/5/6/7/8/9/.envrc")
 	os.Symlink("/", r+"/.envrc")
-	got, err := Protected(r, []string{".git", ".claude", "CLAUDE.md", ".envrc"})
+	got, err := Protected(mustAbs(t, r))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{r + "/a/.git", r + "/b/.claude", r + "/b/CLAUDE.md", r + "/bare"}
-	slices.Sort(got)
+	want := []domain.AbsPath{
+		mustAbs(t, r+"/a/.git"),
+		mustAbs(t, r+"/b/.claude"),
+		mustAbs(t, r+"/b/CLAUDE.md"),
+		mustAbs(t, r+"/bare"),
+	}
+	slices.SortFunc(got, func(a, b domain.AbsPath) int {
+		return strings.Compare(a.Get(), b.Get())
+	})
 	if !slices.Equal(got, want) {
 		t.Fatalf("Protected = %v, want %v", got, want)
 	}
@@ -36,10 +55,11 @@ func TestProtected(t *testing.T) {
 
 func TestPolicy(t *testing.T) {
 	home := t.TempDir()
+	homeAbs := mustAbs(t, home)
 	mk(t, home+"/.ssh/", home+"/Work/proj/", home+"/dotfiles/bashrc", home+"/bin/")
 	os.Symlink(home+"/dotfiles/bashrc", home+"/.bashrc")
 	t.Setenv("PATH", home+"/bin:/usr/bin")
-	p := NewPolicy(home, []string{home + "/Work/proj/flake"}, []string{home + "/Work"})
+	p := NewPolicy(homeAbs, []domain.AbsPath{mustAbs(t, home+"/Work/proj/flake")}, []domain.AbsPath{mustAbs(t, home+"/Work")})
 	if _, err := p.Resolve(home + "/Work"); err == nil {
 		t.Error("shared a directory containing a guest flake")
 	}
@@ -55,11 +75,11 @@ func TestPolicy(t *testing.T) {
 	if got, err := p.Resolve(home + "/Projects"); err != nil || got.Get() != home+"/Projects" {
 		t.Errorf("Resolve(Projects) = %q, %v", got, err)
 	}
-	if p.InRootsString(home+"/Projects") || !p.InRootsString(home+"/Work/x") {
+	if p.InRoots(mustAbs(t, home+"/Projects")) || !p.InRoots(mustAbs(t, home+"/Work/x")) {
 		t.Error("InRoots wrong")
 	}
 
-	tag := Tag(home + "/Projects")
+	tag := Tag(mustAbs(t, home+"/Projects"))
 	if !tag.Valid() {
 		t.Errorf("Tag(%s) produced invalid ShareTag %q", home+"/Projects", tag.Get())
 	}

@@ -112,7 +112,7 @@ func (r journalRecord) txnOf(name string) (*txn, error) {
 }
 
 func (g *Guest) journalPath() string {
-	return filepath.Join(g.m.Dirs.StateRoot, "journals", g.Name()+".json")
+	return domain.JoinAbsPath(g.m.Dirs.StateRoot, "journals", g.Name()+".json").Get()
 }
 
 func (g *Guest) writeJournal(r journalRecord) error {
@@ -221,7 +221,7 @@ func (g *Guest) recoverJournal(ctx context.Context, r journalRecord) error {
 		}
 		g.Inst, g.Created = g.m.Dirs.InstanceOf(g.GuestName(), instID), true
 	}
-	tx.draft = config.RestoreDraft(r.ConfigPath, g.Name(), g.m.Dirs.Home, r.NewFile, r.OldConfig, r.NewConfig)
+	tx.draft = config.RestoreDraft(r.ConfigPath, g.Name(), g.m.Dirs.Home.Get(), r.NewFile, r.OldConfig, r.NewConfig)
 	last := types.None[domain.StepIndex]()
 	if n := len(r.Intents); n > 0 {
 		i, err := domain.ParseStepIndex(r.Intents[n-1])
@@ -364,12 +364,20 @@ func (g *Guest) runEffect(ctx context.Context, tx *txn, jr *journalRecord, eff o
 		if e.What == operation.TrashInstance {
 			return g.m.Dirs.TrashInstance(g.Inst)
 		}
-		return g.m.Dirs.TrashConfig(g.GuestName(), g.m.Config.GuestPath(g.Name()))
+		cfgPath, err := domain.ParseAbsPath(g.m.Config.GuestPath(g.Name()))
+		if err != nil {
+			return err
+		}
+		return g.m.Dirs.TrashConfig(g.GuestName(), cfgPath)
 	case operation.EffectRestore:
 		if e.What == operation.TrashInstance {
 			return g.m.Dirs.RestoreInstance(g.Inst)
 		}
-		return g.m.Dirs.RestoreConfig(g.GuestName(), g.m.Config.GuestPath(g.Name()))
+		cfgPath, err := domain.ParseAbsPath(g.m.Config.GuestPath(g.Name()))
+		if err != nil {
+			return err
+		}
+		return g.m.Dirs.RestoreConfig(g.GuestName(), cfgPath)
 	case operation.EffectEmptyTrash:
 		if err := g.m.Dirs.EmptyTrash(g.GuestName()); err != nil {
 			return err
@@ -437,15 +445,15 @@ func (g *Guest) runEffect(ctx context.Context, tx *txn, jr *journalRecord, eff o
 			return err
 		}
 		for _, p := range e.Rehotplug.All() {
-			if err := g.ensureMounted(ctx, p.Get(), tx.modes[p.Get()]); err != nil {
+			if err := g.ensureMounted(ctx, p, tx.modes[p.Get()]); err != nil {
 				return err
 			}
 		}
 		return nil
 	case operation.EffectHotplug:
-		return g.ensureMounted(ctx, e.Path.Get(), tx.modes[e.Path.Get()])
+		return g.ensureMounted(ctx, e.Path, tx.modes[e.Path.Get()])
 	case operation.EffectHotunplug:
-		return g.ensureUnmounted(ctx, e.Path.Get())
+		return g.ensureUnmounted(ctx, e.Path)
 	}
 	return fmt.Errorf("internal error: %T is not implemented by this command yet", eff)
 }
@@ -505,7 +513,7 @@ func (m *Manager) RecoverOrphan(ctx context.Context, name string) error {
 		return err
 	}
 	unlock()
-	c, err := config.Load(m.Config.Dir(), m.Dirs.Home)
+	c, err := config.Load(m.Config.Dir(), m.Dirs.Home.Get())
 	if err != nil {
 		return err
 	}
@@ -523,16 +531,16 @@ func (g *Guest) ensureInstance() error {
 		g.Inst, g.Created = inst, true
 		g.m.logf("guest %s has ID %s", g.Name(), inst.ID.Get())
 	}
-	return os.WriteFile(g.Inst.OriginFile(), []byte(g.Cfg.Path+"\n"), 0o600)
+	return os.WriteFile(g.Inst.OriginFile().Get(), []byte(g.Cfg.Path+"\n"), 0o600)
 }
 
 // ensureMounted hot-plugs path unless the running guest already has it.
-func (g *Guest) ensureMounted(ctx context.Context, path string, ro bool) error {
+func (g *Guest) ensureMounted(ctx context.Context, path domain.AbsPath, ro bool) error {
 	bt, err := g.readBoot(ctx)
 	if err != nil {
 		return err
 	}
-	if slices.ContainsFunc(bt.Shares, func(s bootShare) bool { return s.Path == path }) {
+	if slices.ContainsFunc(bt.Shares, func(s bootShare) bool { return s.Path == path.Get() }) {
 		return nil
 	}
 	return g.hotplug(ctx, bt, path, ro)
@@ -540,12 +548,12 @@ func (g *Guest) ensureMounted(ctx context.Context, path string, ro bool) error {
 
 // ensureUnmounted detaches the hot-plugged share at path unless it is gone.
 // It undoes its own partial work on failure.
-func (g *Guest) ensureUnmounted(ctx context.Context, path string) error {
+func (g *Guest) ensureUnmounted(ctx context.Context, path domain.AbsPath) error {
 	bt, err := g.readBoot(ctx)
 	if err != nil {
 		return err
 	}
-	i := slices.IndexFunc(bt.Shares, func(s bootShare) bool { return s.Path == path && s.Runtime })
+	i := slices.IndexFunc(bt.Shares, func(s bootShare) bool { return s.Path == path.Get() && s.Runtime })
 	if i < 0 {
 		return nil
 	}
@@ -565,7 +573,7 @@ func (g *Guest) ensureUnmounted(ctx context.Context, path string) error {
 		return err
 	}
 	if err := g.m.Units.Stop(ctx, g.shareUnitString(s.Tag)); err != nil {
-		g.m.logf("warning: %s is unmounted, but stopping its virtiofsd failed: %v", path, err)
+		g.m.logf("warning: %s is unmounted, but stopping its virtiofsd failed: %v", path.Get(), err)
 	}
 	return nil
 }

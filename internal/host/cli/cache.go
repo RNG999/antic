@@ -32,7 +32,7 @@ func (a *app) cacheCmd() *cobra.Command {
 // cacheEntries returns all cached guest builds annotated with the guests that
 // currently use each build (either via their installed store path or config).
 func (a *app) cacheEntries() ([]nixbuild.CacheEntry, error) {
-	entries, err := nixbuild.ListCache(a.dirs.CacheDir())
+	entries, err := nixbuild.ListCache(a.dirs.CacheDir().Get())
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +59,7 @@ func (a *app) cacheEntries() ([]nixbuild.CacheEntry, error) {
 			}
 			if gName, parseErr := domain.ParseGuestName(name); parseErr == nil {
 				if inst, ok, err := a.dirs.Lookup(gName); err == nil && ok {
-					if cur, err := nixbuild.GuestStore(inst.StoreDir()).Current(); err == nil && cur != "" {
+					if cur, err := nixbuild.GuestStore(inst.StoreDir().Get()).Current(); err == nil && cur != "" {
 						bySystem[cur] = append(bySystem[cur], name)
 					}
 				}
@@ -181,7 +181,7 @@ func (a *app) cacheRm() *cobra.Command {
 			}
 
 			for _, t := range toRemove {
-				if err := nixbuild.RemoveCache(a.dirs.CacheDir(), t.key); err != nil {
+				if err := nixbuild.RemoveCache(a.dirs.CacheDir().Get(), t.key); err != nil {
 					return err
 				}
 				fmt.Fprintf(os.Stderr, "antic: removed cache (%s)\n", t.desc)

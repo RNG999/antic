@@ -420,7 +420,7 @@ func (a *app) guestShow() *cobra.Command {
 		ValidArgsFunction: a.guestArgs,
 		RunE: func(c *cobra.Command, args []string) error {
 			if len(args) == 0 && showPath {
-				fmt.Println(a.dirs.GuestsConfigDir())
+				fmt.Println(a.dirs.GuestsConfigDir().Get())
 				return nil
 			}
 

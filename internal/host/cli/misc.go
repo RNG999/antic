@@ -118,7 +118,7 @@ func (a *app) doctorCmd() *cobra.Command {
 			}
 			_, err = nixbuild.New()
 			check("nix", err)
-			cfg, err := config.Load(a.dirs.GuestsConfigDir(), a.dirs.Home)
+			cfg, err := config.Load(a.dirs.GuestsConfigDir().Get(), a.dirs.Home.Get())
 			if err == nil && cfg != nil && len(cfg.Errors) > 0 {
 				var errMsgs []string
 				for n, e := range cfg.Errors {
@@ -126,7 +126,7 @@ func (a *app) doctorCmd() *cobra.Command {
 				}
 				err = errors.New(strings.Join(errMsgs, "; "))
 			}
-			check("config "+a.dirs.GuestsConfigDir(), err)
+			check("config "+a.dirs.GuestsConfigDir().Get(), err)
 			if bad > 0 {
 				return fmt.Errorf("%d check(s) failed", bad)
 			}
@@ -144,12 +144,12 @@ func (a *app) updateCmd() *cobra.Command {
 		Short: "Build antic (and cloud-hypervisor) and install them",
 		Args:  cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
-			for _, dir := range []string{a.dirs.GuestsConfigDir(), a.dirs.StateRoot} {
+			for _, dir := range []string{a.dirs.GuestsConfigDir().Get(), a.dirs.StateRoot.Get()} {
 				if err := os.MkdirAll(dir, 0o700); err != nil {
 					return err
 				}
 			}
-			unlockUpdate, err := a.dirs.LockWithReason("update", "antic update")
+			unlockUpdate, err := a.dirs.LockUpdate()
 			if err != nil {
 				return err
 			}
@@ -175,13 +175,13 @@ func (a *app) updateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			anticDst := filepath.Join(a.dirs.BinDir, "antic")
+			anticDst := filepath.Join(a.dirs.BinDir.Get(), "antic")
 			if err := install(nix.Real(anticOut)+"/bin/antic", anticDst); err != nil {
 				return err
 			}
 			fmt.Fprintf(os.Stderr, "antic: installed %s\n", anticDst)
 
-			gcRoot := filepath.Join(a.dirs.StateRoot, "libexec")
+			gcRoot := filepath.Join(a.dirs.StateRoot.Get(), "libexec")
 			libexecOut, err := nix.BuildLink(c.Context(), src, "libexec", gcRoot)
 			if err != nil {
 				return err
@@ -198,7 +198,7 @@ func (a *app) updateCmd() *cobra.Command {
 				if err := runsHere(sp); err != nil {
 					return fmt.Errorf("refusing to install %s: %w", name, err)
 				}
-				dp := filepath.Join(a.dirs.Libexec, name)
+				dp := filepath.Join(a.dirs.Libexec.Get(), name)
 				if err := install(sp, dp); err != nil {
 					return err
 				}

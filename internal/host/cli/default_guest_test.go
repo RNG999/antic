@@ -8,9 +8,19 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/RNG999/antic/internal/domain"
 	"github.com/RNG999/antic/internal/host/config"
 	"github.com/RNG999/antic/internal/host/instance"
 )
+
+func mustAbs(t *testing.T, p string) domain.AbsPath {
+	t.Helper()
+	abs, err := domain.ParseAbsPath(p)
+	if err != nil {
+		t.Fatalf("ParseAbsPath(%q): %v", p, err)
+	}
+	return abs
+}
 
 func setupTestAppWithGuests(t *testing.T, guestNames ...string) *app {
 	t.Helper()
@@ -38,10 +48,10 @@ func setupTestAppWithGuests(t *testing.T, guestNames ...string) *app {
 	}
 
 	d := instance.Dirs{
-		ConfigDir: filepath.Dir(configDir),
-		StateRoot: filepath.Join(tmp, "state"),
-		RunRoot:   filepath.Join(tmp, "run"),
-		Home:      "/home/" + u.Username,
+		ConfigDir: mustAbs(t, filepath.Dir(configDir)),
+		StateRoot: mustAbs(t, filepath.Join(tmp, "state")),
+		RunRoot:   mustAbs(t, filepath.Join(tmp, "run")),
+		Home:      mustAbs(t, "/home/"+u.Username),
 	}
 
 	return &app{

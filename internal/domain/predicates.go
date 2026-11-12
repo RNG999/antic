@@ -174,6 +174,26 @@ func PathsOverlap(a, b AbsPath) bool {
 	return a.Get() == b.Get() || WithinSubtree(a, b) || WithinSubtree(b, a)
 }
 
+// JoinAbsPath joins relative path segments onto base and returns the canonical
+// AbsPath beneath base. If base is invalid or the joined path escapes base, it
+// returns a zero AbsPath.
+func JoinAbsPath(base AbsPath, elems ...string) AbsPath {
+	if !base.Valid() {
+		return AbsPath{}
+	}
+	all := make([]string, 0, 1+len(elems))
+	all = append(all, base.Get())
+	all = append(all, elems...)
+	abs, err := ParseAbsPath(path.Join(all...))
+	if err != nil {
+		return AbsPath{}
+	}
+	if abs != base && !WithinSubtree(base, abs) {
+		return AbsPath{}
+	}
+	return abs
+}
+
 // UserNamePred refines string to valid POSIX login names without slashes.
 type UserNamePred struct{}
 

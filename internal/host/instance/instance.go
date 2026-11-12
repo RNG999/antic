@@ -29,38 +29,46 @@ import (
 
 // Dirs is the set of host directories antic uses.
 type Dirs struct {
-	Home      string
-	ConfigDir string
-	StateRoot string
-	RunRoot   string
-	BinDir    string
-	Libexec   string
+	Home      domain.AbsPath
+	ConfigDir domain.AbsPath
+	StateRoot domain.AbsPath
+	RunRoot   domain.AbsPath
+	BinDir    domain.AbsPath
+	Libexec   domain.AbsPath
 }
 
 // Default returns the directories for the current user.
 func Default() (Dirs, error) {
-	home, err := os.UserHomeDir()
+	rawHome, err := os.UserHomeDir()
 	if err != nil {
 		return Dirs{}, err
 	}
-	run := os.Getenv("XDG_RUNTIME_DIR")
-	if run == "" {
-		run = filepath.Join("/run/user", strconv.Itoa(os.Getuid()))
+	home, err := domain.ParseAbsPath(filepath.Clean(rawHome))
+	if err != nil {
+		return Dirs{}, err
+	}
+	rawRun := os.Getenv("XDG_RUNTIME_DIR")
+	if rawRun == "" {
+		rawRun = filepath.Join("/run/user", strconv.Itoa(os.Getuid()))
+	}
+	runDir, err := domain.ParseAbsPath(filepath.Clean(rawRun))
+	if err != nil {
+		return Dirs{}, err
 	}
 	return Dirs{
 		Home:      home,
-		ConfigDir: filepath.Join(home, ".config/antic"),
-		StateRoot: filepath.Join(home, ".local/state/antic"),
-		RunRoot:   filepath.Join(run, "antic"),
-		BinDir:    filepath.Join(home, ".local/bin"),
-		Libexec:   filepath.Join(home, ".local/libexec/antic"),
+		ConfigDir: domain.JoinAbsPath(home, ".config/antic"),
+		StateRoot: domain.JoinAbsPath(home, ".local/state/antic"),
+		RunRoot:   domain.JoinAbsPath(runDir, "antic"),
+		BinDir:    domain.JoinAbsPath(home, ".local/bin"),
+		Libexec:   domain.JoinAbsPath(home, ".local/libexec/antic"),
 	}, nil
 }
 
-func (d Dirs) GuestsConfigDir() string { return filepath.Join(d.ConfigDir, "guests") }
-func (d Dirs) CacheDir() string        { return filepath.Join(d.StateRoot, "cache") }
-func (d Dirs) guestsDir() string       { return filepath.Join(d.StateRoot, "guests") }
-func (d Dirs) namesDir() string        { return filepath.Join(d.StateRoot, "names") }
+func (d Dirs) GuestsConfigDir() domain.AbsPath { return domain.JoinAbsPath(d.ConfigDir, "guests") }
+func (d Dirs) CacheDir() domain.AbsPath        { return domain.JoinAbsPath(d.StateRoot, "cache") }
+func (d Dirs) guestsDir() domain.AbsPath       { return domain.JoinAbsPath(d.StateRoot, "guests") }
+func (d Dirs) namesDir() domain.AbsPath        { return domain.JoinAbsPath(d.StateRoot, "names") }
 
 // Instance is a guest's identity and its directories.
 type Instance struct {
@@ -69,35 +77,35 @@ type Instance struct {
 	d    Dirs
 }
 
-func (i Instance) StateDir() string   { return filepath.Join(i.d.guestsDir(), i.ID.Get()) }
-func (i Instance) StoreDir() string   { return filepath.Join(i.StateDir(), "store") } // the guest's /nix lives in store/nix
-func (i Instance) LogDir() string     { return filepath.Join(i.StateDir(), "log") }
-func (i Instance) Console() string    { return filepath.Join(i.LogDir(), "console.log") }
-func (i Instance) OriginFile() string { return filepath.Join(i.StateDir(), "origin") }
-func (i Instance) RunDir() string     { return filepath.Join(i.d.RunRoot, i.ID.Get()) }
-func (i Instance) VMDir() string      { return filepath.Join(i.RunDir(), "vm") }   // cloud-hypervisor's own sockets
-func (i Instance) SockDir() string    { return filepath.Join(i.RunDir(), "sock") } // helpers' sockets, one directory each
-func (i Instance) BootFile() string   { return filepath.Join(i.RunDir(), "boot.json") }
+func (i Instance) StateDir() domain.AbsPath   { return domain.JoinAbsPath(i.d.guestsDir(), i.ID.Get()) }
+func (i Instance) StoreDir() domain.AbsPath   { return domain.JoinAbsPath(i.StateDir(), "store") } // the guest's /nix lives in store/nix
+func (i Instance) LogDir() domain.AbsPath     { return domain.JoinAbsPath(i.StateDir(), "log") }
+func (i Instance) Console() domain.AbsPath    { return domain.JoinAbsPath(i.LogDir(), "console.log") }
+func (i Instance) OriginFile() domain.AbsPath { return domain.JoinAbsPath(i.StateDir(), "origin") }
+func (i Instance) RunDir() domain.AbsPath     { return domain.JoinAbsPath(i.d.RunRoot, i.ID.Get()) }
+func (i Instance) VMDir() domain.AbsPath      { return domain.JoinAbsPath(i.RunDir(), "vm") }   // cloud-hypervisor's own sockets
+func (i Instance) SockDir() domain.AbsPath    { return domain.JoinAbsPath(i.RunDir(), "sock") } // helpers' sockets, one directory each
+func (i Instance) BootFile() domain.AbsPath   { return domain.JoinAbsPath(i.RunDir(), "boot.json") }
 
 // Lookup returns the instance of name; ok is false if it has no ID yet. A
 // names/ link that is not exactly "../guests/<12 hex digits>" is an error,
 // never something to act on.
 func (d Dirs) Lookup(name domain.GuestName) (Instance, bool, error) {
-	link := filepath.Join(d.namesDir(), name.Get())
-	dst, err := os.Readlink(link)
+	link := domain.JoinAbsPath(d.namesDir(), name.Get())
+	dst, err := os.Readlink(link.Get())
 	if errors.Is(err, os.ErrNotExist) {
 		return Instance{Name: name, d: d}, false, nil
 	}
 	if err != nil {
-		return Instance{}, false, fmt.Errorf("%s: %w", link, err)
+		return Instance{}, false, fmt.Errorf("%s: %w", link.Get(), err)
 	}
 	idStr := filepath.Base(dst)
 	if dst != filepath.Join("..", "guests", idStr) {
-		return Instance{}, false, fmt.Errorf("%s points to %q, not ../guests/<id>; fix or remove it", link, dst)
+		return Instance{}, false, fmt.Errorf("%s points to %q, not ../guests/<id>; fix or remove it", link.Get(), dst)
 	}
 	id, err := domain.ParseInstanceID(idStr)
 	if err != nil {
-		return Instance{}, false, fmt.Errorf("%s points to %q, not ../guests/<id>; fix or remove it", link, dst)
+		return Instance{}, false, fmt.Errorf("%s points to %q, not ../guests/<id>; fix or remove it", link.Get(), dst)
 	}
 	return Instance{Name: name, ID: id, d: d}, true, nil
 }
@@ -114,18 +122,18 @@ func (d Dirs) Assign(name domain.GuestName) (Instance, error) {
 		return Instance{}, err
 	}
 	inst := Instance{Name: name, ID: id, d: d}
-	if err := os.MkdirAll(inst.StateDir(), 0o700); err != nil {
+	if err := os.MkdirAll(inst.StateDir().Get(), 0o700); err != nil {
 		return Instance{}, err
 	}
-	if err := os.MkdirAll(d.namesDir(), 0o700); err != nil {
+	if err := os.MkdirAll(d.namesDir().Get(), 0o700); err != nil {
 		return Instance{}, err
 	}
-	tmp := filepath.Join(d.namesDir(), "."+name.Get()+".new")
-	os.Remove(tmp)
-	if err := os.Symlink(filepath.Join("..", "guests", inst.ID.Get()), tmp); err != nil {
+	tmp := domain.JoinAbsPath(d.namesDir(), "."+name.Get()+".new")
+	os.Remove(tmp.Get())
+	if err := os.Symlink(filepath.Join("..", "guests", inst.ID.Get()), tmp.Get()); err != nil {
 		return Instance{}, err
 	}
-	return inst, os.Rename(tmp, filepath.Join(d.namesDir(), name.Get()))
+	return inst, os.Rename(tmp.Get(), domain.JoinAbsPath(d.namesDir(), name.Get()).Get())
 }
 
 // Remove deletes the instance's state and its name link.
@@ -136,10 +144,10 @@ func (d Dirs) Remove(inst Instance) error {
 	if err := removeAll(inst.StateDir()); err != nil {
 		return err
 	}
-	os.RemoveAll(inst.RunDir())
-	link := filepath.Join(d.namesDir(), inst.Name.Get())
-	if dst, err := os.Readlink(link); err == nil && filepath.Base(dst) == inst.ID.Get() {
-		return os.Remove(link)
+	os.RemoveAll(inst.RunDir().Get())
+	link := domain.JoinAbsPath(d.namesDir(), inst.Name.Get())
+	if dst, err := os.Readlink(link.Get()); err == nil && filepath.Base(dst) == inst.ID.Get() {
+		return os.Remove(link.Get())
 	}
 	return nil
 }
@@ -151,8 +159,8 @@ func (d Dirs) InstanceOf(name domain.GuestName, id domain.InstanceID) Instance {
 }
 
 // TrashDir holds what "guest rm" moved aside until it succeeds.
-func (d Dirs) TrashDir(name domain.GuestName) string {
-	return filepath.Join(d.StateRoot, "trash", name.Get())
+func (d Dirs) TrashDir(name domain.GuestName) domain.AbsPath {
+	return domain.JoinAbsPath(d.StateRoot, "trash", name.Get())
 }
 
 // TrashInstance moves the instance's state and name link to the trash.
@@ -162,19 +170,19 @@ func (d Dirs) TrashInstance(inst Instance) error {
 		return fmt.Errorf("refusing to move guest state with invalid ID %q", inst.ID.Get())
 	}
 	trash := d.TrashDir(inst.Name)
-	if err := os.MkdirAll(trash, 0o700); err != nil {
+	if err := os.MkdirAll(trash.Get(), 0o700); err != nil {
 		return err
 	}
-	if err := renameIfExists(inst.StateDir(), filepath.Join(trash, inst.ID.Get())); err != nil {
+	if err := renameIfExists(inst.StateDir(), domain.JoinAbsPath(trash, inst.ID.Get())); err != nil {
 		return err
 	}
-	link := filepath.Join(d.namesDir(), inst.Name.Get())
-	if dst, err := os.Readlink(link); err == nil && filepath.Base(dst) == inst.ID.Get() {
-		if err := os.Rename(link, filepath.Join(trash, "name")); err != nil {
+	link := domain.JoinAbsPath(d.namesDir(), inst.Name.Get())
+	if dst, err := os.Readlink(link.Get()); err == nil && filepath.Base(dst) == inst.ID.Get() {
+		if err := os.Rename(link.Get(), domain.JoinAbsPath(trash, "name").Get()); err != nil {
 			return err
 		}
 	}
-	os.RemoveAll(inst.RunDir())
+	os.RemoveAll(inst.RunDir().Get())
 	return nil
 }
 
@@ -182,72 +190,74 @@ func (d Dirs) TrashInstance(inst Instance) error {
 // that is not in the trash does nothing.
 func (d Dirs) RestoreInstance(inst Instance) error {
 	trash := d.TrashDir(inst.Name)
-	if err := renameIfExists(filepath.Join(trash, inst.ID.Get()), inst.StateDir()); err != nil {
+	if err := renameIfExists(domain.JoinAbsPath(trash, inst.ID.Get()), inst.StateDir()); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(d.namesDir(), 0o700); err != nil {
+	if err := os.MkdirAll(d.namesDir().Get(), 0o700); err != nil {
 		return err
 	}
-	return renameIfExists(filepath.Join(trash, "name"), filepath.Join(d.namesDir(), inst.Name.Get()))
+	return renameIfExists(domain.JoinAbsPath(trash, "name"), domain.JoinAbsPath(d.namesDir(), inst.Name.Get()))
 }
 
-// TrashConfig moves guest name's config file at path to the trash; moving
+// TrashConfig moves guest name's config file at configPath to the trash; moving
 // a file that is already there does nothing.
-func (d Dirs) TrashConfig(name domain.GuestName, path string) error {
-	return renameIfExists(path, filepath.Join(d.TrashDir(name), "config.toml"))
+func (d Dirs) TrashConfig(name domain.GuestName, configPath domain.AbsPath) error {
+	return renameIfExists(configPath, domain.JoinAbsPath(d.TrashDir(name), "config.toml"))
 }
 
-// RestoreConfig moves a trashed config file back to path; restoring a file
+// RestoreConfig moves a trashed config file back to configPath; restoring a file
 // that is not in the trash does nothing.
-func (d Dirs) RestoreConfig(name domain.GuestName, path string) error {
-	return renameIfExists(filepath.Join(d.TrashDir(name), "config.toml"), path)
+func (d Dirs) RestoreConfig(name domain.GuestName, configPath domain.AbsPath) error {
+	return renameIfExists(domain.JoinAbsPath(d.TrashDir(name), "config.toml"), configPath)
 }
 
 // EmptyTrash deletes what "guest rm" moved aside for name.
 func (d Dirs) EmptyTrash(name domain.GuestName) error { return removeAll(d.TrashDir(name)) }
 
-func renameIfExists(from, to string) error {
-	if _, err := os.Lstat(from); errors.Is(err, os.ErrNotExist) {
+func renameIfExists(from, to domain.AbsPath) error {
+	if _, err := os.Lstat(from.Get()); errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(to), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(to.Get()), 0o700); err != nil {
 		return err
 	}
-	return os.Rename(from, to)
+	return os.Rename(from.Get(), to.Get())
 }
 
 // removeAll deletes dir, including the guest store, whose directories Nix
 // makes read-only.
-func removeAll(dir string) error {
-	filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
-		if err == nil && d.IsDir() {
-			os.Chmod(p, 0o700)
+func removeAll(dir domain.AbsPath) error {
+	filepath.WalkDir(dir.Get(), func(walkEntryPath string, entry os.DirEntry, err error) error {
+		if err == nil && entry.IsDir() {
+			os.Chmod(walkEntryPath, 0o700)
 		}
 		return nil
 	})
-	return os.RemoveAll(dir)
+	return os.RemoveAll(dir.Get())
 }
 
 // RemoveDir deletes a guest state directory (see Orphans).
-func RemoveDir(dir string) error { return removeAll(dir) }
+func RemoveDir(dir domain.AbsPath) error { return removeAll(dir) }
 
 // Orphans lists state directories no name links to.
-func (d Dirs) Orphans() ([]string, error) {
-	used := map[string]bool{}
-	links, _ := os.ReadDir(d.namesDir())
+func (d Dirs) Orphans() ([]domain.AbsPath, error) {
+	used := map[domain.InstanceID]bool{}
+	links, _ := os.ReadDir(d.namesDir().Get())
 	for _, e := range links {
-		if dst, err := os.Readlink(filepath.Join(d.namesDir(), e.Name())); err == nil {
-			used[filepath.Base(dst)] = true
+		if dst, err := os.Readlink(domain.JoinAbsPath(d.namesDir(), e.Name()).Get()); err == nil {
+			if id, idErr := domain.ParseInstanceID(filepath.Base(dst)); idErr == nil {
+				used[id] = true
+			}
 		}
 	}
-	dirs, err := os.ReadDir(d.guestsDir())
+	dirs, err := os.ReadDir(d.guestsDir().Get())
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
-	var out []string
+	var out []domain.AbsPath
 	for _, e := range dirs {
-		if _, parseErr := domain.ParseInstanceID(e.Name()); parseErr == nil && !used[e.Name()] {
-			out = append(out, filepath.Join(d.guestsDir(), e.Name()))
+		if id, parseErr := domain.ParseInstanceID(e.Name()); parseErr == nil && !used[id] {
+			out = append(out, domain.JoinAbsPath(d.guestsDir(), id.Get()))
 		}
 	}
 	return out, err
@@ -271,40 +281,49 @@ func defaultTimeout(fallback time.Duration) time.Duration {
 // processes (AI agents run tools in parallel). Unlock by calling the
 // returned function. Times out after defaultLockTimeout.
 func (d Dirs) Lock(name domain.GuestName) (func(), error) {
-	return d.LockWithTimeout(name.Get(), fmt.Sprintf("guest %q", name.Get()), defaultTimeout(defaultLockTimeout))
+	return d.LockWithTimeout(name, defaultTimeout(defaultLockTimeout))
 }
 
 // LockNixBuild serializes Nix builds across antic processes so that
 // concurrent builds don't collide on the Nix eval-cache or store lock.
 // Times out after defaultNixBuildTimeout.
 func (d Dirs) LockNixBuild() (func(), error) {
-	return d.LockWithTimeout("nixbuild", "Nix build", defaultTimeout(defaultNixBuildTimeout))
-}
-
-// LockWithReason takes an exclusive lock under StateRoot/locks/.
-// If the lock is held by another process, it notifies the user on stderr
-// and waits until the lock is acquired or defaultLockTimeout expires.
-func (d Dirs) LockWithReason(name, description string) (func(), error) {
-	return d.LockWithTimeout(name, description, defaultTimeout(defaultLockTimeout))
-}
-
-// LockWithTimeout takes an exclusive lock under StateRoot/locks/, waiting up to timeout.
-func (d Dirs) LockWithTimeout(name, description string, timeout time.Duration) (func(), error) {
+	timeout := defaultTimeout(defaultNixBuildTimeout)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return d.LockWithContext(ctx, name, description, timeout)
+	return d.lockNamed(ctx, "nixbuild", "Nix build", timeout)
 }
 
-// LockWithContext takes an exclusive lock under StateRoot/locks/.
+// LockUpdate serializes self-update operations across antic processes.
+// Times out after defaultLockTimeout.
+func (d Dirs) LockUpdate() (func(), error) {
+	timeout := defaultTimeout(defaultLockTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return d.lockNamed(ctx, "update", "antic update", timeout)
+}
+
+// LockWithTimeout takes an exclusive lock for guest name under StateRoot/locks/, waiting up to timeout.
+func (d Dirs) LockWithTimeout(name domain.GuestName, timeout time.Duration) (func(), error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return d.LockWithContext(ctx, name, timeout)
+}
+
+// LockWithContext takes an exclusive lock for guest name under StateRoot/locks/.
 // If the lock is held by another process, it notifies the user on stderr
 // and polls until acquired or ctx is cancelled / timeout expires.
-func (d Dirs) LockWithContext(ctx context.Context, name, description string, timeout time.Duration) (func(), error) {
-	dir := filepath.Join(d.StateRoot, "locks")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+func (d Dirs) LockWithContext(ctx context.Context, name domain.GuestName, timeout time.Duration) (func(), error) {
+	return d.lockNamed(ctx, name.Get(), fmt.Sprintf("guest %q", name.Get()), timeout)
+}
+
+func (d Dirs) lockNamed(ctx context.Context, lockKey, description string, _ time.Duration) (func(), error) {
+	locksDir := domain.JoinAbsPath(d.StateRoot, "locks")
+	if err := os.MkdirAll(locksDir.Get(), 0o700); err != nil {
 		return nil, err
 	}
-	lockPath := filepath.Join(dir, name+".lock")
-	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE|unix.O_NOFOLLOW, 0o600)
+	lockFile := domain.JoinAbsPath(locksDir, lockKey+".lock")
+	f, err := os.OpenFile(lockFile.Get(), os.O_RDWR|os.O_CREATE|unix.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -318,7 +337,7 @@ func (d Dirs) LockWithContext(ctx context.Context, name, description string, tim
 		return nil, err
 	}
 
-	holder := readLockPID(lockPath)
+	holder := readLockPID(lockFile)
 	holderMsg := "another process"
 	if holder != "" {
 		holderMsg = holder
@@ -334,7 +353,7 @@ func (d Dirs) LockWithContext(ctx context.Context, name, description string, tim
 		case <-ctx.Done():
 			f.Close()
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				if h := readLockPID(lockPath); h != "" {
+				if h := readLockPID(lockFile); h != "" {
 					holderMsg = h
 				}
 				elapsed := time.Since(start).Round(time.Millisecond)
@@ -372,8 +391,8 @@ func lockCleanup(f *os.File) func() {
 	}
 }
 
-func readLockPID(path string) string {
-	b, err := os.ReadFile(path)
+func readLockPID(lockFile domain.AbsPath) string {
+	b, err := os.ReadFile(lockFile.Get())
 	if err != nil {
 		return ""
 	}

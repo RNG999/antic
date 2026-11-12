@@ -98,7 +98,7 @@ func (a *app) loadConfig() error {
 		return nil
 	}
 	cwd, _ := os.Getwd()
-	cfg, err := config.LoadWithProject(a.dirs.GuestsConfigDir(), a.dirs.Home, cwd)
+	cfg, err := config.LoadWithProject(a.dirs.GuestsConfigDir().Get(), a.dirs.Home.Get(), cwd)
 	if err != nil {
 		return err
 	}

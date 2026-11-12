@@ -72,7 +72,7 @@ func (g *Guest) applyWith(ctx context.Context, edit func(config.Draft) (config.D
 		return err
 	}
 	defer unlock()
-	draft, err := config.ReadDraft(g.Cfg, g.m.Dirs.Home)
+	draft, err := config.ReadDraft(g.Cfg, g.m.Dirs.Home.Get())
 	if err != nil {
 		return err
 	}
@@ -113,9 +113,9 @@ func (g *Guest) build(ctx context.Context, c *config.Guest) (string, error) {
 			return "", err
 		}
 		g.m.logf("building %s#nixosConfigurations.%s...", c.FlakePath, c.FlakeAttr)
-		return nix.BuildFlakeCached(ctx, g.m.Dirs.CacheDir(), c.FlakePath, c.FlakeAttr)
+		return nix.BuildFlakeCached(ctx, g.m.Dirs.CacheDir().Get(), c.FlakePath, c.FlakeAttr)
 	}
-	system, hit, err := nix.BuildBuiltinCached(ctx, g.m.Dirs.CacheDir(), g.m.User, c.Packages, func() {
+	system, hit, err := nix.BuildBuiltinCached(ctx, g.m.Dirs.CacheDir().Get(), g.m.User, c.Packages, func() {
 		g.m.logf("building guest %s (%s)...", g.Name(), g.osDesc())
 	})
 	if err != nil {
@@ -180,12 +180,12 @@ func (m *Manager) Create(ctx context.Context, name string, spec config.Guest, fl
 		if g, err = m.Get(name); err != nil {
 			return nil, err
 		}
-		if draft, err = config.ReadDraft(g.Cfg, m.Dirs.Home); err != nil {
+		if draft, err = config.ReadDraft(g.Cfg, m.Dirs.Home.Get()); err != nil {
 			return nil, err
 		}
 	} else {
 		var err error
-		if draft, err = m.Config.NewGuestDraft(name, spec, m.Dirs.Home); err != nil {
+		if draft, err = m.Config.NewGuestDraft(name, spec, m.Dirs.Home.Get()); err != nil {
 			return nil, err
 		}
 		guestName, err := domain.ParseGuestName(name)
@@ -230,7 +230,7 @@ func (g *Guest) Remove(ctx context.Context) error {
 	defer unlock()
 	// Removing needs the file's bytes (for the journal), not its meaning:
 	// a guest whose config does not load can be removed too (D17).
-	draft, err := config.ReadRawDraft(g.Cfg.Path, g.Name(), g.m.Dirs.Home)
+	draft, err := config.ReadRawDraft(g.Cfg.Path, g.Name(), g.m.Dirs.Home.Get())
 	if err != nil {
 		return err
 	}
@@ -404,7 +404,7 @@ func (g *Guest) Reconfigure(ctx context.Context, edit func(config.Draft) (config
 		return false, err
 	}
 	defer unlock()
-	draft, err := config.ReadDraft(g.Cfg, g.m.Dirs.Home)
+	draft, err := config.ReadDraft(g.Cfg, g.m.Dirs.Home.Get())
 	if err != nil {
 		return false, err
 	}
@@ -430,7 +430,7 @@ func (g *Guest) Edit(ctx context.Context, old, content []byte) (bool, error) {
 		return false, err
 	}
 	defer unlock()
-	draft, err := config.ReadDraft(g.Cfg, g.m.Dirs.Home)
+	draft, err := config.ReadDraft(g.Cfg, g.m.Dirs.Home.Get())
 	if err != nil {
 		return false, err
 	}
@@ -526,7 +526,7 @@ func (g *Guest) AddShare(ctx context.Context, path string, ro bool) (string, boo
 	}
 	defer unlock()
 
-	draft, err := config.ReadDraft(g.Cfg, g.m.Dirs.Home)
+	draft, err := config.ReadDraft(g.Cfg, g.m.Dirs.Home.Get())
 	if err != nil {
 		return "", false, err
 	}
@@ -567,7 +567,7 @@ func modeName(ro bool) string {
 	return "read-write"
 }
 
-func (g *Guest) hotplug(ctx context.Context, bt *boot, path string, ro bool) (err error) {
+func (g *Guest) hotplug(ctx context.Context, bt *boot, path domain.AbsPath, ro bool) (err error) {
 	tag := share.Tag(path)
 	sock, err := g.startShare(ctx, tag.Get(), path, ro, guestUserID)
 	if err != nil {
@@ -590,10 +590,10 @@ func (g *Guest) hotplug(ctx context.Context, bt *boot, path string, ro bool) (er
 		g.api().RemoveDevice(context.WithoutCancel(ctx), "fs-"+tag.Get())
 		time.Sleep(2 * time.Second)
 	})
-	if err = g.vsock().Agent(ctx, proto.Request{Op: proto.OpMount, Tag: tag.Get(), Path: path, ReadOnly: ro}, nil); err != nil {
+	if err = g.vsock().Agent(ctx, proto.Request{Op: proto.OpMount, Tag: tag.Get(), Path: path.Get(), ReadOnly: ro}, nil); err != nil {
 		return err
 	}
-	bt.Shares = append(bt.Shares, bootShare{Share: config.Share{Path: path, ReadOnly: ro}, Tag: tag.Get(), Runtime: true})
+	bt.Shares = append(bt.Shares, bootShare{Share: config.Share{Path: path.Get(), ReadOnly: ro}, Tag: tag.Get(), Runtime: true})
 	return g.writeBoot(bt)
 }
 
@@ -609,7 +609,7 @@ func (g *Guest) RemoveShare(ctx context.Context, path string) (string, bool, err
 	}
 	defer unlock()
 
-	draft, err := config.ReadDraft(g.Cfg, g.m.Dirs.Home)
+	draft, err := config.ReadDraft(g.Cfg, g.m.Dirs.Home.Get())
 	if err != nil {
 		return "", false, err
 	}
@@ -693,7 +693,9 @@ func (g *Guest) Inspect(ctx context.Context) (Info, error) {
 		i.Units = append(i.Units, g.shareUnitString("store"))
 		for _, s := range i.Shares {
 			if s.Mounted {
-				i.Units = append(i.Units, g.shareUnit(share.Tag(s.Path)))
+				if absShare, err := domain.ParseAbsPath(s.Path); err == nil {
+					i.Units = append(i.Units, g.shareUnit(share.Tag(absShare)))
+				}
 			}
 		}
 	}
@@ -713,4 +715,4 @@ func (g *Guest) Journal(ctx context.Context, units []string, lines int, line fun
 }
 
 // Console is the guest's console log.
-func (g *Guest) Console() string { return g.Inst.Console() }
+func (g *Guest) Console() string { return g.Inst.Console().Get() }
