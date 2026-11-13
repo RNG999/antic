@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/RNG999/antic/internal/domain"
 	sd "github.com/coreos/go-systemd/v22/dbus"
 	"github.com/godbus/dbus/v5"
 )
@@ -18,9 +19,9 @@ type Property = sd.Property
 
 // Unit describes a transient service.
 type Unit struct {
-	Name        string
-	Slice       string
-	Description string
+	Name        domain.UnitName
+	Slice       domain.UnitName
+	Description domain.PrintableText
 	Argv        []string
 	Props       []Property
 }
@@ -40,8 +41,8 @@ func (s State) Running() bool {
 // Manager manages units; DBus is the real one.
 type Manager interface {
 	Start(ctx context.Context, u Unit) error
-	Stop(ctx context.Context, name string) error
-	State(ctx context.Context, name string) (State, error)
+	Stop(ctx context.Context, name domain.UnitName) error
+	State(ctx context.Context, name domain.UnitName) (State, error)
 }
 
 // DBus talks to the user's systemd instance.
@@ -61,14 +62,14 @@ func Connect(ctx context.Context) (*DBus, error) {
 // fails the job instead of looking started.
 func (m *DBus) Start(ctx context.Context, u Unit) error {
 	props := append([]Property{
-		sd.PropDescription(u.Description),
+		sd.PropDescription(u.Description.Get()),
 		sd.PropExecStart(u.Argv, false),
-		sd.PropSlice(u.Slice),
+		sd.PropSlice(u.Slice.Get()),
 		sd.PropType("exec"),
 		Prop("CollectMode", "inactive-or-failed"),
 	}, u.Props...)
 	done := make(chan string, 1)
-	if _, err := m.c.StartTransientUnitContext(ctx, u.Name, "fail", props, done); err != nil {
+	if _, err := m.c.StartTransientUnitContext(ctx, u.Name.Get(), "fail", props, done); err != nil {
 		return fmt.Errorf("start %s: %w", u.Name, err)
 	}
 	select {
@@ -84,9 +85,9 @@ func (m *DBus) Start(ctx context.Context, u Unit) error {
 
 // Stop stops a unit (a slice: everything in it) and waits for the job.
 // Units that are not loaded are not an error.
-func (m *DBus) Stop(ctx context.Context, name string) error {
+func (m *DBus) Stop(ctx context.Context, name domain.UnitName) error {
 	done := make(chan string, 1)
-	if _, err := m.c.StopUnitContext(ctx, name, "replace", done); err != nil {
+	if _, err := m.c.StopUnitContext(ctx, name.Get(), "replace", done); err != nil {
 		if strings.Contains(err.Error(), "not loaded") {
 			return nil
 		}
@@ -101,8 +102,8 @@ func (m *DBus) Stop(ctx context.Context, name string) error {
 }
 
 // State returns a unit's state.
-func (m *DBus) State(ctx context.Context, name string) (State, error) {
-	p, err := m.c.GetUnitPropertiesContext(ctx, name)
+func (m *DBus) State(ctx context.Context, name domain.UnitName) (State, error) {
+	p, err := m.c.GetUnitPropertiesContext(ctx, name.Get())
 	if err != nil {
 		return State{}, fmt.Errorf("state of %s: %w", name, err)
 	}
@@ -125,6 +126,13 @@ func Prop(name string, value any) Property {
 	return Property{Name: name, Value: dbus.MakeVariant(value)}
 }
 
+// BindMount describes a single BindPaths= or BindReadOnlyPaths= mount entry.
+type BindMount struct {
+	Source        domain.AbsPath
+	Destination   domain.AbsPath
+	IgnoreMissing bool
+}
+
 // bindPath is one BindPaths= entry in D-Bus form, a(ssbt): source,
 // destination, ignore if missing, mount flags.
 type bindPath struct {
@@ -135,22 +143,10 @@ type bindPath struct {
 
 const msRec = 0x4000 // MS_REC
 
-func binds(name string, paths []string) Property {
-	b := make([]bindPath, len(paths))
-	for i, p := range paths {
-		src, dst, ok := strings.Cut(p, ":")
-		if !ok {
-			src, dst = p, p
-		}
-		b[i] = bindPath{src, dst, ok, msRec}
-	}
-	return Prop(name, b)
-}
-
 // Confine returns properties that hide $HOME except rw and ro (bound at the
 // same paths), make the rest of the file system read-only, and give the
 // unit its own /tmp, IPC and process view.
-func Confine(rw, ro []string) []Property {
+func Confine(rw, ro []domain.AbsPath, extraRO ...BindMount) []Property {
 	props := []Property{
 		Prop("ProtectHome", "tmpfs"),
 		Prop("ProtectSystem", "strict"),
@@ -168,10 +164,25 @@ func Confine(rw, ro []string) []Property {
 		Prop("LimitCORE", uint64(0)),
 	}
 	if len(rw) > 0 {
-		props = append(props, binds("BindPaths", rw))
+		b := make([]bindPath, len(rw))
+		for i, p := range rw {
+			b[i] = bindPath{Source: p.Get(), Destination: p.Get(), Flags: msRec}
+		}
+		props = append(props, Prop("BindPaths", b))
 	}
-	if len(ro) > 0 {
-		props = append(props, binds("BindReadOnlyPaths", ro))
+	if len(ro)+len(extraRO) > 0 {
+		b := make([]bindPath, 0, len(ro)+len(extraRO))
+		for _, p := range ro {
+			b = append(b, bindPath{Source: p.Get(), Destination: p.Get(), Flags: msRec})
+		}
+		for _, m := range extraRO {
+			dst := m.Destination.Get()
+			if dst == "" {
+				dst = m.Source.Get()
+			}
+			b = append(b, bindPath{Source: m.Source.Get(), Destination: dst, IgnoreMissing: m.IgnoreMissing, Flags: msRec})
+		}
+		props = append(props, Prop("BindReadOnlyPaths", b))
 	}
 	return props
 }
@@ -193,6 +204,6 @@ func UnixOnly() Property {
 }
 
 // BindsTo ties a unit's lifetime to another (stopped when it stops).
-func BindsTo(unit string) []Property {
-	return []Property{Prop("BindsTo", []string{unit}), Prop("After", []string{unit})}
+func BindsTo(unit domain.UnitName) []Property {
+	return []Property{Prop("BindsTo", []string{unit.Get()}), Prop("After", []string{unit.Get()})}
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/RNG999/antic/internal/domain"
 	"github.com/RNG999/antic/internal/host/config"
 	"github.com/RNG999/antic/internal/host/guest"
 	"github.com/RNG999/antic/internal/host/instance"
@@ -127,7 +128,14 @@ func (a *app) get(ctx context.Context, name string) (*guest.Guest, error) {
 	if err := a.load(ctx); err != nil {
 		return nil, err
 	}
-	return a.mgr.Get(name)
+	guestName, err := domain.ParseGuestName(name)
+	if err != nil {
+		if e := a.cfg.Errors[name]; e != nil {
+			return nil, fmt.Errorf("guest %s: %w", name, e)
+		}
+		return nil, fmt.Errorf("unknown guest %q", name)
+	}
+	return a.mgr.Get(guestName)
 }
 
 // resolveTargetGuest resolves a guest name when optional (or omitted in args).

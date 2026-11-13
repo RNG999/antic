@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/RNG999/antic/internal/domain"
 	"github.com/RNG999/antic/internal/host/config"
 )
 
@@ -29,16 +30,23 @@ func (a *app) guestMount() *cobra.Command {
 				return err
 			}
 			for _, d := range dirs {
-				abs, _ := filepath.Abs(d)
-				p, changed, err := g.AddShare(c.Context(), abs, ro)
+				abs, err := filepath.Abs(d)
+				if err != nil {
+					return err
+				}
+				targetDir, err := domain.ParseAbsPath(filepath.Clean(abs))
+				if err != nil {
+					return err
+				}
+				p, changed, err := g.AddShare(c.Context(), targetDir, ro)
 				if err != nil {
 					return err
 				}
 				if !changed {
-					fmt.Fprintf(os.Stderr, "antic: %s is already shared with %s (%s)\n", p, g.Name(), mode(ro))
+					fmt.Fprintf(os.Stderr, "antic: %s is already shared with %s (%s)\n", p, g.GuestName(), mode(ro))
 					continue
 				}
-				fmt.Fprintf(os.Stderr, "antic: shared %s with %s (%s)\n", p, g.Name(), mode(ro))
+				fmt.Fprintf(os.Stderr, "antic: shared %s with %s (%s)\n", p, g.GuestName(), mode(ro))
 			}
 			return nil
 		},
@@ -69,16 +77,23 @@ func (a *app) guestUnmount() *cobra.Command {
 				return err
 			}
 			for _, d := range dirs {
-				abs, _ := filepath.Abs(d)
-				p, lingers, err := g.RemoveShare(c.Context(), abs)
+				abs, err := filepath.Abs(d)
+				if err != nil {
+					return err
+				}
+				targetDir, err := domain.ParseAbsPath(filepath.Clean(abs))
+				if err != nil {
+					return err
+				}
+				p, lingers, err := g.RemoveShare(c.Context(), targetDir)
 				if err != nil {
 					return err
 				}
 				if lingers {
-					fmt.Fprintf(os.Stderr, "antic: stopped sharing %s with %s (it stays mounted until the guest restarts)\n", p, g.Name())
+					fmt.Fprintf(os.Stderr, "antic: stopped sharing %s with %s (it stays mounted until the guest restarts)\n", p, g.GuestName())
 					continue
 				}
-				fmt.Fprintf(os.Stderr, "antic: stopped sharing %s with %s\n", p, g.Name())
+				fmt.Fprintf(os.Stderr, "antic: stopped sharing %s with %s\n", p, g.GuestName())
 			}
 			return nil
 		},

@@ -372,7 +372,7 @@ Model = {
 Msg    = MsgCommand{Cmd}                   -- CLI から
        | MsgResult{Step, Ok(data) | Err}   -- effect の結果（ビルドしたシステム、割り当てた ID など）
 
-Effect = Prepare 系   : Resolve(path) / Build(cfg) / CheckPorts / RenderVMConfig / RunEditor(tmp) / Validate
+Effect = Prepare 系   : ValidateShareDirectory(path) / Build(cfg) / CheckPorts / RenderVMConfig / RunEditor(tmp) / Validate
        | Commit 系    : WriteConfig / SetProfile / AssignInstance / StopVM / StartVM / Hotplug /
                         AgentSwitch / AgentMount / WriteBoot ...
        | Finalize 系  : GC / DeleteTrash  （取り消せない操作は、ここに限る）
@@ -396,7 +396,7 @@ Effect = Prepare 系   : Resolve(path) / Build(cfg) / CheckPorts / RenderVMConfi
 | `install` / `uninstall` | 新しい設定を**メモリ上で**作り、`Validate` と `Build` を済ませる | `WriteConfig(new)`（`WriteConfig(old)`）→ 以降は `apply` と同じ | GC | D5 |
 | `set` / `forward` / `unforward`（Running） | `Validate`、`CheckPorts`（他ゲストとの衝突も見る）、`RenderVMConfig(new)` | `WriteConfig(new)`（`WriteConfig(old)`）→ `StopVM`（`StartVM(old)` のあと Runtime マウントを `Hotplug` で**付け直す**）→ `StartVM(new)`（`StopVM`） | — | D5、D7 |
 | `edit` | `RunEditor(一時コピー)` → `Validate`（§3.1 の移行規則も含む）→ 差分から計画を作る（`set` や `apply` の合成） | 差分に応じて `set` と `apply` の commit 列を並べる | GC | D9、D10、D12（エディタは `sh -c` で起動する） |
-| `mount` | `Resolve`、ポリシーと重なりの検査、mode の一致検査 | `WriteConfig`（戻す）→ Running なら `StartVirtiofsd`（停止）→ `AddDevice`（`RemoveDevice`）→ `AgentMount`（`AgentUnmount`）→ `WriteBoot`（戻す） | — | D2 |
+| `mount` | `ValidateShareDirectory`、ポリシーと重なりの検査、mode の一致検査 | `WriteConfig`（戻す）→ Running なら `StartVirtiofsd`（停止）→ `AddDevice`（`RemoveDevice`）→ `AgentMount`（`AgentUnmount`）→ `WriteBoot`（戻す） | — | D2 |
 | `create` | 名前と設定の検査（既に設定があるのにフラグを渡したら Reject）、`Build` | `WriteConfig`（削除）→ `AssignInstance`（ディレクトリを削除）→ `SetProfile` → `StartVM`（`StopVM`） | — | D3 |
 | `rm` | — | `StopVM`（`StartVM`）→ 設定とインスタンスディレクトリを**ゴミ箱へ rename**（rename で戻す） | ゴミ箱を削除 | （P1 を rm にも適用） |
 

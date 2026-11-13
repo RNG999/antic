@@ -31,11 +31,11 @@ type txn struct {
 	op    operation.Op
 	draft config.Draft
 	// modes records whether each share the saga hot-plugs is read-only.
-	modes map[string]bool
+	modes map[domain.AbsPath]bool
 	// newSystem is the system Build built; oldProfile is the system the
-	// guest store's profile pointed at ("" if none); oldBooted is the
+	// guest store's profile pointed at (zero if none); oldBooted is the
 	// system the running guest ran.
-	newSystem, oldProfile, oldBooted string
+	newSystem, oldProfile, oldBooted domain.StorePath
 }
 
 // journalRecord is the durable journal of an interrupted command.
@@ -62,57 +62,96 @@ type journalRecord struct {
 	Intents    []int           `json:"intents"`
 }
 
-func pathStrings(s operation.PathSet) []string {
-	var out []string
-	for _, p := range s.All() {
-		out = append(out, p.Get())
-	}
-	return out
-}
-
-func pathSet(ps []string) (operation.PathSet, error) {
-	var out []domain.AbsPath
-	for _, p := range ps {
-		a, err := domain.ParseAbsPath(p)
-		if err != nil {
-			return operation.PathSet{}, err
-		}
-		out = append(out, a)
-	}
-	return types.BuildSet[domain.AbsPath, domain.AbsPath, domain.AbsPathOrder](out), nil
+func buildPathSet(paths ...domain.AbsPath) operation.PathSet {
+	return types.BuildSet[domain.AbsPath, domain.AbsPath, domain.AbsPathOrder](paths)
 }
 
 func newJournalRecord(tx *txn) journalRecord {
 	var r journalRecord
 	r.Op.Kind, r.Op.Phase = tx.op.Kind, tx.op.Phase
 	r.Op.Config, r.Op.System, r.Op.Restart = tx.op.Change.Config, tx.op.Change.System, tx.op.Change.Restart
-	r.Op.Added, r.Op.Removed, r.Op.Runtime = pathStrings(tx.op.Change.Added), pathStrings(tx.op.Change.Removed), pathStrings(tx.op.Runtime)
+	for _, p := range tx.op.Change.Added.All() {
+		r.Op.Added = append(r.Op.Added, p.Get())
+	}
+	for _, p := range tx.op.Change.Removed.All() {
+		r.Op.Removed = append(r.Op.Removed, p.Get())
+	}
+	for _, p := range tx.op.Runtime.All() {
+		r.Op.Runtime = append(r.Op.Runtime, p.Get())
+	}
 	r.ConfigPath, r.OldConfig, r.NewConfig, r.NewFile = tx.draft.Path, tx.draft.Old, tx.draft.New, tx.draft.NewFile
-	r.Modes = tx.modes
-	r.NewSystem, r.OldProfile, r.OldBooted = tx.newSystem, tx.oldProfile, tx.oldBooted
+	if len(tx.modes) > 0 {
+		r.Modes = make(map[string]bool, len(tx.modes))
+		for k, v := range tx.modes {
+			r.Modes[k.Get()] = v
+		}
+	}
+	r.NewSystem, r.OldProfile, r.OldBooted = tx.newSystem.Get(), tx.oldProfile.Get(), tx.oldBooted.Get()
 	return r
 }
 
 // txnOf reconstructs the command a journal records.
-func (r journalRecord) txnOf(name string) (*txn, error) {
+func (r journalRecord) txnOf(name domain.GuestName) (*txn, error) {
 	op := operation.Op{Kind: r.Op.Kind, Phase: r.Op.Phase, Change: operation.Change{
 		Config: r.Op.Config, System: r.Op.System, Restart: r.Op.Restart}}
+	var added []domain.AbsPath
+	for _, p := range r.Op.Added {
+		a, err := domain.ParseAbsPath(p)
+		if err != nil {
+			return nil, err
+		}
+		added = append(added, a)
+	}
+	op.Change.Added = buildPathSet(added...)
+	var removed []domain.AbsPath
+	for _, p := range r.Op.Removed {
+		a, err := domain.ParseAbsPath(p)
+		if err != nil {
+			return nil, err
+		}
+		removed = append(removed, a)
+	}
+	op.Change.Removed = buildPathSet(removed...)
+	var runtime []domain.AbsPath
+	for _, p := range r.Op.Runtime {
+		a, err := domain.ParseAbsPath(p)
+		if err != nil {
+			return nil, err
+		}
+		runtime = append(runtime, a)
+	}
+	op.Runtime = buildPathSet(runtime...)
+	modes := make(map[domain.AbsPath]bool, len(r.Modes))
+	for k, v := range r.Modes {
+		a, err := domain.ParseAbsPath(k)
+		if err != nil {
+			return nil, err
+		}
+		modes[a] = v
+	}
+	var newSystem, oldProfile, oldBooted domain.StorePath
 	var err error
-	if op.Change.Added, err = pathSet(r.Op.Added); err != nil {
-		return nil, err
+	if r.NewSystem != "" {
+		if newSystem, err = domain.ParseStorePath(r.NewSystem); err != nil {
+			return nil, err
+		}
 	}
-	if op.Change.Removed, err = pathSet(r.Op.Removed); err != nil {
-		return nil, err
+	if r.OldProfile != "" {
+		if oldProfile, err = domain.ParseStorePath(r.OldProfile); err != nil {
+			return nil, err
+		}
 	}
-	if op.Runtime, err = pathSet(r.Op.Runtime); err != nil {
-		return nil, err
+	if r.OldBooted != "" {
+		if oldBooted, err = domain.ParseStorePath(r.OldBooted); err != nil {
+			return nil, err
+		}
 	}
-	return &txn{op: op, modes: r.Modes, draft: config.Draft{Path: r.ConfigPath, Name: name, Old: r.OldConfig, New: r.NewConfig},
-		newSystem: r.NewSystem, oldProfile: r.OldProfile, oldBooted: r.OldBooted}, nil
+	return &txn{op: op, modes: modes, draft: config.Draft{Path: r.ConfigPath, Name: name.Get(), Old: r.OldConfig, New: r.NewConfig},
+		newSystem: newSystem, oldProfile: oldProfile, oldBooted: oldBooted}, nil
 }
 
 func (g *Guest) journalPath() domain.AbsPath {
-	return domain.JoinAbsPath(g.m.Dirs.StateRoot, "journals", g.Name()+".json")
+	return domain.JoinAbsPath(g.m.Dirs.StateRoot, "journals", g.GuestName().Get()+".json")
 }
 
 func (g *Guest) writeJournal(r journalRecord) error {
@@ -172,7 +211,7 @@ func (g *Guest) trace(ev traceEvent) {
 	if path == "" {
 		return
 	}
-	ev.PID, ev.Guest = os.Getpid(), g.Name()
+	ev.PID, ev.Guest = os.Getpid(), g.GuestName().Get()
 	b, err := json.Marshal(ev)
 	if err != nil {
 		return
@@ -209,19 +248,19 @@ func (g *Guest) lockAndRecover(ctx context.Context) (func(), error) {
 }
 
 func (g *Guest) recoverJournal(ctx context.Context, r journalRecord) error {
-	g.m.logf("undoing an interrupted command on guest %s...", g.Name())
-	tx, err := r.txnOf(g.Name())
+	fmt.Fprintf(g.m.Log, "antic: undoing an interrupted command on guest %s...\n", g.GuestName())
+	tx, err := r.txnOf(g.GuestName())
 	if err != nil {
-		return fmt.Errorf("guest %s: unreadable journal %s: %w", g.Name(), g.journalPath(), err)
+		return fmt.Errorf("guest %s: unreadable journal %s: %w", g.GuestName(), g.journalPath(), err)
 	}
 	if r.InstanceID != "" && !g.Created {
 		instID, err := domain.ParseInstanceID(r.InstanceID)
 		if err != nil {
-			return fmt.Errorf("guest %s: invalid instance ID %q in journal: %w", g.Name(), r.InstanceID, err)
+			return fmt.Errorf("guest %s: invalid instance ID %q in journal: %w", g.GuestName(), r.InstanceID, err)
 		}
 		g.Inst, g.Created = g.m.Dirs.InstanceOf(g.GuestName(), instID), true
 	}
-	tx.draft = config.RestoreDraft(r.ConfigPath, g.Name(), g.m.Dirs.Home.Get(), r.NewFile, r.OldConfig, r.NewConfig)
+	tx.draft = config.RestoreDraft(r.ConfigPath, g.GuestName().Get(), g.m.Dirs.Home.Get(), r.NewFile, r.OldConfig, r.NewConfig)
 	last := types.None[domain.StepIndex]()
 	if n := len(r.Intents); n > 0 {
 		i, err := domain.ParseStepIndex(r.Intents[n-1])
@@ -231,7 +270,7 @@ func (g *Guest) recoverJournal(ctx context.Context, r journalRecord) error {
 		last = types.Some(i)
 	}
 	if err := g.runSaga(ctx, tx, operation.MsgRecover{Op: tx.op, Last: last}); err != nil {
-		return fmt.Errorf("guest %s: undoing an interrupted command: %w", g.Name(), err)
+		return fmt.Errorf("guest %s: undoing an interrupted command: %w", g.GuestName(), err)
 	}
 	return nil
 }
@@ -246,29 +285,9 @@ const crashAfterEnv = "ANTIC_SAGA_CRASH_AFTER"
 // that the saga must undo what it committed.
 const failEnv = "ANTIC_SAGA_FAIL"
 
-// injectedFailure reports whether the effect is the one failEnv names;
-// seen counts the effects of each type so far.
-func injectedFailure(eff operation.Effect, seen map[string]int) bool {
-	spec := os.Getenv(failEnv)
-	if spec == "" {
-		return false
-	}
-	name, nth, _ := strings.Cut(spec, ":")
-	n, err := strconv.Atoi(nth)
-	if err != nil || n < 1 {
-		n = 1
-	}
-	typ := strings.TrimPrefix(fmt.Sprintf("%T", eff), "operation.Effect")
-	seen[typ]++
-	return typ == name && seen[typ] == n
-}
-
 // runSaga feeds msg to a new saga and executes its effects until it reports.
 func (g *Guest) runSaga(ctx context.Context, tx *txn, msg operation.Msg) error {
-	name, err := domain.ParseGuestName(g.Name())
-	if err != nil {
-		return err
-	}
+	name := g.GuestName()
 	m := operation.Init(name)
 	var jr journalRecord
 	crashAfter, _ := strconv.Atoi(os.Getenv(crashAfterEnv))
@@ -292,14 +311,25 @@ func (g *Guest) runSaga(ctx context.Context, tx *txn, msg operation.Msg) error {
 			case operation.ReportOk:
 				return nil
 			case operation.ReportBroken:
-				return fmt.Errorf("%s (guest %s may be inconsistent; the next command on it retries the undo)", rep.Reason.Get(), g.Name())
+				return fmt.Errorf("%s (guest %s may be inconsistent; the next command on it retries the undo)", rep.Reason.Get(), g.GuestName())
 			case operation.ReportFailed:
 			}
 			return errors.New(rep.Reason.Get())
 		}
 		m = next
 		var err error
-		if injectedFailure(effects[0], seen) {
+		injected := false
+		if spec := os.Getenv(failEnv); spec != "" {
+			failName, nth, _ := strings.Cut(spec, ":")
+			n, convErr := strconv.Atoi(nth)
+			if convErr != nil || n < 1 {
+				n = 1
+			}
+			typ := strings.TrimPrefix(fmt.Sprintf("%T", effects[0]), "operation.Effect")
+			seen[typ]++
+			injected = typ == failName && seen[typ] == n
+		}
+		if injected {
 			err = fmt.Errorf("injected failure (%s)", failEnv)
 		} else {
 			err = g.runEffect(ctx, tx, &jr, effects[0])
@@ -339,7 +369,11 @@ func (g *Guest) runEffect(ctx context.Context, tx *txn, jr *journalRecord, eff o
 					continue
 				}
 			}
-			if _, err := g.m.policy().Resolve(s.Path); err != nil {
+			candidate, err := domain.ParseAbsPath(filepath.Clean(s.Path))
+			if err != nil {
+				return err
+			}
+			if _, err := g.m.policy().ValidateShareDirectory(candidate); err != nil {
 				return err
 			}
 		}
@@ -347,7 +381,7 @@ func (g *Guest) runEffect(ctx context.Context, tx *txn, jr *journalRecord, eff o
 	case operation.EffectWriteConfig:
 		return tx.draft.Write(e.To == operation.VersionOld)
 	case operation.EffectBuild:
-		if tx.newSystem != "" {
+		if tx.newSystem.Valid() {
 			return nil // built ahead of the saga (prebuild)
 		}
 		sys, err := g.build(ctx, tx.draft.After)
@@ -364,7 +398,7 @@ func (g *Guest) runEffect(ctx context.Context, tx *txn, jr *journalRecord, eff o
 		if e.What == operation.TrashInstance {
 			return g.m.Dirs.TrashInstance(g.Inst)
 		}
-		cfgPath, err := domain.ParseAbsPath(g.m.Config.GuestPath(g.Name()))
+		cfgPath, err := domain.ParseAbsPath(g.m.Config.GuestPath(g.GuestName().Get()))
 		if err != nil {
 			return err
 		}
@@ -373,7 +407,7 @@ func (g *Guest) runEffect(ctx context.Context, tx *txn, jr *journalRecord, eff o
 		if e.What == operation.TrashInstance {
 			return g.m.Dirs.RestoreInstance(g.Inst)
 		}
-		cfgPath, err := domain.ParseAbsPath(g.m.Config.GuestPath(g.Name()))
+		cfgPath, err := domain.ParseAbsPath(g.m.Config.GuestPath(g.GuestName().Get()))
 		if err != nil {
 			return err
 		}
@@ -406,11 +440,11 @@ func (g *Guest) runEffect(ctx context.Context, tx *txn, jr *journalRecord, eff o
 		if e.To == operation.VersionOld {
 			system = tx.oldProfile
 		}
-		if system == "" {
+		if !system.Valid() {
 			return nix.RemoveProfile(g.store())
 		}
-		g.m.logf("installing %s into the guest store...", system)
-		return nix.SetProfile(ctx, g.store(), system)
+		fmt.Fprintf(g.m.Log, "antic: installing %s into the guest store...\n", system)
+		return nix.SetProfile(ctx, g.store(), system.Get())
 	case operation.EffectSwitch:
 		if e.To == operation.VersionOld {
 			return g.switchTo(ctx, tx.oldBooted)
@@ -426,7 +460,7 @@ func (g *Guest) runEffect(ctx context.Context, tx *txn, jr *journalRecord, eff o
 		return g.checkPorts(ctx, tx)
 	case operation.EffectStopVM:
 		if tx.op.Kind == operation.OpChangeConfig {
-			g.m.logf("restarting guest %s to apply the change...", g.Name())
+			fmt.Fprintf(g.m.Log, "antic: restarting guest %s to apply the change...\n", g.GuestName())
 		}
 		return g.stopLocked(ctx)
 	case operation.EffectStartVM:
@@ -437,21 +471,23 @@ func (g *Guest) runEffect(ctx context.Context, tx *txn, jr *journalRecord, eff o
 		if c == nil {
 			return errors.New("internal error: the config to boot is unknown")
 		}
-		if system == "" {
-			system, _ = g.store().Current()
+		if !system.Valid() {
+			if cur, err := g.store().Current(); err == nil {
+				system, _ = domain.ParseStorePath(cur)
+			}
 		}
 		g.Cfg = c
 		if err := g.startSystem(ctx, system); err != nil {
 			return err
 		}
 		for _, p := range e.Rehotplug.All() {
-			if err := g.ensureMounted(ctx, p, tx.modes[p.Get()]); err != nil {
+			if err := g.ensureMounted(ctx, p, tx.modes[p]); err != nil {
 				return err
 			}
 		}
 		return nil
 	case operation.EffectHotplug:
-		return g.ensureMounted(ctx, e.Path, tx.modes[e.Path.Get()])
+		return g.ensureMounted(ctx, e.Path, tx.modes[e.Path])
 	case operation.EffectHotunplug:
 		return g.ensureUnmounted(ctx, e.Path)
 	}
@@ -491,8 +527,8 @@ func (g *Guest) checkPorts(ctx context.Context, tx *txn) error {
 // RecoverOrphan undoes a command a crashed process left in the journal of
 // a guest whose config file is gone (a create or rm interrupted while the
 // file was moved), so that the guest can be used or removed again.
-func (m *Manager) RecoverOrphan(ctx context.Context, name string) error {
-	g := &Guest{m: m, Cfg: &config.Guest{Name: name, Path: m.Config.GuestPath(name)}}
+func (m *Manager) RecoverOrphan(ctx context.Context, name domain.GuestName) error {
+	g := &Guest{m: m, Cfg: &config.Guest{Name: name.Get(), Path: m.Config.GuestPath(name.Get())}}
 	r, pending, err := g.readJournal()
 	if err != nil || !pending {
 		return err
@@ -502,11 +538,7 @@ func (m *Manager) RecoverOrphan(ctx context.Context, name string) error {
 		if err != nil {
 			return err
 		}
-		gName, err := domain.ParseGuestName(name)
-		if err != nil {
-			return err
-		}
-		g.Inst, g.Created = m.Dirs.InstanceOf(gName, instID), true
+		g.Inst, g.Created = m.Dirs.InstanceOf(name, instID), true
 	}
 	unlock, err := g.lockAndRecover(ctx)
 	if err != nil {
@@ -529,7 +561,7 @@ func (g *Guest) ensureInstance() error {
 			return err
 		}
 		g.Inst, g.Created = inst, true
-		g.m.logf("guest %s has ID %s", g.Name(), inst.ID.Get())
+		fmt.Fprintf(g.m.Log, "antic: guest %s has ID %s\n", g.GuestName(), inst.ID.Get())
 	}
 	return os.WriteFile(g.Inst.OriginFile().Get(), []byte(g.Cfg.Path+"\n"), 0o600)
 }
@@ -572,8 +604,10 @@ func (g *Guest) ensureUnmounted(ctx context.Context, path domain.AbsPath) error 
 	if err := g.writeBoot(bt); err != nil {
 		return err
 	}
-	if err := g.m.Units.Stop(ctx, g.shareUnitString(s.Tag)); err != nil {
-		g.m.logf("warning: %s is unmounted, but stopping its virtiofsd failed: %v", path.Get(), err)
+	if tag, err := domain.ParseShareTag(s.Tag); err == nil {
+		if err := g.m.Units.Stop(ctx, g.shareUnit(tag)); err != nil {
+			fmt.Fprintf(g.m.Log, "antic: warning: %s is unmounted, but stopping its virtiofsd failed: %v\n", path.Get(), err)
+		}
 	}
 	return nil
 }

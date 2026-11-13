@@ -6,11 +6,12 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"path/filepath"
 	"strings"
 
+	"github.com/RNG999/antic/internal/domain"
 	"github.com/RNG999/antic/internal/host/config"
 	"github.com/RNG999/antic/internal/host/egress"
+	"github.com/RNG999/antic/internal/host/systemd"
 	teaegress "github.com/RNG999/antic/internal/tea/egress"
 )
 
@@ -61,45 +62,40 @@ func hostNet(hostNets []*net.IPNet) teaegress.HostNet {
 // nftRules renders the egress filter for the guest's network namespace: the
 // plumbing (forwarded ports, the DNS path) and then the pure egress rules
 // of internal/tea/egress in order.
-func nftRules(g *config.Guest, hostNets []*net.IPNet) string {
+func nftRules(g *config.Guest, hostNets []*net.IPNet) (domain.NFTRuleset, error) {
 	filter := hasFilter(g)
 	policy := egressPolicy(g)
 
 	var b strings.Builder
-	w := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
-	set := func(family string, items []string) string {
-		return family + " daddr { " + strings.Join(items, ", ") + " }"
-	}
-
-	w("table %s {", egress.Table)
+	fmt.Fprintf(&b, "table %s {\n", egress.Table)
 	if policy.Default == teaegress.DefaultDeny {
-		w("  set %s { type ipv4_addr; flags timeout; size 65536; }", egress.Set4)
-		w("  set %s { type ipv6_addr; flags timeout; size 65536; }", egress.Set6)
+		fmt.Fprintf(&b, "  set %s { type ipv4_addr; flags timeout; size 65536; }\n", egress.Set4)
+		fmt.Fprintf(&b, "  set %s { type ipv6_addr; flags timeout; size 65536; }\n", egress.Set6)
 	}
-	w("  chain output {")
-	w("    type filter hook output priority filter; policy accept;")
-	w("    ct state established,related accept")
-	w("    icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } ip6 hoplimit 255 accept")
+	b.WriteString("  chain output {\n")
+	b.WriteString("    type filter hook output priority filter; policy accept;\n")
+	b.WriteString("    ct state established,related accept\n")
+	b.WriteString("    icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } ip6 hoplimit 255 accept\n")
 	for _, p := range g.Ports {
 		if p.TCP() {
-			w(`    oifname "lo" ip saddr 127.0.0.1 ip daddr 127.0.0.1 tcp dport %d accept`, p.Host)
+			fmt.Fprintf(&b, "    oifname \"lo\" ip saddr 127.0.0.1 ip daddr 127.0.0.1 tcp dport %d accept\n", p.Host)
 		}
 		if p.UDP() {
-			w(`    oifname "lo" ip saddr 127.0.0.1 ip daddr 127.0.0.1 udp dport %d accept`, p.Host)
+			fmt.Fprintf(&b, "    oifname \"lo\" ip saddr 127.0.0.1 ip daddr 127.0.0.1 udp dport %d accept\n", p.Host)
 		}
 	}
 	if filter {
 		// passt -> DNS filter, and only the filter's marked sockets upstream.
 		l := egress.Listen
-		w(`    oifname "lo" ip saddr 127.0.0.1 ip daddr %s udp dport %d accept`, l.Addr(), l.Port())
-		w(`    oifname "lo" ip saddr 127.0.0.1 ip daddr %s tcp dport %d accept`, l.Addr(), l.Port())
-		w("    meta mark %#x ip daddr %s udp dport 53 accept", egress.Mark, nsDNS)
-		w("    meta mark %#x ip daddr %s tcp dport 53 accept", egress.Mark, nsDNS)
+		fmt.Fprintf(&b, "    oifname \"lo\" ip saddr 127.0.0.1 ip daddr %s udp dport %d accept\n", l.Addr(), l.Port())
+		fmt.Fprintf(&b, "    oifname \"lo\" ip saddr 127.0.0.1 ip daddr %s tcp dport %d accept\n", l.Addr(), l.Port())
+		fmt.Fprintf(&b, "    meta mark %#x ip daddr %s udp dport 53 accept\n", egress.Mark, nsDNS)
+		fmt.Fprintf(&b, "    meta mark %#x ip daddr %s tcp dport 53 accept\n", egress.Mark, nsDNS)
 	} else {
-		w("    ip daddr %s udp dport 53 accept", nsDNS)
-		w("    ip daddr %s tcp dport 53 accept", nsDNS)
+		fmt.Fprintf(&b, "    ip daddr %s udp dport 53 accept\n", nsDNS)
+		fmt.Fprintf(&b, "    ip daddr %s tcp dport 53 accept\n", nsDNS)
 	}
-	w("    ip daddr %s reject", nsDNS)
+	fmt.Fprintf(&b, "    ip daddr %s reject\n", nsDNS)
 	for _, r := range teaegress.Rules(policy, hostNet(hostNets)) {
 		verdict := "accept"
 		if r.Verdict == teaegress.VerdictReject {
@@ -116,21 +112,21 @@ func nftRules(g *config.Guest, hostNets []*net.IPNet) string {
 				}
 			}
 			if len(v4) > 0 {
-				w("    %s %s", set("ip", v4), verdict)
+				fmt.Fprintf(&b, "    ip daddr { %s } %s\n", strings.Join(v4, ", "), verdict)
 			}
 			if len(v6) > 0 {
-				w("    %s %s", set("ip6", v6), verdict)
+				fmt.Fprintf(&b, "    ip6 daddr { %s } %s\n", strings.Join(v6, ", "), verdict)
 			}
 		case teaegress.MatchLearned:
-			w("    ip daddr @%s %s", egress.Set4, verdict)
-			w("    ip6 daddr @%s %s", egress.Set6, verdict)
+			fmt.Fprintf(&b, "    ip daddr @%s %s\n", egress.Set4, verdict)
+			fmt.Fprintf(&b, "    ip6 daddr @%s %s\n", egress.Set6, verdict)
 		case teaegress.MatchAll:
-			w("    %s", verdict)
+			fmt.Fprintf(&b, "    %s\n", verdict)
 		}
 	}
-	w("  }")
-	w("}")
-	return b.String()
+	b.WriteString("  }\n")
+	b.WriteString("}\n")
+	return domain.ParseNFTRuleset(b.String())
 }
 
 // hostNetworks returns the host's own unicast interface addresses and masks.
@@ -150,38 +146,42 @@ func hostNetworks() []*net.IPNet {
 // egress filter, runs the DNS filter for guests with an allow list, and then
 // runs passt. The filter lives outside the guest, so guest root cannot change
 // it.
-func (g *Guest) startNet(ctx context.Context) (string, error) {
-	dir := g.sockDir("net")
+func (g *Guest) startNet(ctx context.Context) (domain.AbsPath, error) {
+	dir := g.netSockDir()
 	if err := os.MkdirAll(dir.Get(), 0o700); err != nil {
-		return "", err
+		return domain.AbsPath{}, err
 	}
-	sock := filepath.Join(dir.Get(), "passt.sock")
-	rules := filepath.Join(dir.Get(), "egress.nft")
+	sock := domain.JoinAbsPath(dir, "passt.sock")
+	rules := domain.JoinAbsPath(dir, "egress.nft")
 	ports := g.Cfg.Ports
-	if err := os.WriteFile(rules, []byte(nftRules(g.Cfg, hostNetworks())), 0o600); err != nil {
-		return "", err
+	renderedRules, err := nftRules(g.Cfg, hostNetworks())
+	if err != nil {
+		return domain.AbsPath{}, err
+	}
+	if err := os.WriteFile(rules.Get(), []byte(renderedRules.Get()), 0o600); err != nil {
+		return domain.AbsPath{}, err
 	}
 	dnsHost := nsDNS
-	helper := []string{g.m.Bins.Self, egress.HelperCmd, "--nft", g.m.Bins.NFT, "--rules", rules}
+	netnsCmd := []string{g.m.Bins.Self.Get(), egress.HelperCmd, "--nft", g.m.Bins.NFT.Get(), "--rules", rules.Get()}
 	if hasFilter(g.Cfg) {
 		if len(g.Cfg.AllowDomains) > 0 {
-			domains := filepath.Join(dir.Get(), "allow-domains")
-			if err := os.WriteFile(domains, []byte(strings.Join(g.Cfg.AllowDomains, "\n")+"\n"), 0o600); err != nil {
-				return "", err
+			domains := domain.JoinAbsPath(dir, "allow-domains")
+			if err := os.WriteFile(domains.Get(), []byte(strings.Join(g.Cfg.AllowDomains, "\n")+"\n"), 0o600); err != nil {
+				return domain.AbsPath{}, err
 			}
-			helper = append(helper, "--allow-domains", domains)
+			netnsCmd = append(netnsCmd, "--allow-domains", domains.Get())
 		}
 		if len(g.Cfg.DenyDomains) > 0 {
-			denyFile := filepath.Join(dir.Get(), "deny-domains")
-			if err := os.WriteFile(denyFile, []byte(strings.Join(g.Cfg.DenyDomains, "\n")+"\n"), 0o600); err != nil {
-				return "", err
+			denyFile := domain.JoinAbsPath(dir, "deny-domains")
+			if err := os.WriteFile(denyFile.Get(), []byte(strings.Join(g.Cfg.DenyDomains, "\n")+"\n"), 0o600); err != nil {
+				return domain.AbsPath{}, err
 			}
-			helper = append(helper, "--deny-domains", denyFile)
+			netnsCmd = append(netnsCmd, "--deny-domains", denyFile.Get())
 		}
 		if g.Cfg.Network.DefaultDeny() {
-			helper = append(helper, "--default-deny")
+			netnsCmd = append(netnsCmd, "--default-deny")
 		}
-		helper = append(helper, "--upstream", nsDNS)
+		netnsCmd = append(netnsCmd, "--upstream", nsDNS)
 		dnsHost = egress.Listen.Addr().String()
 	}
 	hasTCP := false
@@ -195,10 +195,10 @@ func (g *Guest) startNet(ctx context.Context) (string, error) {
 		}
 	}
 
-	passt := []string{g.m.Bins.Passt, "--vhost-user", "--socket", sock, "--foreground", "--quiet", "--one-off",
+	passt := []string{g.m.Bins.Passt.Get(), "--vhost-user", "--socket", sock.Get(), "--foreground", "--quiet", "--one-off",
 		"--no-map-gw", "--map-host-loopback", "none",
 		"--dns", guestDNS, "--dns-forward", guestDNS, "--dns-host", dnsHost}
-	pasta := []string{g.m.Bins.Pasta, "--config-net", "--quiet",
+	pasta := []string{g.m.Bins.Pasta.Get(), "--config-net", "--quiet",
 		"--no-map-gw", "--map-host-loopback", "none", "-T", "none", "-U", "none",
 		"--dns-forward", nsDNS}
 
@@ -226,10 +226,22 @@ func (g *Guest) startNet(ctx context.Context) (string, error) {
 		}
 	}
 
-	argv := append(append(append(pasta, "--"), helper...), append([]string{"--"}, passt...)...)
+	argv := append(append(append(pasta, "--"), netnsCmd...), append([]string{"--"}, passt...)...)
 	// No NoNewPrivileges: it stops passt from setting up its own user
 	// namespace inside pasta's. passt and pasta drop privileges and apply
 	// seccomp themselves.
-	props := g.m.confine([]string{dir.Get()}, []string{g.m.Bins.Pasta, g.m.Bins.Passt, g.m.Bins.NFT, g.m.Bins.Self})
-	return sock, g.helper(ctx, g.netUnit(), "antic network for "+g.Name(), props, sock, argv...)
+	var roBins []domain.AbsPath
+	for _, b := range []domain.AbsPath{g.m.Bins.Pasta, g.m.Bins.Passt, g.m.Bins.NFT, g.m.Bins.Self} {
+		if b.Valid() {
+			roBins = append(roBins, b)
+		}
+	}
+	props := g.m.confine([]domain.AbsPath{dir}, roBins)
+	desc, _ := domain.ParsePrintableText("antic network for " + g.GuestName().Get())
+	return sock, g.startBoundUnitAndWaitSocket(ctx, systemd.Unit{
+		Name:        g.netUnit(),
+		Description: desc,
+		Props:       props,
+		Argv:        argv,
+	}, sock)
 }

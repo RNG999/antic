@@ -176,13 +176,14 @@ func (a *app) guestStats() *cobra.Command {
 			if !watch {
 				prev := make(map[string]sample)
 				for _, g := range targets {
-					prev[g.Name()] = readGuestSample(c.Context(), g)
+					prev[g.GuestName().Get()] = readGuestSample(c.Context(), g)
 				}
 				time.Sleep(150 * time.Millisecond)
 				var stats []guestStats
 				for _, g := range targets {
 					curr := readGuestSample(c.Context(), g)
-					stats = append(stats, computeStats(g.Name(), prev[g.Name()], curr))
+					n := g.GuestName().Get()
+					stats = append(stats, computeStats(n, prev[n], curr))
 				}
 				if a.json {
 					enc := json.NewEncoder(os.Stdout)
@@ -200,7 +201,7 @@ func (a *app) guestStats() *cobra.Command {
 
 			prev := make(map[string]sample)
 			for _, g := range targets {
-				prev[g.Name()] = readGuestSample(c.Context(), g)
+				prev[g.GuestName().Get()] = readGuestSample(c.Context(), g)
 			}
 
 			ticker := time.NewTicker(time.Second)
@@ -211,8 +212,9 @@ func (a *app) guestStats() *cobra.Command {
 			var initialStats []guestStats
 			for _, g := range targets {
 				curr := readGuestSample(c.Context(), g)
-				initialStats = append(initialStats, computeStats(g.Name(), prev[g.Name()], curr))
-				prev[g.Name()] = curr
+				n := g.GuestName().Get()
+				initialStats = append(initialStats, computeStats(n, prev[n], curr))
+				prev[n] = curr
 			}
 			if a.json {
 				enc := json.NewEncoder(os.Stdout)
@@ -232,8 +234,9 @@ func (a *app) guestStats() *cobra.Command {
 					var stats []guestStats
 					for _, g := range targets {
 						curr := readGuestSample(c.Context(), g)
-						stats = append(stats, computeStats(g.Name(), prev[g.Name()], curr))
-						prev[g.Name()] = curr
+						n := g.GuestName().Get()
+						stats = append(stats, computeStats(n, prev[n], curr))
+						prev[n] = curr
 					}
 					if a.json {
 						enc := json.NewEncoder(os.Stdout)

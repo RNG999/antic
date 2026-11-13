@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/RNG999/antic/internal/domain"
 	"github.com/RNG999/antic/internal/host/config"
 )
 
@@ -50,7 +51,7 @@ func (a *app) editPkgs(c *cobra.Command, name string, pkgs []string, add bool) e
 		return err
 	}
 	if g.Cfg.Flake != "" {
-		return fmt.Errorf("guest %s uses custom flake %s; edit the flake directly and run \"antic guest apply %s\"", g.Name(), g.Cfg.Flake, g.Name())
+		return fmt.Errorf("guest %s uses custom flake %s; edit the flake directly and run \"antic guest apply %s\"", g.GuestName(), g.Cfg.Flake, g.GuestName())
 	}
 	next := slices.Clone(g.Cfg.Packages)
 	for _, p := range pkgs {
@@ -65,7 +66,15 @@ func (a *app) editPkgs(c *cobra.Command, name string, pkgs []string, add bool) e
 			next = slices.DeleteFunc(next, func(s string) bool { return s == p })
 		}
 	}
-	if err := g.SetPackages(c.Context(), next); err != nil {
+	var parsedNext []domain.PackageName
+	for _, p := range next {
+		pn, err := domain.ParsePackageName(p)
+		if err != nil {
+			return err
+		}
+		parsedNext = append(parsedNext, pn)
+	}
+	if err := g.SetPackages(c.Context(), parsedNext); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "antic: updated packages of %s: %v\n", name, next)

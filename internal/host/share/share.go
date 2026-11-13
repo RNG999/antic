@@ -41,7 +41,34 @@ type Policy struct {
 // these would get code run on the host.
 func NewPolicy(home domain.AbsPath, extra, roots []domain.AbsPath) Policy {
 	p := Policy{Home: home, Roots: slices.Clone(roots)}
-	addCandidate := func(rawCandidate string) {
+	var rawCandidates []string
+	entries, _ := os.ReadDir(home.Get())
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		top := filepath.Join(home.Get(), e.Name())
+		rawCandidates = append(rawCandidates, top)
+		if fi, err := os.Lstat(top); err == nil && fi.IsDir() {
+			inner, _ := os.ReadDir(top)
+			for _, f := range inner {
+				if f.Type()&fs.ModeSymlink != 0 {
+					rawCandidates = append(rawCandidates, filepath.Join(top, f.Name()))
+				}
+			}
+		}
+	}
+	for _, rawEnvDir := range filepath.SplitList(os.Getenv("PATH")) {
+		if cleanDir, err := domain.ParseAbsPath(filepath.Clean(rawEnvDir)); err == nil && p.Home.Valid() {
+			if cleanDir == p.Home || domain.WithinSubtree(p.Home, cleanDir) {
+				rawCandidates = append(rawCandidates, rawEnvDir)
+			}
+		}
+	}
+	for _, d := range extra {
+		rawCandidates = append(rawCandidates, d.Get())
+	}
+	for _, rawCandidate := range rawCandidates {
 		clean := filepath.Clean(rawCandidate)
 		if abs, err := domain.ParseAbsPath(clean); err == nil {
 			p.Deny = append(p.Deny, abs)
@@ -52,32 +79,6 @@ func NewPolicy(home domain.AbsPath, extra, roots []domain.AbsPath) Policy {
 			}
 		}
 	}
-	entries, _ := os.ReadDir(home.Get())
-	for _, e := range entries {
-		if !strings.HasPrefix(e.Name(), ".") {
-			continue
-		}
-		top := filepath.Join(home.Get(), e.Name())
-		addCandidate(top)
-		if fi, err := os.Lstat(top); err == nil && fi.IsDir() {
-			inner, _ := os.ReadDir(top)
-			for _, f := range inner {
-				if f.Type()&fs.ModeSymlink != 0 {
-					addCandidate(filepath.Join(top, f.Name()))
-				}
-			}
-		}
-	}
-	for _, rawEnvDir := range filepath.SplitList(os.Getenv("PATH")) {
-		if cleanDir, err := domain.ParseAbsPath(filepath.Clean(rawEnvDir)); err == nil && p.Home.Valid() {
-			if cleanDir == p.Home || domain.WithinSubtree(p.Home, cleanDir) {
-				addCandidate(rawEnvDir)
-			}
-		}
-	}
-	for _, d := range extra {
-		addCandidate(d.Get())
-	}
 	slices.SortFunc(p.Deny, func(a, b domain.AbsPath) int {
 		return strings.Compare(a.Get(), b.Get())
 	})
@@ -85,9 +86,10 @@ func NewPolicy(home domain.AbsPath, extra, roots []domain.AbsPath) Policy {
 	return p
 }
 
-// Resolve validates a share path and returns its real canonical absolute path.
-func (p Policy) Resolve(rawPath string) (domain.AbsPath, error) {
-	real, err := filepath.EvalSymlinks(rawPath)
+// ValidateShareDirectory validates a candidate share directory against the policy
+// and returns its symlink-evaluated canonical absolute path.
+func (p Policy) ValidateShareDirectory(candidate domain.AbsPath) (domain.AbsPath, error) {
+	real, err := filepath.EvalSymlinks(candidate.Get())
 	if err != nil {
 		return domain.AbsPath{}, err
 	}

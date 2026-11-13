@@ -122,8 +122,8 @@ func (a *app) execIn(ctx context.Context, g *guest.Guest, workdir string, argv [
 	if err != nil {
 		return err
 	}
-	if code != 0 {
-		return exitCode(code)
+	if code.Get() != 0 {
+		return exitCode(code.Get())
 	}
 	return nil
 }

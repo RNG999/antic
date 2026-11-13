@@ -55,9 +55,18 @@ func index(t *testing.T, rules, s string) int {
 	return i
 }
 
+func renderRules(t *testing.T, g *config.Guest) string {
+	t.Helper()
+	r, err := nftRules(g, hostNets(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r.Get()
+}
+
 func TestNFTRulesInternet(t *testing.T) {
 	g := &config.Guest{Network: config.NetworkConfig{Mode: config.NetworkInternet}, Ports: []config.Port{{Host: 8080, Guest: 80}}}
-	rules := nftRules(g, hostNets(t))
+	rules := renderRules(t, g)
 	contains(t, rules,
 		"icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } ip6 hoplimit 255 accept",
 		`oifname "lo" ip saddr 127.0.0.1 ip daddr 127.0.0.1 tcp dport 8080 accept`,
@@ -72,7 +81,7 @@ func TestNFTRulesInternet(t *testing.T) {
 
 func TestNFTRulesLAN(t *testing.T) {
 	g := &config.Guest{Network: config.NetworkConfig{Mode: config.NetworkLAN}}
-	rules := nftRules(g, hostNets(t))
+	rules := renderRules(t, g)
 	contains(t, rules, "169.254.0.0/16", "::ffff:0.0.0.0/96", "fe80::/10", "192.168.11.12/32", "2404:7a81:f80:4400:a578:cbae:3ab4:9bc9/128")
 	lacks(t, rules, "192.168.0.0/16", "192.168.11.0/24", "2404:7a81:f80:4400::/64")
 }
@@ -87,7 +96,7 @@ func TestNFTRulesAllowList(t *testing.T) {
 		AllowDomains: []string{"github.com"},
 		AllowNets:    []netip.Prefix{netip.MustParsePrefix("192.168.11.50/32"), netip.MustParsePrefix("2001:db8::/32")},
 	}
-	rules := nftRules(g, hostNets(t))
+	rules := renderRules(t, g)
 	contains(t, rules,
 		"set dyn4 { type ipv4_addr; flags timeout; size 65536; }",
 		"set dyn6 { type ipv6_addr; flags timeout; size 65536; }",
@@ -123,7 +132,7 @@ func TestNFTRulesDenyList(t *testing.T) {
 		DenyDomains: []string{"bad.com"},
 		DenyNets:    []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")},
 	}
-	rules := nftRules(g, hostNets(t))
+	rules := renderRules(t, g)
 	contains(t, rules,
 		`oifname "lo" ip saddr 127.0.0.1 ip daddr 127.0.0.1 udp dport 53 accept`,
 		"meta mark 0x616e7463 ip daddr 192.0.2.54 udp dport 53 accept",
@@ -138,7 +147,7 @@ func TestNFTRulesAllowExceptionsWithDefaultAllow(t *testing.T) {
 		Network:   config.NetworkConfig{Mode: config.NetworkInternet, Default: "allow", Allow: []string{"192.168.11.50/32"}},
 		AllowNets: []netip.Prefix{netip.MustParsePrefix("192.168.11.50/32")},
 	}
-	rules := nftRules(g, hostNets(t))
+	rules := renderRules(t, g)
 	// A static exception opens one LAN host; everything else keeps the mode.
 	if index(t, rules, "ip daddr { 192.168.11.50/32 } accept") > index(t, rules, "ip daddr { 10.0.0.0/8") {
 		t.Errorf("the exception must come before the LAN block:\n%s", rules)

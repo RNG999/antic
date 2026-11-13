@@ -28,41 +28,70 @@ import (
 // Binaries are the host programs antic runs. Self is antic itself (it runs
 // as the first process of each guest's network namespace).
 type Binaries struct {
-	CloudHypervisor, Virtiofsd, Passt, Pasta, NFT, Self string
+	CloudHypervisor, Virtiofsd, Passt, Pasta, NFT, Self domain.AbsPath
 }
 
-// FindBinaries locates them: helpers installed in antic's libexec
-// ("antic update") take precedence, falling back to the system.
-func FindBinaries(d instance.Dirs) Binaries {
-	find := func(name string, extra ...string) string {
-		if d.Libexec.Valid() {
-			cand := filepath.Join(d.Libexec.Get(), name)
-			if _, err := os.Stat(cand); err == nil {
+type hostExecutableKind int
+
+const (
+	executableVirtiofsd hostExecutableKind = iota
+	executablePasst
+	executablePasta
+	executableNFT
+)
+
+func locateHostExecutable(d instance.Dirs, kind hostExecutableKind) domain.AbsPath {
+	var binaryName string
+	var systemCandidates []string
+	switch kind {
+	case executableVirtiofsd:
+		binaryName = "virtiofsd"
+		systemCandidates = []string{"/usr/lib/virtiofsd", "/usr/libexec/virtiofsd"}
+	case executablePasst:
+		binaryName = "passt"
+	case executablePasta:
+		binaryName = "pasta"
+	case executableNFT:
+		binaryName = "nft"
+		systemCandidates = []string{"/usr/sbin/nft"}
+	}
+	if d.Libexec.Valid() {
+		cand := domain.JoinAbsPath(d.Libexec, binaryName)
+		if cand.Valid() {
+			if _, err := os.Stat(cand.Get()); err == nil {
 				return cand
 			}
 		}
-		if p, err := exec.LookPath(name); err == nil {
-			return p
+	}
+	if p, err := exec.LookPath(binaryName); err == nil {
+		if abs, parseErr := domain.ParseAbsPath(filepath.Clean(p)); parseErr == nil {
+			return abs
 		}
-		for _, p := range extra {
-			if _, err := os.Stat(p); err == nil {
-				return p
+	}
+	for _, p := range systemCandidates {
+		if _, err := os.Stat(p); err == nil {
+			if abs, parseErr := domain.ParseAbsPath(p); parseErr == nil {
+				return abs
 			}
 		}
-		return name
 	}
-	self, err := os.Executable()
-	if err != nil {
-		self = "antic"
+	return domain.AbsPath{}
+}
+
+// FindBinaries locates them: executables installed in antic's libexec
+// ("antic update") take precedence, falling back to the system.
+func FindBinaries(d instance.Dirs) Binaries {
+	var selfPath domain.AbsPath
+	if rawSelf, err := os.Executable(); err == nil {
+		selfPath, _ = domain.ParseAbsPath(filepath.Clean(config.RealPath(rawSelf)))
 	}
-	self = config.RealPath(self)
 	return Binaries{
-		CloudHypervisor: filepath.Join(d.Libexec.Get(), "cloud-hypervisor"),
-		Virtiofsd:       find("virtiofsd", "/usr/lib/virtiofsd", "/usr/libexec/virtiofsd"),
-		Passt:           find("passt"),
-		Pasta:           find("pasta"),
-		NFT:             find("nft", "/usr/sbin/nft"),
-		Self:            self,
+		CloudHypervisor: domain.JoinAbsPath(d.Libexec, "cloud-hypervisor"),
+		Virtiofsd:       locateHostExecutable(d, executableVirtiofsd),
+		Passt:           locateHostExecutable(d, executablePasst),
+		Pasta:           locateHostExecutable(d, executablePasta),
+		NFT:             locateHostExecutable(d, executableNFT),
+		Self:            selfPath,
 	}
 }
 
@@ -70,14 +99,22 @@ func FindBinaries(d instance.Dirs) Binaries {
 // rootless Nix store at /nix when helpers link against /nix/store. The user
 // manager cannot create the /nix mount point, so the bind needs an existing
 // /nix; without one, the unit would fail to set up its namespace.
-func (m *Manager) confine(rw, ro []string) []systemd.Property {
+func (m *Manager) confine(rwPaths, roPaths []domain.AbsPath) []systemd.Property {
 	if fi, err := os.Stat("/nix"); err != nil || !fi.IsDir() {
-		return systemd.Confine(rw, ro)
+		return systemd.Confine(rwPaths, roPaths)
 	}
 	if nix, err := m.nixBuilder(); err == nil && nix.Root() != "" {
-		ro = append(append([]string{}, ro...), filepath.Join(nix.Root(), "nix")+":/nix")
+		src, err1 := domain.ParseAbsPath(filepath.Clean(filepath.Join(nix.Root(), "nix")))
+		dst, err2 := domain.ParseAbsPath("/nix")
+		if err1 == nil && err2 == nil {
+			return systemd.Confine(rwPaths, roPaths, systemd.BindMount{
+				Source:        src,
+				Destination:   dst,
+				IgnoreMissing: true,
+			})
+		}
 	}
-	return systemd.Confine(rw, ro)
+	return systemd.Confine(rwPaths, roPaths)
 }
 
 // Manager runs guests.
@@ -86,8 +123,8 @@ type Manager struct {
 	Config *config.Config
 	Units  systemd.Manager
 	Bins   Binaries
-	Log    io.Writer // progress messages
-	User   string    // host user = guest login user
+	Log    io.Writer       // progress messages
+	User   domain.UserName // host user = guest login user
 
 	nix *nixbuild.Nix
 }
@@ -98,18 +135,19 @@ func NewManager(ctx context.Context, d instance.Dirs, cfg *config.Config, log io
 	if err != nil {
 		return nil, err
 	}
-	if d.Home.Get() != "/home/"+u.Username {
-		return nil, fmt.Errorf("home directory %s is not /home/%s (shares appear at the same path in the guest)", d.Home.Get(), u.Username)
+	userName, err := domain.ParseUserName(u.Username)
+	if err != nil {
+		return nil, err
+	}
+	expectedHome, err := domain.HomeDir(userName)
+	if err != nil || d.Home != expectedHome {
+		return nil, fmt.Errorf("home directory %s is not /home/%s (shares appear at the same path in the guest)", d.Home.Get(), userName.Get())
 	}
 	units, err := systemd.Connect(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return &Manager{Dirs: d, Config: cfg, Units: units, Bins: FindBinaries(d), Log: log, User: u.Username}, nil
-}
-
-func (m *Manager) logf(format string, args ...any) {
-	fmt.Fprintf(m.Log, "antic: "+format+"\n", args...)
+	return &Manager{Dirs: d, Config: cfg, Units: units, Bins: FindBinaries(d), Log: log, User: userName}, nil
 }
 
 func (m *Manager) nixBuilder() (*nixbuild.Nix, error) {
@@ -133,16 +171,12 @@ type Guest struct {
 }
 
 // Get returns the named guest.
-func (m *Manager) Get(name string) (*Guest, error) {
-	c, err := m.Config.Get(name)
+func (m *Manager) Get(name domain.GuestName) (*Guest, error) {
+	c, err := m.Config.Get(name.Get())
 	if err != nil {
 		return nil, err
 	}
-	guestName, err := domain.ParseGuestName(c.Name)
-	if err != nil {
-		return nil, err
-	}
-	inst, ok, err := m.Dirs.Lookup(guestName)
+	inst, ok, err := m.Dirs.Lookup(name)
 	if err != nil {
 		return nil, err
 	}
@@ -162,11 +196,15 @@ func (m *Manager) Get(name string) (*Guest, error) {
 // in m.Config.Errors).
 func (m *Manager) All() ([]*Guest, error) {
 	var out []*Guest
-	for _, n := range m.Config.Names() {
-		if m.Config.Errors[n] != nil {
+	for _, rawName := range m.Config.Names() {
+		if m.Config.Errors[rawName] != nil {
 			continue
 		}
-		g, err := m.Get(n)
+		guestName, err := domain.ParseGuestName(rawName)
+		if err != nil {
+			return nil, err
+		}
+		g, err := m.Get(guestName)
 		if err != nil {
 			return nil, err
 		}
@@ -177,19 +215,15 @@ func (m *Manager) All() ([]*Guest, error) {
 
 // GetUnloadable returns guest name whose config file does not load, so
 // that it can still be stopped and removed (D17).
-func (m *Manager) GetUnloadable(name string) (*Guest, error) {
-	if m.Config.Errors[name] == nil {
-		return nil, fmt.Errorf("no such guest %q", name)
+func (m *Manager) GetUnloadable(name domain.GuestName) (*Guest, error) {
+	if m.Config.Errors[name.Get()] == nil {
+		return nil, fmt.Errorf("no such guest %q", name.Get())
 	}
-	guestName, err := domain.ParseGuestName(name)
+	inst, ok, err := m.Dirs.Lookup(name)
 	if err != nil {
 		return nil, err
 	}
-	inst, ok, err := m.Dirs.Lookup(guestName)
-	if err != nil {
-		return nil, err
-	}
-	return &Guest{m: m, Cfg: &config.Guest{Name: name, Path: m.Config.GuestPath(name)}, Inst: inst, Created: ok}, nil
+	return &Guest{m: m, Cfg: &config.Guest{Name: name.Get(), Path: m.Config.GuestPath(name.Get())}, Inst: inst, Created: ok}, nil
 }
 
 func (g *Guest) GuestName() domain.GuestName {
@@ -197,36 +231,51 @@ func (g *Guest) GuestName() domain.GuestName {
 	return gn
 }
 
-func (g *Guest) Name() string { return g.Cfg.Name }
-
 // Units and slice, keyed by ID.
-func (g *Guest) vmUnit() string  { return "antic-vm@" + g.Inst.ID.Get() + ".service" }
-func (g *Guest) netUnit() string { return "antic-net@" + g.Inst.ID.Get() + ".service" }
-func (g *Guest) shareUnit(tag domain.ShareTag) string {
-	return "antic-share@" + g.Inst.ID.Get() + ":" + tag.Get() + ".service"
+func (g *Guest) vmUnit() domain.UnitName {
+	u, _ := domain.ParseUnitName("antic-vm@" + g.Inst.ID.Get() + ".service")
+	return u
 }
-func (g *Guest) shareUnitString(tag string) string {
-	return "antic-share@" + g.Inst.ID.Get() + ":" + tag + ".service"
+func (g *Guest) netUnit() domain.UnitName {
+	u, _ := domain.ParseUnitName("antic-net@" + g.Inst.ID.Get() + ".service")
+	return u
 }
-func (g *Guest) slice() string { return "antic-" + g.Inst.ID.Get() + ".slice" }
+func (g *Guest) shareUnit(tag domain.ShareTag) domain.UnitName {
+	u, _ := domain.ParseUnitName("antic-share@" + g.Inst.ID.Get() + ":" + tag.Get() + ".service")
+	return u
+}
+func (g *Guest) storeShareUnit() domain.UnitName {
+	u, _ := domain.ParseUnitName("antic-share@" + g.Inst.ID.Get() + ":store.service")
+	return u
+}
+func (g *Guest) slice() domain.UnitName {
+	u, _ := domain.ParseUnitName("antic-" + g.Inst.ID.Get() + ".slice")
+	return u
+}
 func (g *Guest) CgroupDir() domain.AbsPath {
 	uid := os.Getuid()
 	base, _ := domain.ParseAbsPath("/sys/fs/cgroup/user.slice")
-	return domain.JoinAbsPath(base, fmt.Sprintf("user-%d.slice", uid), fmt.Sprintf("user@%d.service", uid), "antic.slice", g.slice())
+	return domain.JoinAbsPath(base, fmt.Sprintf("user-%d.slice", uid), fmt.Sprintf("user@%d.service", uid), "antic.slice", g.slice().Get())
 }
 func (g *Guest) store() nixbuild.GuestStore { return nixbuild.GuestStore(g.Inst.StoreDir().Get()) }
 func (g *Guest) api() *chv.Client           { return chv.New(filepath.Join(g.Inst.VMDir().Get(), "api.sock")) }
 func (g *Guest) vsock() transport.Vsock {
 	return transport.Vsock{Socket: filepath.Join(g.Inst.VMDir().Get(), "vsock.sock")}
 }
-func (g *Guest) sockDir(helper string) domain.AbsPath {
-	return domain.JoinAbsPath(g.Inst.SockDir(), helper)
+func (g *Guest) netSockDir() domain.AbsPath {
+	return domain.JoinAbsPath(g.Inst.SockDir(), "net")
+}
+func (g *Guest) storeSockDir() domain.AbsPath {
+	return domain.JoinAbsPath(g.Inst.SockDir(), "store")
+}
+func (g *Guest) shareSockDir(tag domain.ShareTag) domain.AbsPath {
+	return domain.JoinAbsPath(g.Inst.SockDir(), tag.Get())
 }
 
 // requireCreated fails for a guest without a build.
 func (g *Guest) requireCreated() error {
 	if !g.Created {
-		return fmt.Errorf("guest %s has not been built yet; run \"antic guest create %s\"", g.Name(), g.Name())
+		return fmt.Errorf("guest %s has not been built yet; run \"antic guest create %s\"", g.GuestName(), g.GuestName())
 	}
 	return nil
 }
@@ -267,18 +316,18 @@ func (g *Guest) readBoot(ctx context.Context) (*boot, error) {
 		return nil, err
 	}
 	if !st.Running() {
-		return nil, fmt.Errorf("guest %s is not running", g.Name())
+		return nil, fmt.Errorf("guest %s is not running", g.GuestName())
 	}
 	b, err := os.ReadFile(g.Inst.BootFile().Get())
 	if err != nil {
-		return nil, fmt.Errorf("guest %s: no boot record: %w", g.Name(), err)
+		return nil, fmt.Errorf("guest %s: no boot record: %w", g.GuestName(), err)
 	}
 	var bt boot
 	if err := json.Unmarshal(b, &bt); err != nil {
 		return nil, err
 	}
 	if bt.Invocation != st.Invocation {
-		return nil, fmt.Errorf("guest %s: boot record is from an earlier start; restart the guest", g.Name())
+		return nil, fmt.Errorf("guest %s: boot record is from an earlier start; restart the guest", g.GuestName())
 	}
 	return &bt, nil
 }

@@ -342,6 +342,92 @@ func TryParseProcessID(pid int) types.Result[ProcessID] {
 	return types.TryParse[int, ProcessIDPred](pid)
 }
 
+// ExitCodePred refines int to POSIX process exit status codes: 0 <= code <= 255.
+type ExitCodePred struct{}
+
+// Check validates a POSIX exit status code.
+func (ExitCodePred) Check(code int) error {
+	if code < 0 || code > 255 {
+		return fmt.Errorf("exit code %d out of range 0..255", code)
+	}
+	return nil
+}
+
+// ExitCode is the refinement type { code : int | 0 <= code <= 255 }.
+type ExitCode = types.Refined[int, ExitCodePred]
+
+// ParseExitCode validates and constructs an ExitCode.
+func ParseExitCode(code int) (ExitCode, error) {
+	return types.Parse[int, ExitCodePred](code)
+}
+
+// PrintableTextPred refines string to non-empty single-line printable text
+// containing no control characters (preventing terminal escape injection).
+type PrintableTextPred struct{}
+
+// Check validates that s is non-empty and free of control characters.
+func (PrintableTextPred) Check(s string) error {
+	if s == "" {
+		return errors.New("empty printable text")
+	}
+	for _, r := range s {
+		if r != '\t' && isControl(r) {
+			return fmt.Errorf("printable text contains control character %U", r)
+		}
+	}
+	return nil
+}
+
+// PrintableText is the refinement type { s : string | PrintableTextPred(s) }.
+type PrintableText = types.Refined[string, PrintableTextPred]
+
+// ParsePrintableText validates and constructs a PrintableText.
+func ParsePrintableText(s string) (PrintableText, error) {
+	return types.Parse[string, PrintableTextPred](s)
+}
+
+// NFTRulesetPred refines string to well-formed antic nftables rulesets:
+// non-empty, no NUL or control characters (other than '\n'), balanced '{' and
+// '}' blocks, and scoped to "table inet antic {" with a "chain output {" hook.
+type NFTRulesetPred struct{}
+
+// Check validates an antic nftables ruleset.
+func (NFTRulesetPred) Check(s string) error {
+	if !strings.HasPrefix(s, "table inet antic {\n") || !strings.HasSuffix(s, "}\n") {
+		return errors.New("nftables ruleset must be scoped to 'table inet antic { ... }'")
+	}
+	if !strings.Contains(s, "  chain output {\n") || !strings.Contains(s, "    type filter hook output priority filter; policy accept;\n") {
+		return errors.New("nftables ruleset missing output filter chain")
+	}
+	depth := 0
+	for _, r := range s {
+		if r != '\n' && isControl(r) {
+			return fmt.Errorf("nftables ruleset contains control character %U", r)
+		}
+		switch r {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth < 0 {
+				return errors.New("nftables ruleset has unbalanced '}'")
+			}
+		}
+	}
+	if depth != 0 {
+		return errors.New("nftables ruleset has unclosed '{'")
+	}
+	return nil
+}
+
+// NFTRuleset is the refinement type { s : string | NFTRulesetPred(s) }.
+type NFTRuleset = types.Refined[string, NFTRulesetPred]
+
+// ParseNFTRuleset validates and constructs an NFTRuleset.
+func ParseNFTRuleset(s string) (NFTRuleset, error) {
+	return types.Parse[string, NFTRulesetPred](s)
+}
+
 // UsableAddrPred refines netip.Addr to routable unicast addresses (excluding
 // unspecified, loopback, link-local, multicast, and IPv4-mapped IPv6 addresses,
 // preventing DNS rebinding against local/metadata services).

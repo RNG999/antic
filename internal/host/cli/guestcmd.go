@@ -95,7 +95,11 @@ func (a *app) guestKill() *cobra.Command {
 				return err
 			}
 			for _, s := range sessions {
-				if err := g.Kill(c.Context(), s); err != nil {
+				sess, err := domain.ParseSessionUnit(s)
+				if err != nil {
+					return err
+				}
+				if err := g.Kill(c.Context(), sess); err != nil {
 					return err
 				}
 			}
@@ -185,6 +189,10 @@ func (a *app) guestCreate() *cobra.Command {
 				return err
 			}
 			name := args[0]
+			guestName, err := domain.ParseGuestName(name)
+			if err != nil {
+				return err
+			}
 			var ports []config.Port
 			for _, ps := range portSpecs {
 				pt, err := config.ParsePort(ps)
@@ -204,7 +212,7 @@ func (a *app) guestCreate() *cobra.Command {
 				Ports:    ports,
 			}
 			flags := slices.ContainsFunc([]string{"pkg", "cpus", "memory", "network", "port"}, c.Flags().Changed)
-			_, err := a.mgr.Create(c.Context(), name, spec, flags)
+			_, err = a.mgr.Create(c.Context(), guestName, spec, flags)
 			return err
 		},
 	}
@@ -256,7 +264,7 @@ func (a *app) guestSet() *cobra.Command {
 			}
 			changed, err = g.Reconfigure(c.Context(), func(d config.Draft) (config.Draft, error) { return d.SetResources(u) })
 			if err == nil && !changed {
-				fmt.Fprintf(os.Stderr, "antic: %s already has these settings\n", g.Name())
+				fmt.Fprintf(os.Stderr, "antic: %s already has these settings\n", g.GuestName())
 			}
 			return err
 		},
@@ -286,12 +294,16 @@ func (a *app) guestRm() *cobra.Command {
 				return err
 			}
 			for _, n := range args {
-				if err := a.mgr.RecoverOrphan(c.Context(), n); err != nil {
+				guestName, err := domain.ParseGuestName(n)
+				if err != nil {
+					return fmt.Errorf("unknown guest %q", n)
+				}
+				if err := a.mgr.RecoverOrphan(c.Context(), guestName); err != nil {
 					return err
 				}
-				g, err := a.mgr.Get(n)
+				g, err := a.mgr.Get(guestName)
 				if err != nil && a.cfg.Errors[n] != nil {
-					g, err = a.mgr.GetUnloadable(n)
+					g, err = a.mgr.GetUnloadable(guestName)
 				}
 				if err != nil {
 					return err
@@ -336,7 +348,7 @@ func (a *app) eachGuest(c *cobra.Command, args []string, all bool, fn func(*gues
 			}
 		}
 		for _, n := range args {
-			g, err := a.mgr.Get(n)
+			g, err := a.get(c.Context(), n)
 			if err != nil {
 				return err
 			}
@@ -346,7 +358,7 @@ func (a *app) eachGuest(c *cobra.Command, args []string, all bool, fn func(*gues
 	// P2: stop at the first guest that fails; the ones before it stay done.
 	for _, g := range gs {
 		if err := fn(g); err != nil {
-			return fmt.Errorf("%s: %w", g.Name(), err)
+			return fmt.Errorf("%s: %w", g.GuestName(), err)
 		}
 	}
 	return nil
@@ -363,7 +375,7 @@ func (a *app) guestStart() *cobra.Command {
 				if err := g.Start(c.Context()); err != nil {
 					return err
 				}
-				fmt.Fprintf(os.Stderr, "antic: started guest %s\n", g.Name())
+				fmt.Fprintf(os.Stderr, "antic: started guest %s\n", g.GuestName())
 				return nil
 			})
 		},
@@ -382,7 +394,7 @@ func (a *app) guestStop() *cobra.Command {
 				if err := g.Stop(c.Context()); err != nil {
 					return err
 				}
-				fmt.Fprintf(os.Stderr, "antic: stopped guest %s\n", g.Name())
+				fmt.Fprintf(os.Stderr, "antic: stopped guest %s\n", g.GuestName())
 				return nil
 			})
 		},
@@ -402,7 +414,7 @@ func (a *app) guestRestart() *cobra.Command {
 				if err := g.Restart(c.Context()); err != nil {
 					return err
 				}
-				fmt.Fprintf(os.Stderr, "antic: restarted guest %s\n", g.Name())
+				fmt.Fprintf(os.Stderr, "antic: restarted guest %s\n", g.GuestName())
 				return nil
 			})
 		},
@@ -504,8 +516,20 @@ func (a *app) guestLogs() *cobra.Command {
 				return err
 			}
 			if jrnl {
+				var parsedUnits []domain.UnitName
+				for _, u := range units {
+					un, err := domain.ParseUnitName(u)
+					if err != nil {
+						return err
+					}
+					parsedUnits = append(parsedUnits, un)
+				}
+				jl, err := domain.ParseJournalLines(lines)
+				if err != nil {
+					return err
+				}
 				w := &sanitizer{w: os.Stdout}
-				return g.Journal(c.Context(), units, lines, func(l string) { w.Write([]byte(l + "\n")) })
+				return g.Journal(c.Context(), parsedUnits, jl, w)
 			}
 			f, err := os.Open(g.Console().Get())
 			if err != nil {

@@ -60,20 +60,20 @@ func TestPolicy(t *testing.T) {
 	os.Symlink(home+"/dotfiles/bashrc", home+"/.bashrc")
 	t.Setenv("PATH", home+"/bin:/usr/bin")
 	p := NewPolicy(homeAbs, []domain.AbsPath{mustAbs(t, home+"/Work/proj/flake")}, []domain.AbsPath{mustAbs(t, home+"/Work")})
-	if _, err := p.Resolve(home + "/Work"); err == nil {
+	if _, err := p.ValidateShareDirectory(mustAbs(t, home+"/Work")); err == nil {
 		t.Error("shared a directory containing a guest flake")
 	}
-	if _, err := p.Resolve(home + "/Work/proj/sub"); err == nil {
+	if _, err := p.ValidateShareDirectory(mustAbs(t, home+"/Work/proj/sub")); err == nil {
 		t.Error("shared a missing directory")
 	}
 	for _, bad := range []string{home, home + "/.ssh", home + "/dotfiles", home + "/bin"} {
-		if _, err := p.Resolve(bad); err == nil {
-			t.Errorf("Resolve(%s) succeeded", bad)
+		if _, err := p.ValidateShareDirectory(mustAbs(t, bad)); err == nil {
+			t.Errorf("ValidateShareDirectory(%s) succeeded", bad)
 		}
 	}
 	mk(t, home+"/Projects/")
-	if got, err := p.Resolve(home + "/Projects"); err != nil || got.Get() != home+"/Projects" {
-		t.Errorf("Resolve(Projects) = %q, %v", got, err)
+	if got, err := p.ValidateShareDirectory(mustAbs(t, home+"/Projects")); err != nil || got.Get() != home+"/Projects" {
+		t.Errorf("ValidateShareDirectory(Projects) = %q, %v", got, err)
 	}
 	if p.InRoots(mustAbs(t, home+"/Projects")) || !p.InRoots(mustAbs(t, home+"/Work/x")) {
 		t.Error("InRoots wrong")

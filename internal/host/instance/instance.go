@@ -278,6 +278,30 @@ func defaultTimeout(fallback time.Duration) time.Duration {
 	return fallback
 }
 
+type lockKind int
+
+const (
+	lockKindNixBuild lockKind = iota
+	lockKindUpdate
+	lockKindGuest
+)
+
+type lockTarget struct {
+	kind  lockKind
+	guest domain.GuestName
+}
+
+func (t lockTarget) lockFile(d Dirs) domain.AbsPath {
+	switch t.kind {
+	case lockKindNixBuild:
+		return domain.JoinAbsPath(d.StateRoot, "locks", "nixbuild.lock")
+	case lockKindUpdate:
+		return domain.JoinAbsPath(d.StateRoot, "locks", "update.lock")
+	default:
+		return domain.JoinAbsPath(d.StateRoot, "locks", t.guest.Get()+".lock")
+	}
+}
+
 // Lock serializes lifecycle operations on guest name across antic
 // processes (AI agents run tools in parallel). Unlock by calling the
 // returned function. Times out after defaultLockTimeout.
@@ -292,7 +316,7 @@ func (d Dirs) LockNixBuild() (func(), error) {
 	timeout := defaultTimeout(defaultNixBuildTimeout)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return d.lockNamed(ctx, "nixbuild", "Nix build", timeout)
+	return d.acquireLock(ctx, lockTarget{kind: lockKindNixBuild})
 }
 
 // LockUpdate serializes self-update operations across antic processes.
@@ -301,7 +325,7 @@ func (d Dirs) LockUpdate() (func(), error) {
 	timeout := defaultTimeout(defaultLockTimeout)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return d.lockNamed(ctx, "update", "antic update", timeout)
+	return d.acquireLock(ctx, lockTarget{kind: lockKindUpdate})
 }
 
 // LockWithTimeout takes an exclusive lock for guest name under StateRoot/locks/, waiting up to timeout.
@@ -315,15 +339,14 @@ func (d Dirs) LockWithTimeout(name domain.GuestName, timeout time.Duration) (fun
 // If the lock is held by another process, it notifies the user on stderr
 // and polls until acquired or ctx is cancelled / timeout expires.
 func (d Dirs) LockWithContext(ctx context.Context, name domain.GuestName, timeout time.Duration) (func(), error) {
-	return d.lockNamed(ctx, name.Get(), fmt.Sprintf("guest %q", name.Get()), timeout)
+	return d.acquireLock(ctx, lockTarget{kind: lockKindGuest, guest: name})
 }
 
-func (d Dirs) lockNamed(ctx context.Context, lockKey, description string, _ time.Duration) (func(), error) {
-	locksDir := domain.JoinAbsPath(d.StateRoot, "locks")
-	if err := os.MkdirAll(locksDir.Get(), 0o700); err != nil {
+func (d Dirs) acquireLock(ctx context.Context, target lockTarget) (func(), error) {
+	lockFile := target.lockFile(d)
+	if err := os.MkdirAll(filepath.Dir(lockFile.Get()), 0o700); err != nil {
 		return nil, err
 	}
-	lockFile := domain.JoinAbsPath(locksDir, lockKey+".lock")
 	f, err := os.OpenFile(lockFile.Get(), os.O_RDWR|os.O_CREATE|unix.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, err
@@ -338,11 +361,18 @@ func (d Dirs) lockNamed(ctx context.Context, lockKey, description string, _ time
 		return nil, err
 	}
 
+	targetDesc := fmt.Sprintf("guest %q", target.guest.Get())
+	switch target.kind {
+	case lockKindNixBuild:
+		targetDesc = "Nix build"
+	case lockKindUpdate:
+		targetDesc = "antic update"
+	}
 	holderMsg := "another process"
 	if pid, ok := readLockPID(lockFile).Get(); ok {
 		holderMsg = fmt.Sprintf("PID %d", pid.Get())
 	}
-	fmt.Fprintf(os.Stderr, "antic: waiting for lock on %s (held by %s)...\n", description, holderMsg)
+	fmt.Fprintf(os.Stderr, "antic: waiting for lock on %s (held by %s)...\n", targetDesc, holderMsg)
 
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
@@ -360,9 +390,9 @@ func (d Dirs) lockNamed(ctx context.Context, lockKey, description string, _ time
 				if elapsed >= time.Second {
 					elapsed = elapsed.Round(time.Second)
 				}
-				return nil, fmt.Errorf("timed out waiting for lock on %s after %v (held by %s)", description, elapsed, holderMsg)
+				return nil, fmt.Errorf("timed out waiting for lock on %s after %v (held by %s)", targetDesc, elapsed, holderMsg)
 			}
-			return nil, fmt.Errorf("interrupted waiting for lock on %s (held by %s): %w", description, holderMsg, ctx.Err())
+			return nil, fmt.Errorf("interrupted waiting for lock on %s (held by %s): %w", targetDesc, holderMsg, ctx.Err())
 		case <-ticker.C:
 			if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err == nil {
 				writeLockPID(f)

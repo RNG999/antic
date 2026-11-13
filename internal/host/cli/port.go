@@ -95,7 +95,7 @@ func (a *app) editPorts(c *cobra.Command, name string, specs []string, desc, pro
 		return err
 	}
 	if !changed {
-		fmt.Fprintf(os.Stderr, "antic: %s already forwards these ports\n", g.Name())
+		fmt.Fprintf(os.Stderr, "antic: %s already forwards these ports\n", g.GuestName())
 	}
 	return nil
 }

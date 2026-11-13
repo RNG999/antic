@@ -192,8 +192,8 @@ func parseEntry(raw string) (netip.Prefix, string, error) {
 	return netip.Prefix{}, d, nil
 }
 
-// ValidName reports whether s can name a guest (delegates to SSOT domain.ParseGuestName).
-func ValidName(s string) bool {
+// validName reports whether s can name a guest (delegates to SSOT domain.ParseGuestName).
+func validName(s string) bool {
 	_, err := domain.ParseGuestName(s)
 	return err == nil
 }
@@ -277,7 +277,7 @@ func loadProjectGuest(path, home string) (*Guest, error) {
 	}
 	g.Path = path
 	var errs []error
-	if !ValidName(g.Name) {
+	if !validName(g.Name) {
 		errs = append(errs, fmt.Errorf("invalid guest name %q (a-z, 0-9 and -, up to 32 characters)", g.Name))
 	}
 	if und := md.Undecoded(); len(und) > 0 {
@@ -329,7 +329,7 @@ func loadGuest(path, name, home string) (*Guest, error) {
 	g.Name = name
 	g.Path = path
 	var errs []error
-	if !ValidName(name) {
+	if !validName(name) {
 		errs = append(errs, fmt.Errorf("invalid guest name %q (a-z, 0-9 and -, up to 32 characters)", name))
 	}
 	if und := md.Undecoded(); len(und) > 0 {

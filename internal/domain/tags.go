@@ -8,15 +8,6 @@ package domain
 
 import "github.com/RNG999/antic/internal/types"
 
-// KernelSigTag tags a kernel+initrd+cmdline identity signature.
-type KernelSigTag struct{}
-
-// KernelSig is a phantom-typed kernel identity signature.
-type KernelSig = types.Phantom[string, KernelSigTag]
-
-// NewKernelSig wraps a kernel signature string.
-func NewKernelSig(sig string) KernelSig { return types.NewPhantom[string, KernelSigTag](sig) }
-
 // TextTag tags human-readable log or error reason messages.
 type TextTag struct{}
 

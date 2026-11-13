@@ -48,7 +48,7 @@ func (g *Guest) power(ctx context.Context, kind operation.OpKind) error {
 		return err
 	}
 	tx, _ := g.planChange(ctx, draft)
-	if tx.op.Phase == operation.GuestOff && tx.oldProfile == "" {
+	if tx.op.Phase == operation.GuestOff && !tx.oldProfile.Valid() {
 		tx.op.Phase = operation.GuestUncreated
 	}
 	tx.op.Kind, tx.op.Change = kind, operation.Change{}
@@ -60,13 +60,13 @@ func (g *Guest) EnsureRunning(ctx context.Context) error {
 	if up, err := g.Running(ctx); err != nil || up {
 		return err
 	}
-	g.m.logf("starting guest %s...", g.Name())
+	fmt.Fprintf(g.m.Log, "antic: starting guest %s...\n", g.GuestName())
 	return g.Start(ctx)
 }
 
 // startSystem boots system with g.Cfg unless the guest is running, and
 // waits until it is ready; it stops everything it started on failure.
-func (g *Guest) startSystem(ctx context.Context, system string) error {
+func (g *Guest) startSystem(ctx context.Context, system domain.StorePath) error {
 	st, err := g.m.Units.State(ctx, g.vmUnit())
 	if err != nil {
 		return err
@@ -74,8 +74,8 @@ func (g *Guest) startSystem(ctx context.Context, system string) error {
 	if st.Running() {
 		return g.waitReady(ctx)
 	}
-	if system == "" {
-		return fmt.Errorf("guest %s has no system yet; run \"antic guest apply %s\"", g.Name(), g.Name())
+	if !system.Valid() {
+		return fmt.Errorf("guest %s has no system yet; run \"antic guest apply %s\"", g.GuestName(), g.GuestName())
 	}
 	// Leftovers of an earlier run (the VM is down and we hold the lock).
 	if err := g.m.Units.Stop(ctx, g.slice()); err != nil {
@@ -92,7 +92,7 @@ func (g *Guest) startSystem(ctx context.Context, system string) error {
 	if err != nil {
 		return err
 	}
-	bt := &boot{Invocation: st.Invocation, System: system, Started: time.Now()}
+	bt := &boot{Invocation: st.Invocation, System: system.Get(), Started: time.Now()}
 	cfg, err := g.vmConfig(ctx, system, bt)
 	if err == nil {
 		err = g.writeBoot(bt)
@@ -120,7 +120,7 @@ func (g *Guest) startSystem(ctx context.Context, system string) error {
 func (g *Guest) showAgentLog(ctx context.Context) {
 	jctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	g.m.logf("journal of antic-agent's units in %s:", g.Name())
+	fmt.Fprintf(g.m.Log, "antic: journal of antic-agent's units in %s:\n", g.GuestName())
 	g.vsock().Agent(jctx, proto.Request{Op: proto.OpJournal, Lines: 40,
 		Units: []string{"antic-agent.service", "antic-ready.target"}},
 		func(r proto.Response) {
@@ -146,10 +146,10 @@ func (g *Guest) prepareDirs() error {
 // created and booted through the API afterwards. Helpers bind to this unit,
 // so they stop when cloud-hypervisor exits, however it exits.
 func (g *Guest) startVM(ctx context.Context) error {
-	api := filepath.Join(g.Inst.VMDir().Get(), "api.sock")
+	api := domain.JoinAbsPath(g.Inst.VMDir(), "api.sock")
 	props := append(systemd.Confine(
-		[]string{g.Inst.VMDir().Get(), g.Inst.LogDir().Get()},
-		[]string{g.Inst.StoreDir().Get(), g.Inst.SockDir().Get(), g.m.Bins.CloudHypervisor},
+		[]domain.AbsPath{g.Inst.VMDir(), g.Inst.LogDir()},
+		[]domain.AbsPath{g.Inst.StoreDir(), g.Inst.SockDir(), g.m.Bins.CloudHypervisor},
 	), systemd.ProtectProcFS()...)
 	props = append(props,
 		systemd.Prop("NoNewPrivileges", true),
@@ -158,89 +158,121 @@ func (g *Guest) startVM(ctx context.Context) error {
 		systemd.Prop("PrivateNetwork", true),
 		systemd.Prop("MemoryDenyWriteExecute", true),
 	)
+	desc, _ := domain.ParsePrintableText("antic guest " + g.GuestName().Get())
 	if err := g.m.Units.Start(ctx, systemd.Unit{
-		Name: g.vmUnit(), Slice: g.slice(), Description: "antic guest " + g.Name(), Props: props,
-		Argv: []string{g.m.Bins.CloudHypervisor, "--api-socket", "path=" + api, "--seccomp", "true"},
+		Name: g.vmUnit(), Slice: g.slice(), Description: desc, Props: props,
+		Argv: []string{g.m.Bins.CloudHypervisor.Get(), "--api-socket", "path=" + api.Get(), "--seccomp", "true"},
 	}); err != nil {
 		return err
 	}
 	return g.waitSocket(ctx, g.vmUnit(), api)
 }
 
-// helper starts a unit bound to the VM and waits for its socket.
-func (g *Guest) helper(ctx context.Context, name, desc string, props []systemd.Property, sock string, argv ...string) error {
-	if err := g.m.Units.Start(ctx, systemd.Unit{
-		Name: name, Slice: g.slice(), Description: desc, Argv: argv,
-		Props: append(props, systemd.BindsTo(g.vmUnit())...),
-	}); err != nil {
+// startBoundUnitAndWaitSocket starts a unit bound to the VM and waits for its socket.
+func (g *Guest) startBoundUnitAndWaitSocket(ctx context.Context, unit systemd.Unit, sock domain.AbsPath) error {
+	unit.Slice = g.slice()
+	unit.Props = append(unit.Props, systemd.BindsTo(g.vmUnit())...)
+	if err := g.m.Units.Start(ctx, unit); err != nil {
 		return err
 	}
-	return g.waitSocket(ctx, name, sock)
+	return g.waitSocket(ctx, unit.Name, sock)
 }
 
 // startShare starts virtiofsd for path. Protected paths inside it are bound
 // read-only in virtiofsd's view, so the guest (even guest root) cannot
 // change them. Returns the vhost-user socket.
-func (g *Guest) startShare(ctx context.Context, tag string, path domain.AbsPath, ro bool, guestID int) (string, error) {
-	dir := g.sockDir(tag)
-	if err := os.MkdirAll(dir.Get(), 0o700); err != nil {
-		return "", err
+func (g *Guest) startShare(ctx context.Context, unit domain.UnitName, sockDir, path domain.AbsPath, ro bool, uid guestUID) (domain.AbsPath, error) {
+	if err := os.MkdirAll(sockDir.Get(), 0o700); err != nil {
+		return domain.AbsPath{}, err
 	}
-	sock := filepath.Join(dir.Get(), "fs.sock")
-	rw, roPaths := []string{dir.Get()}, []string{}
+	sock := domain.JoinAbsPath(sockDir, "fs.sock")
+	rwPaths := []domain.AbsPath{sockDir}
+	var roPaths []domain.AbsPath
 	if ro {
-		roPaths = append(roPaths, path.Get())
+		roPaths = append(roPaths, path)
 	} else {
-		rw = append(rw, path.Get())
+		rwPaths = append(rwPaths, path)
 		protected, err := share.Protected(path)
 		if err != nil {
-			return "", err
+			return domain.AbsPath{}, err
 		}
-		for _, p := range protected {
-			roPaths = append(roPaths, p.Get())
-		}
+		roPaths = append(roPaths, protected...)
 	}
-	args := []string{g.m.Bins.Virtiofsd,
-		"--socket-path=" + sock,
+	if g.m.Bins.Virtiofsd.Valid() {
+		roPaths = append(roPaths, g.m.Bins.Virtiofsd)
+	}
+	args := []string{g.m.Bins.Virtiofsd.Get(),
+		"--socket-path=" + sock.Get(),
 		"--shared-dir=" + path.Get(),
 		"--sandbox=namespace",
-		// Only our own UID/GID is mapped, to guestID in the guest.
-		fmt.Sprintf("--uid-map=:%d:%d:1:", guestID, os.Getuid()),
-		fmt.Sprintf("--gid-map=:%d:%d:1:", guestID, os.Getgid()),
+		// Only our own UID/GID is mapped, to uid in the guest.
+		fmt.Sprintf("--uid-map=:%d:%d:1:", uid, os.Getuid()),
+		fmt.Sprintf("--gid-map=:%d:%d:1:", uid, os.Getgid()),
 	}
 	if ro {
 		args = append(args, "--readonly")
 	}
-	props := append(g.m.confine(rw, append(roPaths, g.m.Bins.Virtiofsd)),
+	props := append(g.m.confine(rwPaths, roPaths),
 		systemd.Prop("NoNewPrivileges", true), systemd.UnixOnly(), systemd.Prop("PrivateNetwork", true))
-	return sock, g.helper(ctx, g.shareUnitString(tag), "antic share "+path.Get()+" ("+g.Name()+")", props, sock, args...)
+	desc, _ := domain.ParsePrintableText(fmt.Sprintf("antic share %s (%s)", path.Get(), g.GuestName()))
+	return sock, g.startBoundUnitAndWaitSocket(ctx, systemd.Unit{
+		Name:        unit,
+		Description: desc,
+		Props:       props,
+		Argv:        args,
+	}, sock)
 }
 
-// Guest IDs our UID/GID appear as: the guest user in shares, root in the
-// read-only /nix.
+// guestUID represents the UID/GID inside the guest that our host UID/GID maps to:
+// the guest user in shares, root in the read-only /nix.
+type guestUID int
+
 const (
-	guestUserID = 1000
-	guestRootID = 0
+	guestUserUID guestUID = 1000
+	guestRootUID guestUID = 0
 )
+
+type fstabMount struct {
+	tag      domain.ShareTag
+	target   domain.AbsPath
+	readOnly bool
+}
+
+func oemPlatform(mounts []fstabMount) *chv.Platform {
+	esc := strings.NewReplacer(" ", `\040`, "\t", `\011`, "\n", `\012`, `\`, `\134`)
+	var fstab strings.Builder
+	for _, m := range mounts {
+		mode := "rw"
+		if m.readOnly {
+			mode = "ro"
+		}
+		fmt.Fprintf(&fstab, "%s %s virtiofs %s,nosuid,nodev,x-systemd.required-by=antic-ready.target,x-systemd.before=antic-ready.target 0 0\n",
+			m.tag.Get(), esc.Replace(m.target.Get()), mode)
+	}
+	mountsCred := "io.systemd.credential.binary:" + proto.CredMounts + "=" + base64.StdEncoding.EncodeToString([]byte(fstab.String()))
+	protoCred := "io.systemd.credential.binary:" + proto.CredProtocol + "=" + base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(proto.Version)))
+	return &chv.Platform{OEMStrings: []string{mountsCred, protoCred}}
+}
 
 // vmConfig starts the store, share and network helpers and returns the VM
 // configuration; bt gets the shares.
-func (g *Guest) vmConfig(ctx context.Context, system string, bt *boot) (chv.VMConfig, error) {
+func (g *Guest) vmConfig(ctx context.Context, system domain.StorePath, bt *boot) (chv.VMConfig, error) {
 	store := g.store()
-	kernel, err := os.Readlink(store.Real(system + "/kernel"))
+	sysPath := system.Get()
+	kernel, err := os.Readlink(store.Real(sysPath + "/kernel"))
 	if err != nil {
 		return chv.VMConfig{}, err
 	}
-	initrd, err := os.Readlink(store.Real(system + "/initrd"))
+	initrd, err := os.Readlink(store.Real(sysPath + "/initrd"))
 	if err != nil {
 		return chv.VMConfig{}, err
 	}
-	params, err := os.ReadFile(store.Real(system + "/kernel-params"))
+	params, err := os.ReadFile(store.Real(sysPath + "/kernel-params"))
 	if err != nil {
 		return chv.VMConfig{}, err
 	}
 
-	storeSock, err := g.startShare(ctx, "store", domain.JoinAbsPath(g.Inst.StoreDir(), "nix"), true, guestRootID)
+	storeSock, err := g.startShare(ctx, g.storeShareUnit(), g.storeSockDir(), domain.JoinAbsPath(g.Inst.StoreDir(), "nix"), true, guestRootUID)
 	if err != nil {
 		return chv.VMConfig{}, fmt.Errorf("guest store: %w", err)
 	}
@@ -248,11 +280,11 @@ func (g *Guest) vmConfig(ctx context.Context, system string, bt *boot) (chv.VMCo
 		Payload: chv.Payload{
 			Kernel:    store.Real(kernel),
 			Initramfs: store.Real(initrd),
-			Cmdline:   "init=" + system + "/init " + strings.TrimSpace(string(params)),
+			Cmdline:   "init=" + sysPath + "/init " + strings.TrimSpace(string(params)),
 		},
 		CPUs:    chv.CPUs{Boot: g.Cfg.CPUs, Max: g.Cfg.CPUs},
 		Memory:  chv.Memory{Size: g.Cfg.MemoryBytes, Shared: true},
-		FS:      []chv.FS{{ID: "fs-store", Tag: proto.StoreTag, Socket: storeSock, NumQueues: 1, QueueSize: 1024}},
+		FS:      []chv.FS{{ID: "fs-store", Tag: proto.StoreTag, Socket: storeSock.Get(), NumQueues: 1, QueueSize: 1024}},
 		Vsock:   &chv.Vsock{ID: "vsock", CID: 3, Socket: filepath.Join(g.Inst.VMDir().Get(), "vsock.sock")},
 		Serial:  chv.Console{Mode: "Off"},
 		Console: chv.Console{Mode: "File", File: g.Inst.Console().Get()},
@@ -260,31 +292,31 @@ func (g *Guest) vmConfig(ctx context.Context, system string, bt *boot) (chv.VMCo
 	}
 
 	policy := g.m.policy()
-	var fstab strings.Builder
+	var mounts []fstabMount
 	for _, s := range g.Cfg.Shares {
-		absPath, err := policy.Resolve(s.Path)
+		candidate, err := domain.ParseAbsPath(filepath.Clean(s.Path))
 		if err != nil {
-			return chv.VMConfig{}, fmt.Errorf("guests.%s share: %w", g.Name(), err)
+			return chv.VMConfig{}, fmt.Errorf("guests.%s share: %w", g.GuestName(), err)
+		}
+		absPath, err := policy.ValidateShareDirectory(candidate)
+		if err != nil {
+			return chv.VMConfig{}, fmt.Errorf("guests.%s share: %w", g.GuestName(), err)
 		}
 		path := absPath.Get()
 		tag := share.Tag(absPath)
-		sock, err := g.startShare(ctx, tag.Get(), absPath, s.ReadOnly, guestUserID)
+		sock, err := g.startShare(ctx, g.shareUnit(tag), g.shareSockDir(tag), absPath, s.ReadOnly, guestUserUID)
 		if err != nil {
 			return chv.VMConfig{}, fmt.Errorf("share %s: %w", path, err)
 		}
-		cfg.FS = append(cfg.FS, chv.FS{ID: "fs-" + tag.Get(), Tag: tag.Get(), Socket: sock, NumQueues: 1, QueueSize: 1024})
+		cfg.FS = append(cfg.FS, chv.FS{ID: "fs-" + tag.Get(), Tag: tag.Get(), Socket: sock.Get(), NumQueues: 1, QueueSize: 1024})
 		bt.Shares = append(bt.Shares, bootShare{Share: config.Share{Path: path, ReadOnly: s.ReadOnly, Source: s.Source, Mode: s.Mode, Target: s.Target}, Tag: tag.Get()})
-		// Sessions require antic-ready.target, which requires every share.
-		mode := "rw"
-		if s.ReadOnly {
-			mode = "ro"
-		}
-		target := path
+		target := absPath
 		if s.Target != "" {
-			target = s.Target
+			if parsedTarget, err := domain.ParseAbsPath(s.Target); err == nil {
+				target = parsedTarget
+			}
 		}
-		fmt.Fprintf(&fstab, "%s %s virtiofs %s,nosuid,nodev,x-systemd.required-by=antic-ready.target,x-systemd.before=antic-ready.target 0 0\n",
-			tag, fstabEscape(target), mode)
+		mounts = append(mounts, fstabMount{tag: tag, target: target, readOnly: s.ReadOnly})
 	}
 
 	if g.Cfg.Network.Mode != config.NetworkNone {
@@ -292,31 +324,18 @@ func (g *Guest) vmConfig(ctx context.Context, system string, bt *boot) (chv.VMCo
 		if err != nil {
 			return chv.VMConfig{}, fmt.Errorf("network: %w", err)
 		}
-		cfg.Net = []chv.Net{{ID: "net", VhostUser: true, VhostSocket: sock, VhostMode: "Client", NumQueues: 2, QueueSize: 256}}
+		cfg.Net = []chv.Net{{ID: "net", VhostUser: true, VhostSocket: sock.Get(), VhostMode: "Client", NumQueues: 2, QueueSize: 256}}
 	}
 
-	cred := func(name string, data []byte) string {
-		return "io.systemd.credential.binary:" + name + "=" + base64.StdEncoding.EncodeToString(data)
-	}
-	cfg.Platform = &chv.Platform{OEMStrings: []string{
-		cred(proto.CredMounts, []byte(fstab.String())),
-		cred(proto.CredProtocol, []byte(strconv.Itoa(proto.Version))),
-	}}
+	cfg.Platform = oemPlatform(mounts)
 	return cfg, nil
 }
 
-// fstabEscape escapes a path for fstab (octal escapes for whitespace and
-// backslash).
-func fstabEscape(p string) string {
-	r := strings.NewReplacer(" ", `\040`, "\t", `\011`, "\n", `\012`, `\`, `\134`)
-	return r.Replace(p)
-}
-
 // waitSocket waits for a unit's socket, failing as soon as the unit stops.
-func (g *Guest) waitSocket(ctx context.Context, unit, sock string) error {
+func (g *Guest) waitSocket(ctx context.Context, unit domain.UnitName, sock domain.AbsPath) error {
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		if fi, err := os.Stat(sock); err == nil && fi.Mode()&os.ModeSocket != 0 {
+		if fi, err := os.Stat(sock.Get()); err == nil && fi.Mode()&os.ModeSocket != 0 {
 			return nil
 		}
 		st, err := g.m.Units.State(ctx, unit)
@@ -348,7 +367,7 @@ func (g *Guest) waitReady(ctx context.Context) error {
 			return err
 		}
 		if !st.Running() {
-			return fmt.Errorf("guest %s stopped while starting (see: antic guest logs %s)", g.Name(), g.Name())
+			return fmt.Errorf("guest %s stopped while starting (see: antic guest logs %s)", g.GuestName(), g.GuestName())
 		}
 		hctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		h, err := g.vsock().Hello(hctx)
@@ -356,9 +375,9 @@ func (g *Guest) waitReady(ctx context.Context) error {
 		switch {
 		case err == nil && h.Protocol != proto.Version:
 			return fmt.Errorf("guest %s speaks antic protocol %d, this antic speaks %d; update the antic input of its flake and run \"antic guest apply %s\", then restart it",
-				g.Name(), h.Protocol, proto.Version, g.Name())
-		case err == nil && h.User != g.m.User:
-			return fmt.Errorf("guest %s was built for user %q, not %q; set antic.user in its flake", g.Name(), h.User, g.m.User)
+				g.GuestName(), h.Protocol, proto.Version, g.GuestName())
+		case err == nil && h.User != g.m.User.Get():
+			return fmt.Errorf("guest %s was built for user %q, not %q; set antic.user in its flake", g.GuestName(), h.User, g.m.User.Get())
 		case err == nil && h.Ready:
 			return nil
 		case err == nil:
@@ -367,7 +386,7 @@ func (g *Guest) waitReady(ctx context.Context) error {
 			last = err
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("guest %s did not become ready: %w (see: antic guest logs %s)", g.Name(), last, g.Name())
+			return fmt.Errorf("guest %s did not become ready: %w (see: antic guest logs %s)", g.GuestName(), last, g.GuestName())
 		}
 		select {
 		case <-ctx.Done():
@@ -393,7 +412,7 @@ func (g *Guest) stopLocked(ctx context.Context) error {
 	}
 	if up {
 		if err := g.api().PowerButton(ctx); err != nil {
-			g.m.logf("power button for %s failed (%v); stopping its units", g.Name(), err)
+			fmt.Fprintf(g.m.Log, "antic: power button for %s failed (%v); stopping its units\n", g.GuestName(), err)
 		} else {
 			for i := 0; i < 120; i++ {
 				if up, err := g.Running(ctx); err != nil || !up {

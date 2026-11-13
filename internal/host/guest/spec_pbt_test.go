@@ -90,7 +90,11 @@ func (f fixture) shellCmd(c spec.Cmd) error {
 	switch c := c.(type) {
 	case spec.CmdMount:
 		for _, dir := range c.Dirs {
-			real, err := share.NewPolicy(f.env.Home, nil, nil).Resolve(dir)
+			candidate, err := domain.ParseAbsPath(filepath.Clean(dir))
+			if err != nil {
+				return err
+			}
+			real, err := share.NewPolicy(f.env.Home, nil, nil).ValidateShareDirectory(candidate)
 			if err != nil {
 				return err
 			}
@@ -313,12 +317,12 @@ func TestPBTLiveSharesRefineSpec(t *testing.T) {
 		var got []spec.Mount
 		if live {
 			for _, m := range mounts {
-				if !slices.Contains(removed, m.Path.Get()) {
+				if !slices.Contains(removed, m.Path) {
 					got = append(got, m)
 				}
 			}
 			for _, p := range added {
-				s, _ := next.Shares.Lookup(mustAbs(rt, p))
+				s, _ := next.Shares.Lookup(p)
 				got = append(got, spec.Mount{Path: s.Path, Mode: s.Mode, Origin: spec.OriginRuntime})
 			}
 		} else {

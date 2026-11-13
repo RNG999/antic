@@ -3,7 +3,9 @@ package guest
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -21,17 +23,35 @@ import (
 	"github.com/RNG999/antic/internal/tea/operation"
 )
 
-// bootSignature returns a deterministic signature of what a NixOS system
-// boots with: its kernel, initrd and kernel parameters, read through real
+type storeDirectory interface {
+	Real(string) string
+}
+
+type bootIdentity struct {
+	valid  bool
+	kernel domain.AbsPath
+	initrd domain.AbsPath
+	params [32]byte
+}
+
+// bootSignature returns a deterministic identity of what a NixOS system
+// boots with: its kernel, initrd and kernel parameters, read through store
 // (the guest's store or the host's). A switch cannot change any of them.
-func bootSignature(real func(string) string, system string) domain.KernelSig {
-	if system == "" {
-		return domain.NewKernelSig("")
+func bootSignature(store storeDirectory, system domain.StorePath) bootIdentity {
+	if !system.Valid() {
+		return bootIdentity{}
 	}
-	kern, _ := os.Readlink(real(system + "/kernel"))
-	initrd, _ := os.Readlink(real(system + "/initrd"))
-	params, _ := os.ReadFile(real(system + "/kernel-params"))
-	return domain.NewKernelSig(kern + "\x00" + initrd + "\x00" + string(params))
+	rawKern, _ := os.Readlink(store.Real(system.Get() + "/kernel"))
+	rawInitrd, _ := os.Readlink(store.Real(system.Get() + "/initrd"))
+	params, _ := os.ReadFile(store.Real(system.Get() + "/kernel-params"))
+	kern, _ := domain.ParseAbsPath(filepath.Clean(rawKern))
+	initrd, _ := domain.ParseAbsPath(filepath.Clean(rawInitrd))
+	return bootIdentity{
+		valid:  true,
+		kernel: kern,
+		initrd: initrd,
+		params: sha256.Sum256(params),
+	}
 }
 
 // prebuild builds the new system of a change to running guest g ahead of
@@ -45,8 +65,9 @@ func (g *Guest) prebuild(ctx context.Context, tx *txn, bt *boot) error {
 	if tx.newSystem, err = g.build(ctx, tx.draft.After); err != nil {
 		return err
 	}
-	if bootSignature(g.store().Real, bt.System) != bootSignature(nix.Real, tx.newSystem) {
-		g.m.logf("the new system boots another kernel; guest %s restarts to take it", g.Name())
+	btSystem, _ := domain.ParseStorePath(bt.System)
+	if bootSignature(g.store(), btSystem) != bootSignature(nix, tx.newSystem) {
+		fmt.Fprintf(g.m.Log, "antic: the new system boots another kernel; guest %s restarts to take it\n", g.GuestName())
 		tx.op.Change.Restart = operation.Changed
 		tx.op.Change.Added, tx.op.Change.Removed = operation.PathSet{}, operation.PathSet{}
 	}
@@ -61,8 +82,12 @@ func (g *Guest) Apply(ctx context.Context) error {
 }
 
 // SetPackages changes the guest's packages and applies them, atomically.
-func (g *Guest) SetPackages(ctx context.Context, pkgs []string) error {
-	return g.applyWith(ctx, func(d config.Draft) (config.Draft, error) { return d.SetPackages(pkgs) })
+func (g *Guest) SetPackages(ctx context.Context, pkgs []domain.PackageName) error {
+	rawPkgs := make([]string, len(pkgs))
+	for i, p := range pkgs {
+		rawPkgs[i] = p.Get()
+	}
+	return g.applyWith(ctx, func(d config.Draft) (config.Draft, error) { return d.SetPackages(rawPkgs) })
 }
 
 // applyWith edits the guest's config under its lock and applies it.
@@ -92,53 +117,57 @@ func (g *Guest) applyWith(ctx context.Context, edit func(config.Draft) (config.D
 	switch tx.op.Phase {
 	case operation.GuestRunning:
 	case operation.GuestAbsent, operation.GuestUncreated, operation.GuestOff:
-		g.m.logf("%s is ready; it boots on the next \"antic guest start %s\"", tx.newSystem, g.Name())
+		fmt.Fprintf(g.m.Log, "antic: %s is ready; it boots on the next \"antic guest start %s\"\n", tx.newSystem, g.GuestName())
 	}
 	return nil
 }
 
 // build builds the system of guest config c.
-func (g *Guest) build(ctx context.Context, c *config.Guest) (string, error) {
+func (g *Guest) build(ctx context.Context, c *config.Guest) (domain.StorePath, error) {
 	unlockBuild, err := g.m.Dirs.LockNixBuild()
 	if err != nil {
-		return "", err
+		return domain.StorePath{}, err
 	}
 	defer unlockBuild()
 	nix, err := g.m.nixBuilder()
 	if err != nil {
-		return "", err
+		return domain.StorePath{}, err
 	}
 	if c.FlakePath != "" {
 		if err := nixbuild.CheckLocks(c.FlakePath, g.m.allSharePaths()); err != nil {
-			return "", err
+			return domain.StorePath{}, err
 		}
-		g.m.logf("building %s#nixosConfigurations.%s...", c.FlakePath, c.FlakeAttr)
-		return nix.BuildFlakeCached(ctx, g.m.Dirs.CacheDir().Get(), c.FlakePath, c.FlakeAttr)
+		fmt.Fprintf(g.m.Log, "antic: building %s#nixosConfigurations.%s...\n", c.FlakePath, c.FlakeAttr)
+		rawSys, err := nix.BuildFlakeCached(ctx, g.m.Dirs.CacheDir().Get(), c.FlakePath, c.FlakeAttr)
+		if err != nil {
+			return domain.StorePath{}, err
+		}
+		return domain.ParseStorePath(rawSys)
 	}
-	system, hit, err := nix.BuildBuiltinCached(ctx, g.m.Dirs.CacheDir().Get(), g.m.User, c.Packages, func() {
-		g.m.logf("building guest %s (%s)...", g.Name(), g.osDesc())
+	rawSys, hit, err := nix.BuildBuiltinCached(ctx, g.m.Dirs.CacheDir().Get(), g.m.User.Get(), c.Packages, func() {
+		fmt.Fprintf(g.m.Log, "antic: building guest %s (%s)...\n", g.GuestName(), g.osDesc())
 	})
 	if err != nil {
-		return "", err
+		return domain.StorePath{}, err
 	}
 	if hit {
-		g.m.logf("using cached guest %s (%s): %s", g.Name(), g.osDesc(), system)
+		fmt.Fprintf(g.m.Log, "antic: using cached guest %s (%s): %s\n", g.GuestName(), g.osDesc(), rawSys)
 	}
-	return system, nil
+	return domain.ParseStorePath(rawSys)
 }
 
 // switchTo switches the running guest to system and records it as booted.
 // Switching to the system it runs already does nothing.
-func (g *Guest) switchTo(ctx context.Context, system string) error {
+func (g *Guest) switchTo(ctx context.Context, system domain.StorePath) error {
 	bt, err := g.readBoot(ctx)
 	if err != nil {
 		return err
 	}
-	if bt.System == system {
+	if bt.System == system.Get() {
 		return nil
 	}
-	g.m.logf("switching the running guest to %s...", system)
-	err = g.vsock().Agent(ctx, proto.Request{Op: proto.OpApply, Toplevel: system}, func(r proto.Response) {
+	fmt.Fprintf(g.m.Log, "antic: switching the running guest to %s...\n", system)
+	err = g.vsock().Agent(ctx, proto.Request{Op: proto.OpApply, Toplevel: system.Get()}, func(r proto.Response) {
 		if r.Line != "" {
 			fmt.Fprintln(g.m.Log, domain.Printable(r.Line))
 		}
@@ -146,7 +175,7 @@ func (g *Guest) switchTo(ctx context.Context, system string) error {
 	if err != nil {
 		return err
 	}
-	bt.System = system
+	bt.System = system.Get()
 	return g.writeBoot(bt)
 }
 
@@ -165,18 +194,16 @@ func (m *Manager) allSharePaths() []domain.AbsPath {
 // Create writes the guest's config file unless it has one, builds the
 // guest, and starts it, atomically. Flags (a spec for the new file) are an
 // error when the config exists already: they would be ignored (D3).
-func (m *Manager) Create(ctx context.Context, name string, spec config.Guest, flags bool) (*Guest, error) {
-	if !config.ValidName(name) {
-		return nil, fmt.Errorf("invalid guest name %q (a-z, 0-9 and -, up to 32 characters)", name)
-	}
+func (m *Manager) Create(ctx context.Context, name domain.GuestName, spec config.Guest, flags bool) (*Guest, error) {
 	if err := m.RecoverOrphan(ctx, name); err != nil {
 		return nil, err
 	}
+	rawName := name.Get()
 	var g *Guest
 	var draft config.Draft
-	if m.Config.Guests[name] != nil {
+	if m.Config.Guests[rawName] != nil {
 		if flags {
-			return nil, fmt.Errorf("guest %s already has a config (%s); edit it instead of passing flags", name, m.Config.Guests[name].Path)
+			return nil, fmt.Errorf("guest %s already has a config (%s); edit it instead of passing flags", name, m.Config.Guests[rawName].Path)
 		}
 		var err error
 		if g, err = m.Get(name); err != nil {
@@ -187,14 +214,10 @@ func (m *Manager) Create(ctx context.Context, name string, spec config.Guest, fl
 		}
 	} else {
 		var err error
-		if draft, err = m.Config.NewGuestDraft(name, spec, m.Dirs.Home.Get()); err != nil {
+		if draft, err = m.Config.NewGuestDraft(rawName, spec, m.Dirs.Home.Get()); err != nil {
 			return nil, err
 		}
-		guestName, err := domain.ParseGuestName(name)
-		if err != nil {
-			return nil, err
-		}
-		inst, ok, err := m.Dirs.Lookup(guestName)
+		inst, ok, err := m.Dirs.Lookup(name)
 		if err != nil {
 			return nil, err
 		}
@@ -207,9 +230,9 @@ func (m *Manager) Create(ctx context.Context, name string, spec config.Guest, fl
 	defer unlock()
 	tx, _ := g.planChange(ctx, draft)
 	switch {
-	case draft.NewFile && tx.oldProfile == "":
+	case draft.NewFile && !tx.oldProfile.Valid():
 		tx.op.Phase = operation.GuestAbsent
-	case tx.oldProfile == "":
+	case !tx.oldProfile.Valid():
 		tx.op.Phase = operation.GuestUncreated
 	}
 	tx.op.Kind, tx.op.Change = operation.OpCreate, operation.Change{}
@@ -217,7 +240,7 @@ func (m *Manager) Create(ctx context.Context, name string, spec config.Guest, fl
 		return nil, err
 	}
 	if draft.NewFile {
-		m.logf("created %s", draft.Path)
+		fmt.Fprintf(m.Log, "antic: created %s\n", draft.Path)
 	}
 	return g, nil
 }
@@ -232,7 +255,7 @@ func (g *Guest) Remove(ctx context.Context) error {
 	defer unlock()
 	// Removing needs the file's bytes (for the journal), not its meaning:
 	// a guest whose config does not load can be removed too (D17).
-	draft, err := config.ReadRawDraft(g.Cfg.Path, g.Name(), g.m.Dirs.Home.Get())
+	draft, err := config.ReadRawDraft(g.Cfg.Path, g.GuestName().Get(), g.m.Dirs.Home.Get())
 	if err != nil {
 		return err
 	}
@@ -241,7 +264,7 @@ func (g *Guest) Remove(ctx context.Context) error {
 	if err := g.runSaga(ctx, tx, operation.MsgCommand{Op: tx.op}); err != nil {
 		return err
 	}
-	delete(g.m.Config.Guests, g.Name())
+	delete(g.m.Config.Guests, g.GuestName().Get())
 	g.Inst, g.Created = instance.Instance{}, false
 	return nil
 }
@@ -272,16 +295,16 @@ func (g *Guest) Dir(ctx context.Context) (domain.AbsPath, error) {
 		}
 	}
 	return domain.AbsPath{}, fmt.Errorf("%s is not inside a directory shared with guest %s (%s); see \"antic guest mount\"",
-		wd, g.Name(), strings.Join(shares, ", "))
+		wd, g.GuestName(), strings.Join(shares, ", "))
 }
 
 // Exec runs a command or shell in the guest (starting it if needed).
-func (g *Guest) Exec(ctx context.Context, c transport.Cmd) (int, error) {
+func (g *Guest) Exec(ctx context.Context, c transport.Cmd) (domain.ExitCode, error) {
 	if err := g.requireCreated(); err != nil {
-		return 0, err
+		return domain.ExitCode{}, err
 	}
 	if err := g.EnsureRunning(ctx); err != nil {
-		return 0, err
+		return domain.ExitCode{}, err
 	}
 	if len(g.Cfg.Env) > 0 {
 		var envKeys []string
@@ -293,7 +316,11 @@ func (g *Guest) Exec(ctx context.Context, c transport.Cmd) (int, error) {
 			c.Env = append(c.Env, k+"="+g.Cfg.Env[k])
 		}
 	}
-	return g.vsock().Exec(ctx, c)
+	rawCode, err := g.vsock().Exec(ctx, c)
+	if err != nil {
+		return domain.ExitCode{}, err
+	}
+	return domain.ParseExitCode(rawCode)
 }
 
 // Sessions lists the guest's running sessions.
@@ -311,11 +338,11 @@ func (g *Guest) Sessions(ctx context.Context) ([]proto.Session, error) {
 }
 
 // Kill stops a session.
-func (g *Guest) Kill(ctx context.Context, session string) error {
+func (g *Guest) Kill(ctx context.Context, session domain.SessionUnit) error {
 	if _, err := g.readBoot(ctx); err != nil {
 		return err
 	}
-	return g.vsock().Agent(ctx, proto.Request{Op: proto.OpKill, Session: session}, nil)
+	return g.vsock().Agent(ctx, proto.Request{Op: proto.OpKill, Session: session.Get()}, nil)
 }
 
 // ShareInfo describes a share.
@@ -358,11 +385,13 @@ func (g *Guest) Shares(ctx context.Context) []ShareInfo {
 // the concrete old artifacts it needs, and returns the running guest's boot
 // record (nil when it is not running). It must run under the guest's lock.
 func (g *Guest) planChange(ctx context.Context, draft config.Draft) (*txn, *boot) {
-	tx := &txn{draft: draft, modes: map[string]bool{},
+	tx := &txn{draft: draft, modes: map[domain.AbsPath]bool{},
 		op: operation.Op{Kind: operation.OpChangeConfig, Phase: operation.GuestUncreated}}
 	if g.Created {
 		tx.op.Phase = operation.GuestOff
-		tx.oldProfile, _ = g.store().Current()
+		if rawProf, err := g.store().Current(); err == nil && rawProf != "" {
+			tx.oldProfile, _ = domain.ParseStorePath(rawProf)
+		}
 	}
 	if draft.Changed() {
 		tx.op.Change.Config = operation.Changed
@@ -371,15 +400,18 @@ func (g *Guest) planChange(ctx context.Context, draft config.Draft) (*txn, *boot
 	if err != nil {
 		return tx, nil
 	}
-	tx.op.Phase, tx.oldBooted = operation.GuestRunning, bt.System
-	var runtime []string
+	tx.op.Phase = operation.GuestRunning
+	tx.oldBooted, _ = domain.ParseStorePath(bt.System)
+	var runtime []domain.AbsPath
 	for _, s := range bt.Shares {
-		tx.modes[s.Path] = s.ReadOnly
-		if s.Runtime {
-			runtime = append(runtime, s.Path)
+		if abs, err := domain.ParseAbsPath(s.Path); err == nil {
+			tx.modes[abs] = s.ReadOnly
+			if s.Runtime {
+				runtime = append(runtime, abs)
+			}
 		}
 	}
-	tx.op.Runtime, _ = pathSet(runtime)
+	tx.op.Runtime = buildPathSet(runtime...)
 	if draft.Before != nil && draft.After != nil && config.NeedsRestart(draft.Before, draft.After) {
 		tx.op.Change.Restart = operation.Changed
 	}
@@ -393,7 +425,7 @@ func (g *Guest) runChange(ctx context.Context, tx *txn) error {
 	if err != nil {
 		g.Cfg = tx.draft.Before
 	}
-	g.m.Config.Guests[g.Name()] = g.Cfg
+	g.m.Config.Guests[g.GuestName().Get()] = g.Cfg
 	return err
 }
 
@@ -452,10 +484,12 @@ func (g *Guest) Edit(ctx context.Context, old, content []byte) (bool, error) {
 	if bt != nil && tx.op.Change.Restart == operation.Unchanged {
 		added, removed, live := liveShares(bt, draft.After)
 		if live {
-			tx.op.Change.Added, _ = pathSet(added)
-			tx.op.Change.Removed, _ = pathSet(removed)
+			tx.op.Change.Added = buildPathSet(added...)
+			tx.op.Change.Removed = buildPathSet(removed...)
 			for _, s := range draft.After.Shares {
-				tx.modes[config.RealPath(s.Path)] = s.ReadOnly
+				if abs, err := domain.ParseAbsPath(config.RealPath(s.Path)); err == nil {
+					tx.modes[abs] = s.ReadOnly
+				}
 			}
 		} else {
 			tx.op.Change.Restart = operation.Changed
@@ -472,28 +506,37 @@ func (g *Guest) Edit(ctx context.Context, old, content []byte) (bool, error) {
 // liveShares returns the shares a running guest with boot record bt must
 // hot-plug and detach to take the shares of c, or false if that needs a
 // restart (a mounted share changes mode, or a new one overlaps a mount).
-func liveShares(bt *boot, c *config.Guest) (added, removed []string, live bool) {
-	want := map[string]bool{}
+func liveShares(bt *boot, c *config.Guest) (added, removed []domain.AbsPath, live bool) {
+	want := map[domain.AbsPath]bool{}
 	for _, s := range c.Shares {
-		want[config.RealPath(s.Path)] = s.ReadOnly
+		if abs, err := domain.ParseAbsPath(config.RealPath(s.Path)); err == nil {
+			want[abs] = s.ReadOnly
+		}
 	}
 	var mounts []bootShare
 	for _, m := range bt.Shares {
-		if _, keep := want[m.Path]; !keep && m.Runtime {
-			removed = append(removed, m.Path)
+		mAbs, err := domain.ParseAbsPath(m.Path)
+		if err != nil {
+			continue
+		}
+		if _, keep := want[mAbs]; !keep && m.Runtime {
+			removed = append(removed, mAbs)
 			continue
 		}
 		mounts = append(mounts, m)
 	}
 	for p, ro := range want {
-		i := slices.IndexFunc(mounts, func(m bootShare) bool { return m.Path == p })
+		i := slices.IndexFunc(mounts, func(m bootShare) bool { return m.Path == p.Get() })
 		if i >= 0 {
 			if mounts[i].ReadOnly != ro {
 				return nil, nil, false
 			}
 			continue
 		}
-		if slices.ContainsFunc(mounts, func(m bootShare) bool { return within(p, m.Path) || within(m.Path, p) }) {
+		if slices.ContainsFunc(mounts, func(m bootShare) bool {
+			mAbs, err := domain.ParseAbsPath(m.Path)
+			return err == nil && domain.PathsOverlap(p, mAbs)
+		}) {
 			return nil, nil, false
 		}
 		added = append(added, p)
@@ -505,73 +548,71 @@ func liveShares(bt *boot, c *config.Guest) (added, removed []string, live bool) 
 func (g *Guest) OtherPorts() []config.Port {
 	var out []config.Port
 	for name, c := range g.m.Config.Guests {
-		if name != g.Name() {
+		if name != g.GuestName().Get() {
 			out = append(out, c.Ports...)
 		}
 	}
 	return out
 }
 
-// AddShare records path in the guest's config file and, if the guest is
-// running, hot-plugs it, atomically. It reports the resolved path and
+// AddShare records targetDir in the guest's config file and, if the guest is
+// running, hot-plugs it, atomically. It reports the canonical path and
 // whether anything changed (sharing a directory again with the same mode
 // changes nothing).
-func (g *Guest) AddShare(ctx context.Context, path string, ro bool) (string, bool, error) {
-	absPath, err := g.m.policy().Resolve(path)
+func (g *Guest) AddShare(ctx context.Context, targetDir domain.AbsPath, ro bool) (domain.AbsPath, bool, error) {
+	absPath, err := g.m.policy().ValidateShareDirectory(targetDir)
 	if err != nil {
-		return "", false, err
+		return domain.AbsPath{}, false, err
 	}
 	real := absPath.Get()
 	unlock, err := g.lockAndRecover(ctx)
 	if err != nil {
-		return "", false, err
+		return domain.AbsPath{}, false, err
 	}
 	defer unlock()
 
 	draft, err := config.ReadDraft(g.Cfg, g.m.Dirs.Home.Get())
 	if err != nil {
-		return "", false, err
+		return domain.AbsPath{}, false, err
 	}
 	if draft, err = draft.AddShare(real, ro); err != nil {
-		return "", false, err
+		return domain.AbsPath{}, false, err
 	}
 	if !draft.Changed() {
-		return real, false, nil
+		return absPath, false, nil
 	}
 	tx, bt := g.planChange(ctx, draft)
-	tx.modes[absPath.Get()] = ro
+	tx.modes[absPath] = ro
 	if bt != nil {
 		mounted := false
 		for _, s := range bt.Shares {
+			sAbs, _ := domain.ParseAbsPath(s.Path)
 			switch {
 			case s.Path == real && s.ReadOnly != ro:
-				return "", false, fmt.Errorf("%s is still mounted %s until guest %s restarts", real, modeName(s.ReadOnly), g.Name())
+				modeLabel := "read-write"
+				if s.ReadOnly {
+					modeLabel = "read-only"
+				}
+				return domain.AbsPath{}, false, fmt.Errorf("%s is still mounted %s until guest %s restarts", real, modeLabel, g.GuestName())
 			case s.Path == real:
 				mounted = true
-			case within(real, s.Path) || within(s.Path, real):
-				return "", false, fmt.Errorf("%s overlaps mounted share %s", real, s.Path)
+			case domain.PathsOverlap(absPath, sAbs):
+				return domain.AbsPath{}, false, fmt.Errorf("%s overlaps mounted share %s", real, s.Path)
 			}
 		}
 		if !mounted {
-			tx.op.Change.Added, _ = pathSet([]string{real})
+			tx.op.Change.Added = buildPathSet(absPath)
 		}
 	}
 	if err := g.runChange(ctx, tx); err != nil {
-		return "", false, err
+		return domain.AbsPath{}, false, err
 	}
-	return real, true, nil
-}
-
-func modeName(ro bool) string {
-	if ro {
-		return "read-only"
-	}
-	return "read-write"
+	return absPath, true, nil
 }
 
 func (g *Guest) hotplug(ctx context.Context, bt *boot, path domain.AbsPath, ro bool) (err error) {
 	tag := share.Tag(path)
-	sock, err := g.startShare(ctx, tag.Get(), path, ro, guestUserID)
+	sock, err := g.startShare(ctx, g.shareUnit(tag), g.shareSockDir(tag), path, ro, guestUserUID)
 	if err != nil {
 		return err
 	}
@@ -583,7 +624,7 @@ func (g *Guest) hotplug(ctx context.Context, bt *boot, path domain.AbsPath, ro b
 			}
 		}
 	}()
-	if err = g.api().AddFS(ctx, chv.FS{ID: "fs-" + tag.Get(), Tag: tag.Get(), Socket: sock, NumQueues: 1, QueueSize: 1024}); err != nil {
+	if err = g.api().AddFS(ctx, chv.FS{ID: "fs-" + tag.Get(), Tag: tag.Get(), Socket: sock.Get(), NumQueues: 1, QueueSize: 1024}); err != nil {
 		return err
 	}
 	// Removing the device must finish before virtiofsd goes away, or
@@ -601,50 +642,53 @@ func (g *Guest) hotplug(ctx context.Context, bt *boot, path domain.AbsPath, ro b
 
 // RemoveShare removes a share from the guest's config file and, if it was
 // hot-plugged on the running guest, unmounts and detaches it, atomically.
-// It reports the resolved path, and whether the share stays mounted until
+// It reports the canonical path, and whether the share stays mounted until
 // the guest restarts (it was mounted at boot).
-func (g *Guest) RemoveShare(ctx context.Context, path string) (string, bool, error) {
-	real := config.RealPath(path)
+func (g *Guest) RemoveShare(ctx context.Context, targetDir domain.AbsPath) (domain.AbsPath, bool, error) {
+	real := config.RealPath(targetDir.Get())
+	absPath, err := domain.ParseAbsPath(filepath.Clean(real))
+	if err != nil {
+		return domain.AbsPath{}, false, err
+	}
 	unlock, err := g.lockAndRecover(ctx)
 	if err != nil {
-		return "", false, err
+		return domain.AbsPath{}, false, err
 	}
 	defer unlock()
 
 	draft, err := config.ReadDraft(g.Cfg, g.m.Dirs.Home.Get())
 	if err != nil {
-		return "", false, err
+		return domain.AbsPath{}, false, err
 	}
-	if draft, err = draft.RemoveShare(real); err != nil {
-		return "", false, err
+	if draft, err = draft.RemoveShare(absPath.Get()); err != nil {
+		return domain.AbsPath{}, false, err
 	}
 	tx, bt := g.planChange(ctx, draft)
 	lingers := false
 	if bt != nil {
 		for _, s := range bt.Shares {
-			if s.Path == real && s.Runtime {
-				tx.op.Change.Removed, _ = pathSet([]string{real})
-			} else if s.Path == real {
+			if s.Path == absPath.Get() && s.Runtime {
+				tx.op.Change.Removed = buildPathSet(absPath)
+			} else if s.Path == absPath.Get() {
 				lingers = true
 			}
 		}
 	}
 	if err := g.runChange(ctx, tx); err != nil {
-		return "", false, err
+		return domain.AbsPath{}, false, err
 	}
-	return real, lingers, nil
+	return absPath, lingers, nil
 }
 
-func within(path, dir string) bool { return path == dir || strings.HasPrefix(path, dir+"/") }
-
-func (g *Guest) osDesc() string {
+func (g *Guest) osDesc() domain.PrintableText {
+	raw := "builtin"
 	if g.Cfg.FlakePath != "" {
-		return g.Cfg.FlakePath + "#" + g.Cfg.FlakeAttr
+		raw = g.Cfg.FlakePath + "#" + g.Cfg.FlakeAttr
+	} else if len(g.Cfg.Packages) > 0 {
+		raw = "builtin [" + strings.Join(g.Cfg.Packages, " ") + "]"
 	}
-	if len(g.Cfg.Packages) == 0 {
-		return "builtin"
-	}
-	return "builtin [" + strings.Join(g.Cfg.Packages, " ") + "]"
+	desc, _ := domain.ParsePrintableText(domain.Printable(raw))
+	return desc
 }
 
 // Info describes a guest for "guest ls" and "guest show".
@@ -668,9 +712,9 @@ type Info struct {
 // Inspect returns the guest's state.
 func (g *Guest) Inspect(ctx context.Context) (Info, error) {
 	i := Info{
-		Name: g.Name(), ID: g.Inst.ID.Get(),
+		Name: g.GuestName().Get(), ID: g.Inst.ID.Get(),
 		Description: g.Cfg.Description, State: "-",
-		OS: g.osDesc(), Packages: g.Cfg.Packages,
+		OS: g.osDesc().Get(), Packages: g.Cfg.Packages,
 		CPUs: g.Cfg.CPUs, Memory: g.Cfg.Memory, Network: g.Cfg.Network.Mode, Ports: g.Cfg.Ports,
 		Shares: g.Shares(ctx),
 	}
@@ -688,15 +732,15 @@ func (g *Guest) Inspect(ctx context.Context) (Info, error) {
 		if bt, err := g.readBoot(ctx); err == nil {
 			i.System = bt.System
 		}
-		i.Units = []string{g.vmUnit()}
+		i.Units = []string{g.vmUnit().Get()}
 		if g.Cfg.Network.Mode != config.NetworkNone {
-			i.Units = append(i.Units, g.netUnit())
+			i.Units = append(i.Units, g.netUnit().Get())
 		}
-		i.Units = append(i.Units, g.shareUnitString("store"))
+		i.Units = append(i.Units, g.storeShareUnit().Get())
 		for _, s := range i.Shares {
 			if s.Mounted {
 				if absShare, err := domain.ParseAbsPath(s.Path); err == nil {
-					i.Units = append(i.Units, g.shareUnit(share.Tag(absShare)))
+					i.Units = append(i.Units, g.shareUnit(share.Tag(absShare)).Get())
 				}
 			}
 		}
@@ -705,13 +749,17 @@ func (g *Guest) Inspect(ctx context.Context) (Info, error) {
 }
 
 // Journal streams the running guest's journal (via antic-agent; root's view).
-func (g *Guest) Journal(ctx context.Context, units []string, lines int, line func(string)) error {
+func (g *Guest) Journal(ctx context.Context, units []domain.UnitName, lines domain.JournalLines, out io.Writer) error {
 	if _, err := g.readBoot(ctx); err != nil {
 		return err
 	}
-	return g.vsock().Agent(ctx, proto.Request{Op: proto.OpJournal, Units: units, Lines: lines}, func(r proto.Response) {
+	rawUnits := make([]string, len(units))
+	for i, u := range units {
+		rawUnits[i] = u.Get()
+	}
+	return g.vsock().Agent(ctx, proto.Request{Op: proto.OpJournal, Units: rawUnits, Lines: lines.Get()}, func(r proto.Response) {
 		if r.Line != "" {
-			line(domain.Printable(r.Line))
+			fmt.Fprintln(out, domain.Printable(r.Line))
 		}
 	})
 }

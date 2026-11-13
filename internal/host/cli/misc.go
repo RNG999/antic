@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/RNG999/antic/internal/domain"
 	"github.com/RNG999/antic/internal/host/config"
 	"github.com/RNG999/antic/internal/host/guest"
 	"github.com/RNG999/antic/internal/host/nixbuild"
@@ -39,7 +40,7 @@ func (a *app) editGuestCmd(use string) *cobra.Command {
 			}
 			// The user edits a copy; the file changes only if the result
 			// loads and takes effect (D10).
-			tmp, err := os.CreateTemp("", "antic-"+g.Name()+"-*.toml")
+			tmp, err := os.CreateTemp("", "antic-"+g.GuestName().Get()+"-*.toml")
 			if err != nil {
 				return err
 			}
@@ -109,12 +110,25 @@ func (a *app) doctorCmd() *cobra.Command {
 			}
 			check("/dev/kvm is usable", err)
 			b := guest.FindBinaries(a.dirs)
-			for _, p := range []string{b.CloudHypervisor, b.Virtiofsd, b.Passt, b.Pasta, b.NFT} {
-				_, err := os.Stat(p)
-				if err == nil && !filepath.IsAbs(p) {
+			for _, item := range []struct {
+				name string
+				path domain.AbsPath
+			}{
+				{"cloud-hypervisor", b.CloudHypervisor},
+				{"virtiofsd", b.Virtiofsd},
+				{"passt", b.Passt},
+				{"pasta", b.Pasta},
+				{"nft", b.NFT},
+			} {
+				label := item.name
+				var err error
+				if !item.path.Valid() {
 					err = fmt.Errorf("not found")
+				} else {
+					label = item.path.Get()
+					_, err = os.Stat(label)
 				}
-				check(p, err)
+				check(label, err)
 			}
 			_, err = nixbuild.New()
 			check("nix", err)

@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -602,8 +603,14 @@ func checkDomainPackage(t *testing.T, root string) {
 					name := d.Name.Name
 					switch base {
 					case "tags.go":
-						if !strings.HasPrefix(name, "New") {
-							t.Errorf("%s: exported function %s in internal/domain/tags.go must be a Phantom constructor (New*)",
+						allowedPhantomConstructors := map[string]bool{
+							"NewText":        true,
+							"NewPeerCID":     true,
+							"NewUnixSec":     true,
+							"NewCommandText": true,
+						}
+						if !allowedPhantomConstructors[name] {
+							t.Errorf("%s: exported function %s in internal/domain/tags.go is forbidden; do not add unchecked New* Phantom constructors over primitives (use a Refined[T, P] type with a non-trivial Check predicate in predicates.go)",
 								posStr(fset, d.Pos()), name)
 						}
 					case "proofs.go":
@@ -616,6 +623,24 @@ func checkDomainPackage(t *testing.T, root string) {
 							t.Errorf("%s: proof rule %s belongs in internal/domain/proofs.go, not predicates.go",
 								posStr(fset, d.Pos()), name)
 						}
+					}
+				}
+				if base == "predicates.go" && d.Recv != nil && d.Name.Name == "Check" && d.Body != nil {
+					hasBranch := false
+					ast.Inspect(d.Body, func(n ast.Node) bool {
+						switch x := n.(type) {
+						case *ast.IfStmt, *ast.SwitchStmt:
+							hasBranch = true
+						case *ast.CallExpr:
+							if sel, ok := x.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Check" {
+								hasBranch = true
+							}
+						}
+						return true
+					})
+					if !hasBranch {
+						t.Errorf("%s: Predicate Check method in internal/domain/predicates.go is trivial (must contain a non-trivial validation branch)",
+							posStr(fset, d.Pos()))
 					}
 				}
 			}
@@ -1704,7 +1729,7 @@ func TestHostPrimitiveObsessionSafety(t *testing.T) {
 	root := repoRoot(t)
 	imp := newRepoImporter(t, root)
 
-	for _, relPkg := range []string{"internal/host/instance", "internal/host/share"} {
+	for _, relPkg := range []string{"internal/host/instance", "internal/host/share", "internal/host/guest"} {
 		t.Run(relPkg, func(t *testing.T) {
 			fset := token.NewFileSet()
 			files := parseNonTestFiles(t, fset, filepath.Join(root, relPkg))
@@ -1722,28 +1747,24 @@ func TestHostPrimitiveObsessionSafety(t *testing.T) {
 		})
 	}
 
-	t.Run("internal/host/guest", func(t *testing.T) {
-		relPkg := "internal/host/guest"
-		fset := token.NewFileSet()
-		files := parseNonTestFiles(t, fset, filepath.Join(root, relPkg))
-		info := &types.Info{
-			Types: make(map[ast.Expr]types.TypeAndValue),
-			Defs:  make(map[*ast.Ident]types.Object),
-			Uses:  make(map[*ast.Ident]types.Object),
-		}
-		conf := types.Config{Importer: imp, Error: func(error) {}}
-		if _, err := conf.Check(modulePrefix+"/"+relPkg, fset, files, info); err != nil {
-			t.Fatal(err)
-		}
-		checkSemanticFuncResultsAndEarlyUnboxing(t, fset, relPkg, files, info)
-	})
-
 	t.Run("ViolationsDetected", func(t *testing.T) {
-		// Use arbitrary, non-hardcoded struct/function/method names to prove dynamic detection,
-		// including return type inference from function names (e.g. readLockPID, journalPath)
-		// and early unboxing (return refined.Get()).
+		// Use arbitrary, non-hardcoded struct/function/method/closure names to prove universal
+		// dynamic detection across exported and unexported functions, methods, closures (*ast.FuncLit),
+		// unchecked Phantom casts (types.Phantom[string, Tag]), 'any' parameters, and vague names
+		// (resolve*, *Helper*).
 		const snippet = `package bad
-import "github.com/RNG999/antic/internal/domain"
+import (
+	"github.com/RNG999/antic/internal/domain"
+	"github.com/RNG999/antic/internal/types"
+)
+type ExecutablePathTag struct{}
+type ExecutablePath = types.Phantom[string, ExecutablePathTag]
+func NewExecutablePath(p string) ExecutablePath {
+	return types.NewPhantom[string, ExecutablePathTag](p)
+}
+func Textf(format string, args ...any) domain.Text {
+	return domain.NewText(format)
+}
 type ArbitraryRecord struct {
 	GuestLabel string
 	TargetDir  string
@@ -1751,8 +1772,11 @@ type ArbitraryRecord struct {
 }
 func MountCustomShare(path string, count int) string { return "" }
 func (ArbitraryRecord) LookupByGuest(name string) (string, error) { return "", nil }
-func (ArbitraryRecord) Resolve(path string) (string, error) { return "", nil }
-func internalHelper(targetDir string, guestName string, instanceID string, shareTag string) {}
+func (ArbitraryRecord) startNet() (string, error) { return "", nil }
+func resolveHelperBinary(name string) domain.AbsPath {
+	find := func(bin string, extra ...string) domain.AbsPath { return domain.AbsPath{} }
+	return find(name)
+}
 func readLockPID() string { return "" }
 func journalPath(base domain.AbsPath) string { return base.Get() }
 `
@@ -1775,76 +1799,124 @@ func journalPath(base domain.AbsPath) string { return base.Get() }
 		mockT := &recordingT{errs: &errs}
 		checkDynamicPrimitiveObsession(mockT, testFset, "bad", []*ast.File{f}, info, pkg.Scope())
 
-		if len(errs) < 13 {
-			t.Fatalf("expected at least 13 dynamic primitive obsession errors, got %d: %v", len(errs), errs)
+		if len(errs) < 18 {
+			t.Fatalf("expected at least 18 dynamic primitive obsession errors, got %d: %v", len(errs), errs)
 		}
 	})
 }
 
+var bannedGenericHostFuncTokens = map[string]bool{
+	"resolve": true,
+	"helper":  true,
+	"helpers": true,
+	"util":    true,
+	"utils":   true,
+}
+
+func checkExplicitFuncNaming(t errorReporter, fset *token.FileSet, relPkg, qualName, shortName string, pos token.Pos) {
+	for _, tok := range splitCamelCaseTokens(shortName) {
+		if bannedGenericHostFuncTokens[tok] {
+			t.Errorf("%s (%s): %s uses banned generic/vague word %q; use an explicit domain verb/noun",
+				posStr(fset, pos), relPkg, qualName, tok)
+		}
+	}
+}
+
+func checkStructFieldsPrimitives(t errorReporter, fset *token.FileSet, relPkg, structName string, st *types.Struct) {
+	for i := 0; i < st.NumFields(); i++ {
+		field := st.Field(i)
+		if reflect.StructTag(st.Tag(i)).Get("json") != "" {
+			continue
+		}
+		if anonSt, ok := field.Type().Underlying().(*types.Struct); ok {
+			if _, isNamed := types.Unalias(field.Type()).(*types.Named); !isNamed {
+				checkStructFieldsPrimitives(t, fset, relPkg, structName+"."+field.Name(), anonSt)
+				continue
+			}
+		}
+		if containsBarePrimitive(field.Type()) {
+			t.Errorf("%s (%s): struct %s field %s has bare primitive or unvalidated type %s; must use a domain refinement type (types.Refined[T, P]) or structured domain type",
+				posStr(fset, field.Pos()), relPkg, structName, field.Name(), field.Type().String())
+		}
+	}
+}
+
 // checkDynamicPrimitiveObsession dynamically enforces refinement types (types.Refined[T, P])
-// across a package without relying on hardcoded type or function lists:
-//  1. Total Surface Check: Every struct field, exported function parameter/result, and
-//     exported method parameter/result in scope must not use bare primitives (string, int, etc.)
-//     or composite types (slices, arrays, maps) of bare primitives. The sole exception is an
-//     explicit boundary parser (named Resolve*, Parse*, or TryParse*) whose input parameter is
-//     explicitly named raw* (e.g., rawPath string) and whose first result is a Refined type.
-//  2. Semantic Identifier-Type Check: Across all declarations in the AST (including unexported
-//     helpers), any field or parameter whose identifier carries domain semantics (path/dir/home/root/file,
-//     name/guestName, id/instanceID, tag/shareTag) must be typed with the corresponding
-//     domain refinement predicate (AbsPathPred, GuestNamePred, InstanceIDPred, ShareTagPred).
+// and structured domain types across a host package without hardcoded function exemptions:
+//  1. Universal Surface Check: Every struct field (except JSON wire/disk DTO fields), every
+//     exported and unexported function parameter/result, every exported and unexported method
+//     parameter/result, and every local helper closure (*ast.FuncLit) must not use bare primitives
+//     (string, int, etc.), 'any' (interface{}), or unvalidated Phantom wrappers over primitives
+//     (types.Phantom[string, Tag]).
+//  2. Explicit Identifier Naming: Forbids generic/vague words ('resolve', 'helper', 'util') in
+//     function and method names.
+//  3. Semantic Identifier-Type & Return-Type Check: Ensures identifier names and return values
+//     match their domain refinement predicates and forbids early '.Get()' unboxing in return statements.
 func checkDynamicPrimitiveObsession(t errorReporter, fset *token.FileSet, relPkg string, files []*ast.File, info *types.Info, scope *types.Scope) {
-	// 1. Total Surface Check over go/types Scope
+	// 1. Universal Surface Check over go/types Scope (both exported AND unexported!)
 	for _, name := range scope.Names() {
 		obj := scope.Lookup(name)
 		switch o := obj.(type) {
 		case *types.TypeName:
+			if o.IsAlias() {
+				continue
+			}
 			named, ok := types.Unalias(o.Type()).(*types.Named)
 			if !ok {
 				continue
 			}
 			if st, ok := named.Underlying().(*types.Struct); ok {
-				for i := 0; i < st.NumFields(); i++ {
-					field := st.Field(i)
-					if containsBarePrimitive(field.Type()) {
-						t.Errorf("%s (%s): struct %s field %s has bare primitive type %s; must use a domain refinement type (types.Refined[T, P])",
-							posStr(fset, field.Pos()), relPkg, o.Name(), field.Name(), field.Type().String())
-					}
-				}
+				checkStructFieldsPrimitives(t, fset, relPkg, o.Name(), st)
 			}
-			if o.Exported() {
-				for i := 0; i < named.NumMethods(); i++ {
-					m := named.Method(i)
-					if !m.Exported() {
-						continue
-					}
-					if sig, ok := m.Type().(*types.Signature); ok {
-						checkExportedSignaturePrimitives(t, fset, relPkg, o.Name()+"."+m.Name(), m.Name(), sig)
-					}
+			for i := 0; i < named.NumMethods(); i++ {
+				m := named.Method(i)
+				checkExplicitFuncNaming(t, fset, relPkg, o.Name()+"."+m.Name(), m.Name(), m.Pos())
+				if sig, ok := m.Type().(*types.Signature); ok {
+					checkSignaturePrimitives(t, fset, relPkg, o.Name()+"."+m.Name(), sig, m.Pos())
 				}
 			}
 		case *types.Func:
-			if !o.Exported() {
-				continue
-			}
+			checkExplicitFuncNaming(t, fset, relPkg, o.Name(), o.Name(), o.Pos())
 			if sig, ok := o.Type().(*types.Signature); ok {
-				checkExportedSignaturePrimitives(t, fset, relPkg, o.Name(), o.Name(), sig)
+				checkSignaturePrimitives(t, fset, relPkg, o.Name(), sig, o.Pos())
 			}
 		}
 	}
 
-	// 2. Semantic Identifier-Type Consistency Check over AST (including unexported functions/structs)
+	// 2. Local helper closure (*ast.FuncLit) inspection & Semantic Identifier-Type Check over AST
 	for _, f := range files {
+		callbackLits := make(map[*ast.FuncLit]bool)
+		ast.Inspect(f, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				for _, arg := range call.Args {
+					if lit, ok := arg.(*ast.FuncLit); ok {
+						callbackLits[lit] = true
+					}
+				}
+			}
+			return true
+		})
+
+		ast.Inspect(f, func(n ast.Node) bool {
+			lit, ok := n.(*ast.FuncLit)
+			if !ok || callbackLits[lit] {
+				return true
+			}
+			if tv, ok := info.Types[lit]; ok {
+				if sig, ok := tv.Type.(*types.Signature); ok {
+					checkSignaturePrimitives(t, fset, relPkg, "closure", sig, lit.Pos())
+				}
+			}
+			return true
+		})
+
 		for _, decl := range f.Decls {
 			switch d := decl.(type) {
 			case *ast.FuncDecl:
 				fnName := d.Name.Name
-				isBoundary := isBoundaryParserName(fnName)
 				if d.Type.Params != nil {
 					for _, field := range d.Type.Params.List {
 						for _, id := range field.Names {
-							if isBoundary && strings.HasPrefix(id.Name, "raw") {
-								continue
-							}
 							if obj := info.Defs[id]; obj != nil {
 								checkSemanticIdentifierType(t, fset, relPkg, "func "+fnName+" param "+id.Name, id.Name, obj.Type(), id.Pos())
 							}
@@ -1862,6 +1934,9 @@ func checkDynamicPrimitiveObsession(t errorReporter, fset *token.FileSet, relPkg
 						continue
 					}
 					for _, field := range st.Fields.List {
+						if field.Tag != nil && reflect.StructTag(strings.Trim(field.Tag.Value, "`")).Get("json") != "" {
+							continue
+						}
 						for _, id := range field.Names {
 							if obj := info.Defs[id]; obj != nil {
 								checkSemanticIdentifierType(t, fset, relPkg, "struct "+ts.Name.Name+" field "+id.Name, id.Name, obj.Type(), id.Pos())
@@ -1982,34 +2057,37 @@ func matchesRefinedOrWrapped(typ types.Type, expectedPred string) bool {
 	return false
 }
 
-func isBoundaryParserName(name string) bool {
-	return strings.HasPrefix(name, "Resolve") || strings.HasPrefix(name, "Parse") || strings.HasPrefix(name, "TryParse")
-}
-
-func checkExportedSignaturePrimitives(t errorReporter, fset *token.FileSet, relPkg, qualName, shortName string, sig *types.Signature) {
-	returnsRefined := sig.Results().Len() > 0 && (isAnyRefinedType(sig.Results().At(0).Type()) || isSliceOfAnyRefinedType(sig.Results().At(0).Type()))
-	allowRawParam := isBoundaryParserName(shortName) && returnsRefined
-
+func checkSignaturePrimitives(t errorReporter, fset *token.FileSet, relPkg, qualName string, sig *types.Signature, fallbackPos token.Pos) {
 	for i := 0; i < sig.Params().Len(); i++ {
 		p := sig.Params().At(i)
-		if allowRawParam && strings.HasPrefix(p.Name(), "raw") {
-			continue
+		pos := p.Pos()
+		if !pos.IsValid() {
+			pos = fallbackPos
 		}
 		if containsBarePrimitive(p.Type()) {
-			t.Errorf("%s (%s): exported %s parameter %q has bare primitive type %s; must accept a domain refinement type (or be a Resolve*/Parse* boundary parser with a raw* parameter returning a Refined type)",
-				posStr(fset, p.Pos()), relPkg, qualName, p.Name(), p.Type().String())
+			t.Errorf("%s (%s): %s parameter %q has bare primitive or unvalidated type %s; must accept a domain refinement type or structured domain type",
+				posStr(fset, pos), relPkg, qualName, p.Name(), p.Type().String())
 		}
 	}
 	for i := 0; i < sig.Results().Len(); i++ {
 		res := sig.Results().At(i)
+		pos := res.Pos()
+		if !pos.IsValid() {
+			pos = fallbackPos
+		}
 		if containsBarePrimitive(res.Type()) {
-			t.Errorf("%s (%s): exported %s result %d has bare primitive type %s; must return a domain refinement type",
-				posStr(fset, res.Pos()), relPkg, qualName, i, res.Type().String())
+			t.Errorf("%s (%s): %s result %d has bare primitive or unvalidated type %s; must return a domain refinement type or structured domain type",
+				posStr(fset, pos), relPkg, qualName, i, res.Type().String())
 		}
 	}
 }
 
 func checkSemanticIdentifierType(t errorReporter, fset *token.FileSet, relPkg, contextDesc, identName string, typ types.Type, pos token.Pos) {
+	if !isAnyRefinedType(typ) && !isSliceOfAnyRefinedType(typ) {
+		if _, isStruct := typ.Underlying().(*types.Struct); isStruct {
+			return
+		}
+	}
 	expectedPred := semanticPredicateForIdentifier(identName)
 	if expectedPred == "" {
 		return
@@ -2032,6 +2110,9 @@ func semanticPredicateForIdentifier(ident string) string {
 	case "pid", "pids":
 		return "ProcessIDPred"
 	case "name", "names":
+		if len(tokens) >= 2 && tokens[len(tokens)-2] == "unit" {
+			return "UnitNamePred"
+		}
 		return "GuestNamePred"
 	case "id", "ids":
 		return "InstanceIDPred"
@@ -2069,22 +2150,48 @@ func containsBarePrimitive(typ types.Type) bool {
 	}
 	unaliased := types.Unalias(typ)
 	if named, ok := unaliased.(*types.Named); ok {
-		// Named types from stdlib or domain (like time.Duration, context.Context, error) are not bare primitives.
-		_ = named
+		// Unvalidated Phantom[T, Tag] over a primitive is treated transparently as a bare primitive
+		// so that fake casts like NewExecutablePath(p string) ExecutablePath or domain.Text are rejected.
+		if obj := named.Obj(); obj != nil && obj.Pkg() != nil &&
+			obj.Pkg().Path() == modulePrefix+"/internal/types" && obj.Name() == "Phantom" &&
+			named.TypeArgs() != nil && named.TypeArgs().Len() >= 1 {
+			return containsBarePrimitive(named.TypeArgs().At(0))
+		}
 		return false
 	}
 	switch u := unaliased.(type) {
 	case *types.Basic:
 		// bool is an algebraic two-valued sum (2 = 1 + 1); string and numeric primitives are bare primitives.
 		return u.Kind() != types.Bool && u.Kind() != types.Invalid
+	case *types.Interface:
+		// Ban 'any' / 'interface{}' (empty interface) as an untyped escape hatch.
+		return u.NumMethods() == 0
 	case *types.Slice:
+		if basic, ok := types.Unalias(u.Elem()).(*types.Basic); ok && basic.Kind() == types.Byte {
+			return false
+		}
 		return containsBarePrimitive(u.Elem())
 	case *types.Array:
+		if basic, ok := types.Unalias(u.Elem()).(*types.Basic); ok && basic.Kind() == types.Byte {
+			return false
+		}
 		return containsBarePrimitive(u.Elem())
 	case *types.Pointer:
 		return containsBarePrimitive(u.Elem())
 	case *types.Map:
 		return containsBarePrimitive(u.Key()) || containsBarePrimitive(u.Elem())
+	case *types.Signature:
+		for i := 0; i < u.Params().Len(); i++ {
+			if containsBarePrimitive(u.Params().At(i).Type()) {
+				return true
+			}
+		}
+		for i := 0; i < u.Results().Len(); i++ {
+			if containsBarePrimitive(u.Results().At(i).Type()) {
+				return true
+			}
+		}
+		return false
 	}
 	return false
 }
